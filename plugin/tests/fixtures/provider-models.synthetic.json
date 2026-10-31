@@ -1,0 +1,298 @@
+{
+  "availability_verified": false,
+  "capabilities_are_not_task_budget": true,
+  "models": [
+    {
+      "api": "openai-completions",
+      "compat": {
+        "maxTokensField": "max_tokens",
+        "requiresReasoningContentOnAssistantMessages": true,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "supportsStore": false,
+        "thinkingFormat": "openai"
+      },
+      "contextWindow": 1000000,
+      "id": "glm-5.3-flash",
+      "input": [
+        "text"
+      ],
+      "maxTokens": 16384,
+      "name": "glm-5.3-flash",
+      "reasoning": true,
+      "thinkingLevelMap": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": null,
+        "minimal": null,
+        "off": null,
+        "xhigh": null
+      }
+    },
+    {
+      "api": "openai-completions",
+      "compat": {
+        "maxTokensField": "max_tokens",
+        "requiresReasoningContentOnAssistantMessages": true,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "supportsStore": false,
+        "thinkingFormat": "openai"
+      },
+      "contextWindow": 1000000,
+      "id": "glm-5.3-flash-auto",
+      "input": [
+        "text"
+      ],
+      "maxTokens": 16384,
+      "name": "glm-5.3-flash-auto",
+      "reasoning": true,
+      "thinkingLevelMap": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": null,
+        "minimal": null,
+        "off": null,
+        "xhigh": null
+      }
+    },
+    {
+      "api": "openai-completions",
+      "compat": {
+        "maxTokensField": "max_tokens",
+        "requiresReasoningContentOnAssistantMessages": true,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "supportsStore": false,
+        "thinkingFormat": "openai"
+      },
+      "contextWindow": 1000000,
+      "id": "glm-5.3-flashx",
+      "input": [
+        "text"
+      ],
+      "maxTokens": 131072,
+      "name": "glm-5.3-flashx",
+      "reasoning": true,
+      "thinkingLevelMap": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": null,
+        "minimal": null,
+        "off": null,
+        "xhigh": null
+      }
+    },
+    {
+      "api": "openai-completions",
+      "compat": {
+        "maxTokensField": "max_tokens",
+        "requiresReasoningContentOnAssistantMessages": true,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "supportsStore": false,
+        "thinkingFormat": "openai"
+      },
+      "contextWindow": 1000000,
+      "id": "glm-5.3",
+      "input": [
+        "text"
+      ],
+      "maxTokens": 131072,
+      "name": "glm-5.3",
+      "reasoning": true,
+      "thinkingLevelMap": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": null,
+        "minimal": null,
+        "off": null,
+        "xhigh": null
+      }
+    },
+    {
+      "api": "openai-completions",
+      "compat": {
+        "maxTokensField": "max_tokens",
+        "requiresReasoningContentOnAssistantMessages": true,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "supportsStore": false,
+        "thinkingFormat": "openai"
+      },
+      "contextWindow": 1000000,
+      "id": "deepseek-v4.1-flash",
+      "input": [
+        "text"
+      ],
+      "maxTokens": 16384,
+      "name": "deepseek-v4.1-flash",
+      "reasoning": true,
+      "thinkingLevelMap": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": null,
+        "minimal": null,
+        "off": "none",
+        "xhigh": null
+      }
+    },
+    {
+      "api": "openai-completions",
+      "compat": {
+        "maxTokensField": "max_tokens",
+        "requiresReasoningContentOnAssistantMessages": true,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "supportsStore": false,
+        "thinkingFormat": "openai"
+      },
+      "contextWindow": 1000000,
+      "id": "deepseek-v4.1-flash-auto",
+      "input": [
+        "text"
+      ],
+      "maxTokens": 16384,
+      "name": "deepseek-v4.1-flash-auto",
+      "reasoning": true,
+      "thinkingLevelMap": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": null,
+        "minimal": null,
+        "off": "none",
+        "xhigh": null
+      }
+    },
+    {
+      "api": "openai-completions",
+      "compat": {
+        "maxTokensField": "max_tokens",
+        "requiresReasoningContentOnAssistantMessages": true,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "supportsStore": false,
+        "thinkingFormat": "openai"
+      },
+      "contextWindow": 1048576,
+      "id": "deepseek/deepseek-v4-flash",
+      "input": [
+        "text"
+      ],
+      "maxTokens": 943718,
+      "name": "deepseek/deepseek-v4-flash",
+      "reasoning": true,
+      "thinkingLevelMap": {
+        "high": "high",
+        "low": null,
+        "max": null,
+        "medium": null,
+        "minimal": null,
+        "off": "none",
+        "xhigh": "xhigh"
+      }
+    },
+    {
+      "api": "openai-completions",
+      "compat": {
+        "maxTokensField": "max_tokens",
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "supportsStore": false,
+        "thinkingFormat": "openai"
+      },
+      "contextWindow": 272000,
+      "id": "gpt-6-luna",
+      "input": [
+        "text"
+      ],
+      "maxTokens": 128000,
+      "name": "gpt-6-luna",
+      "reasoning": true,
+      "thinkingLevelMap": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": "medium",
+        "minimal": null,
+        "off": "none",
+        "xhigh": "xhigh"
+      }
+    },
+    {
+      "api": "openai-completions",
+      "compat": {
+        "maxTokensField": "max_tokens",
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "supportsStore": false,
+        "thinkingFormat": "openai"
+      },
+      "contextWindow": 272000,
+      "id": "gpt-6.1-sol",
+      "input": [
+        "text"
+      ],
+      "maxTokens": 128000,
+      "name": "gpt-6.1-sol",
+      "reasoning": true,
+      "thinkingLevelMap": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": "medium",
+        "minimal": null,
+        "off": null,
+        "xhigh": "xhigh"
+      }
+    },
+    {
+      "api": "openai-completions",
+      "compat": {
+        "maxTokensField": "max_tokens",
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "supportsStore": false,
+        "thinkingFormat": "openai"
+      },
+      "contextWindow": 500000,
+      "id": "gpt-6.1-terra",
+      "input": [
+        "text"
+      ],
+      "maxTokens": 128000,
+      "name": "gpt-6.1-terra",
+      "reasoning": true,
+      "thinkingLevelMap": {
+        "high": "high",
+        "low": "low",
+        "max": "max",
+        "medium": "medium",
+        "minimal": null,
+        "off": null,
+        "xhigh": "xhigh"
+      }
+    }
+  ],
+  "projected_out_fields": [
+    "clampOutputToModelMax",
+    "replayReasoningContent",
+    "requiresReasoningContentForAllAssistantTurns",
+    "requiresReasoningContentForToolCalls",
+    "supportsReasoningParams",
+    "thinking"
+  ],
+  "schema_version": 1,
+  "source": {
+    "commit": "0000000000000000000000000000000000000000",
+    "files_sha256": {
+      "fixture": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  }
+}

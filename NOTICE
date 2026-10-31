@@ -1,0 +1,12 @@
+nomad-driver-lima and nomad-workers
+Copyright 2026 shady2k
+
+Original project code is licensed under the Apache License, Version 2.0.
+
+Third-party components retain their own copyright notices and license terms.
+The Apache-2.0 project license does not replace or expand the rights granted by
+those licenses. In particular, the compiled driver uses Nomad components with
+BUSL-1.1 and MPL-2.0 source scopes.
+
+See THIRD_PARTY.md and the release's third-party-notices archive for exact
+versions, original license texts, and corresponding dependency source locations.
