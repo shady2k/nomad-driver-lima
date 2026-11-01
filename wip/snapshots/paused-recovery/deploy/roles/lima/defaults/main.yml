@@ -1,0 +1,13 @@
+---
+# Inventory and private vars must stay outside this repository.
+lima_action: preflight
+lima_expected_version: "2.2.1"
+lima_memory_overhead_mib: 128
+lima_disk_free_floor_mib: 2048
+lima_nomad_binary: /usr/local/bin/nomad
+# Explicitly provide all paths/identities, artifact SHA256, and release ID.
+# No service handlers, account provisioning, network changes or capacity overrides.
+lima_empty_node_confirmed: false
+lima_retire_boxlite: false
+lima_retire_service: boxlite-rest.service
+lima_retire_paths: []

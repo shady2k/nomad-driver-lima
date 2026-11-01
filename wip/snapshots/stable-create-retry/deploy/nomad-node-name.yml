@@ -1,0 +1,19 @@
+---
+- name: Reconcile only the neutral Linux node display name
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Apply exact name projection with empty-node guard and backup
+      ansible.builtin.command:
+        argv:
+          - /opt/homebrew/bin/python3
+          - '{{ playbook_dir }}/nomad-node-name.py'
+          - '{{ node_name_spec }}'
+          - "{{ 'check' if ansible_check_mode else 'apply' }}"
+      check_mode: false
+      register: node_name_result
+      changed_when: node_name_result.rc == 0 and node_name_result.stdout | length > 0 and (node_name_result.stdout | from_json).changed
+    - name: Report nonsecret naming readback
+      ansible.builtin.debug:
+        msg: '{{ node_name_result.stdout | from_json }}'

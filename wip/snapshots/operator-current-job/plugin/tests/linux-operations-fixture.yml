@@ -1,0 +1,23 @@
+---
+- name: Test only own temporary operation processes with real Linux proc identities
+  hosts: lima_canary
+  gather_facts: false
+  tasks:
+    - ansible.builtin.tempfile:
+        state: directory
+        prefix: nomad-operations-fixture-
+      register: operation_fixture
+    - block:
+        - ansible.builtin.unarchive:
+            src: '{{ operations_fixture_archive }}'
+            dest: '{{ operation_fixture.path }}'
+        - ansible.builtin.command:
+            argv: [/usr/bin/python3, -m, unittest, discover, -s, '{{ operation_fixture.path }}/plugin/tests', -p, test_operations.py]
+          changed_when: false
+          register: operations_fixture_result
+        - ansible.builtin.debug:
+            msg: '{{ operations_fixture_result.stderr_lines }}'
+      always:
+        - ansible.builtin.file:
+            path: '{{ operation_fixture.path }}'
+            state: absent

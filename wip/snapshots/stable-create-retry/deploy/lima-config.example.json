@@ -1,0 +1,11 @@
+{
+  "runtime_user": "REPLACE_EXISTING_NONROOT_USER",
+  "limactl": "/ABSOLUTE/EXISTING/limactl",
+  "lima_home": "/ABSOLUTE/PRIVATE/lima-home",
+  "state_dir": "/ABSOLUTE/PRIVATE/driver-state",
+  "template_file": "/ABSOLUTE/REVIEWED/template.yaml",
+  "template_sha256": "REPLACE_64_HEX_AFTER_TEMPLATE_REVIEW",
+  "expected_version": "2.2.1",
+  "memory_overhead_mib": 128,
+  "disk_free_floor_mib": 2048
+}

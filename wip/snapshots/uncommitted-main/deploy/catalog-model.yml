@@ -1,0 +1,30 @@
+---
+- name: Run explicitly selected isolated real-model acceptance stage
+  hosts: lima_canary
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Require bounded isolated stage
+      ansible.builtin.assert:
+        that:
+          - dev_root is match('^/var/lib/nomad-lima/catalog-accept-[a-z0-9-]+$')
+          - model_phase in ['prepare', 'turn', 'finish']
+    - name: Stage reviewed model coordinator and one-shot official daemon bootstrap
+      ansible.builtin.copy:
+        src: '{{ item }}'
+        dest: '{{ dev_root }}/{{ item }}'
+        owner: root
+        group: root
+        mode: '0444'
+      loop: [catalog-model.py, prime-daemon-bootstrap.py]
+    - name: Execute requested bounded stage without automatic prompt replay
+      ansible.builtin.shell: >-
+        /usr/bin/python3 {{ (dev_root + '/catalog-model.py') | quote }} {{ model_phase | quote }}
+        --root {{ dev_root | quote }} --nomad {{ lima_nomad_binary | quote }} --port {{ dev_http_port | int }}
+        > {{ (dev_root + '/model-' + model_phase + '-operation.log') | quote }} 2>&1
+      async: 600
+      poll: 0
+      register: model_operation
+    - name: Report model operation handle
+      ansible.builtin.debug:
+        var: model_operation.ansible_job_id

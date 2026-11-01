@@ -1,0 +1,22 @@
+---
+- name: Run one native Vault and Prime acceptance without a model turn
+  hosts: nomad_operator
+  gather_facts: false
+  tasks:
+    - name: Require explicit no-model acceptance authorization
+      ansible.builtin.assert:
+        that:
+          - vault_no_model_authorized | default(false) | bool
+          - vault_no_model_log is match('^/root/agent-v2-accept/[a-z0-9-]+\.log$')
+    - name: Run the one-shot guarded coordinator with durable private progress
+      ansible.builtin.shell: >-
+        umask 077;
+        python3 /root/agent-v2-accept/vault-no-model.py --root /root/agent-v2-accept
+        {{ '--resume-ready' if vault_no_model_resume_ready | default(false) | bool else '' }}
+        > {{ vault_no_model_log | quote }} 2>&1
+      async: 600
+      poll: 0
+      register: vault_no_model_operation
+    - name: Expose asynchronous handle without credentials
+      ansible.builtin.debug:
+        var: vault_no_model_operation.ansible_job_id

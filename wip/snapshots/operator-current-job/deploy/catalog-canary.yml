@@ -1,0 +1,29 @@
+---
+- name: Run one isolated synthetic catalog integration cycle
+  hosts: lima_canary
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Require isolated loopback integration target
+      ansible.builtin.assert:
+        that:
+          - dev_root is match('^/var/lib/nomad-lima/catalog-accept-[a-z0-9-]+$')
+          - dev_http_port | int > 1024
+    - name: Stage reviewed no-model canary harness
+      ansible.builtin.copy:
+        src: catalog-canary.py
+        dest: '{{ dev_root }}/catalog-canary.py'
+        owner: root
+        group: root
+        mode: '0444'
+    - name: Run bounded native integration and retain logs/results
+      ansible.builtin.shell: >-
+        /usr/bin/python3 {{ (dev_root + '/catalog-canary.py') | quote }}
+        --root {{ dev_root | quote }} --nomad {{ lima_nomad_binary | quote }} --port {{ dev_http_port | int }}
+        > {{ (dev_root + '/canary-operation.log') | quote }} 2>&1
+      async: 900
+      poll: 0
+      register: dev_canary_async
+    - name: Report isolated canary operation handle
+      ansible.builtin.debug:
+        var: dev_canary_async.ansible_job_id

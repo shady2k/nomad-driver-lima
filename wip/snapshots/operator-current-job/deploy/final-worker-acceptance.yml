@@ -1,0 +1,17 @@
+---
+- name: Stage one approved native caller acceptance without automatic execution
+  hosts: nomad_caller
+  gather_facts: false
+  become: true
+  become_user: "{{ worker_acceptance_user }}"
+  tasks:
+    - name: Create private acceptance operation directory
+      ansible.builtin.file:
+        path: "{{ worker_acceptance_root }}"
+        state: directory
+        mode: '0700'
+    - name: Stage one-shot phased acceptance with prompt replay guards
+      ansible.builtin.copy:
+        src: final-worker-acceptance.py
+        dest: "{{ worker_acceptance_root }}/run.py"
+        mode: '0500'

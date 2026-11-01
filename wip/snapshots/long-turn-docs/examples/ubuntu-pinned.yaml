@@ -1,0 +1,18 @@
+# Upstream cloud images; no project repository, credentials, or host mounts.
+minimumLimaVersion: 2.1.0
+images:
+- location: https://cloud-images.ubuntu.com/minimal/releases/noble/release-20261001/ubuntu-24.04-minimal-cloudimg-amd64.img
+  arch: x86_64
+  digest: sha256:a8eb6570f87a941f3de2e000c046b9367f8ab1423756a94830d454fae8ad80ff
+- location: https://cloud-images.ubuntu.com/minimal/releases/noble/release-20261001/ubuntu-24.04-minimal-cloudimg-arm64.img
+  arch: aarch64
+  digest: sha256:fbf6b15c50c474dc6dee5b3c74da212bb687a2625e877227828e6492d88dc151
+mounts: []
+plain: true
+containerd:
+  system: false
+  user: false
+ssh:
+  forwardAgent: false
+  loadDotSSHPubKeys: false
+propagateProxyEnv: false

@@ -1,0 +1,19 @@
+---
+- name: Activate Linux client Vault integration with allocation and native process guards
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Reconcile exact approved Linux client and preserve the test VM disk
+      ansible.builtin.command:
+        argv:
+          - '{{ nomad_admin_python }}'
+          - '{{ playbook_dir }}/nomad-vault-client.py'
+          - '{{ nomad_client_spec }}'
+          - "{{ 'check' if ansible_check_mode else 'apply' }}"
+      check_mode: false
+      register: client_vault_result
+      changed_when: client_vault_result.rc == 0 and client_vault_result.stdout | length > 0 and (client_vault_result.stdout | from_json).changed
+    - name: Report client readback
+      ansible.builtin.debug:
+        msg: '{{ client_vault_result.stdout | from_json }}'

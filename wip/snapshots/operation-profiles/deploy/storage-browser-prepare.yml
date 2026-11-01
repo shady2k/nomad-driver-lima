@@ -1,0 +1,17 @@
+---
+- name: Render a private read-only storage browser without publishing it
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Validate external render parameters
+      ansible.builtin.assert:
+        that:
+          - storage_namespace | length > 0
+          - storage_browser_host is match('^[a-z0-9.-]+$')
+          - storage_browser_manifest is match('^/')
+    - name: Render manifest for review only
+      ansible.builtin.template:
+        src: templates/storage-browser.yaml.j2
+        dest: '{{ storage_browser_manifest }}'
+        mode: '0600'

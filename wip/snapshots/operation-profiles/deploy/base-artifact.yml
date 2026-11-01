@@ -1,0 +1,47 @@
+---
+- name: Run a bounded explicitly selected portable-image lifecycle stage
+  hosts: "{{ base_hosts | default('lima_canary') }}"
+  gather_facts: false
+  become: "{{ base_become | default(true) }}"
+  tasks:
+    - name: Restrict lifecycle command to the isolated clean builder
+      ansible.builtin.assert:
+        that:
+          - base_phase in ['seal', 'export', 'boot', 'check', 'catalog', 'stop']
+          - base_builder_name is match('^agent-base-build-[a-z0-9-]+$')
+          - base_lima_home != lima_home
+    - name: Recheck Mac resources before each sequential acceptance boot
+      ansible.builtin.command:
+        argv: ['{{ base_host_python | default("/usr/bin/python3") }}', -c, '{{ lookup("ansible.builtin.file", playbook_dir + "/base-mac-preflight.py") }}', --path, '{{ base_runtime_home }}', --disk-gib, '{{ base_disk_gib | default(8) | string }}', --memory-mib, '{{ base_acceptance_memory_mib | default(2048) | string }}']
+      changed_when: false
+      when: base_vm_type | default("qemu") == "vz" and base_phase == "boot"
+    - name: Stage reviewed lifecycle helper
+      ansible.builtin.copy:
+        src: '{{ item }}'
+        dest: '{{ base_build_root }}/{{ item }}'
+        owner: '{{ lima_runtime_user }}'
+        group: '{{ base_runtime_group | default(lima_runtime_user) }}'
+        mode: '0444'
+      loop: [base-artifact.py, base-native-output-probe.py, base_platform.py]
+    - name: Execute only the requested gate stage with durable progress log
+      ansible.builtin.shell: >-
+        {{ base_host_python | default("/usr/bin/python3") | quote }} {{ (base_build_root + '/base-artifact.py') | quote }} {{ base_phase | quote }}
+        --home {{ base_lima_home | quote }} --root {{ base_build_root | quote }}
+        --builder {{ base_builder_name | quote }} --limactl {{ lima_limactl | quote }}
+        --user {{ lima_runtime_user | quote }}
+        --architecture {{ base_architecture | default("amd64") | quote }}
+        --vm-type {{ base_vm_type | default("qemu") | quote }}
+        --disk-gib {{ base_disk_gib | default(8) | int }}
+        --acceptance-cpus {{ base_acceptance_cpus | default(2) | int }}
+        --acceptance-memory-mib {{ base_acceptance_memory_mib | default(4096) | int }}
+        {{ ("--boot-index " + (base_boot_index | string)) if base_boot_index is defined else "" }}
+        {{ ("--model-catalog-proof " + (base_model_catalog_proof | quote)) if base_model_catalog_proof is defined else "" }}
+        --template-id {{ base_template_id | default("agent-base") | quote }}
+        --version {{ base_version | default("v1-prime0.10.1-acpx0.21.0-node24.22.1") | quote }}
+        > {{ (base_build_root + '/' + base_phase + '-operation.log') | quote }} 2>&1
+      async: 2400
+      poll: 0
+      register: base_stage_operation
+    - name: Expose nonsecret asynchronous operation identity
+      ansible.builtin.debug:
+        var: base_stage_operation.ansible_job_id

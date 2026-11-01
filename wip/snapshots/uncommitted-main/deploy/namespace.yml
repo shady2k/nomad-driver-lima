@@ -1,0 +1,28 @@
+---
+- name: Reconcile approved neutral agent namespace through existing operator access
+  hosts: nomad_operator
+  gather_facts: false
+  tasks:
+    - name: Require exact approved namespace target
+      ansible.builtin.assert:
+        that:
+          - lima_namespace_name == 'agent-workers'
+          - lima_namespace_source != lima_namespace_name
+    - name: Reconcile namespace without changing any ACL policy or token
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - "{{ lookup('ansible.builtin.file', playbook_dir + '/namespace-state.py') }}"
+          - '{{ lima_operator_api }}'
+          - '{{ lima_operator_token_file }}'
+          - '{{ lima_namespace_source }}'
+          - '{{ lima_namespace_name }}'
+          - '{{ lima_namespace_backup_dir }}'
+          - "{{ 'check' if ansible_check_mode else 'apply' }}"
+      check_mode: false
+      register: lima_namespace_result
+      changed_when: (lima_namespace_result.stdout | from_json).changed
+    - name: Report nonsecret namespace readback
+      ansible.builtin.debug:
+        msg: '{{ lima_namespace_result.stdout | from_json }}'

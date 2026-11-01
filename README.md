@@ -1,3 +1,11 @@
+# Work-in-progress preservation branch
+
+This branch adds separate **unmerged, untested source snapshots** under
+[wip/](wip/README.md). Use `main` for the selected frozen component snapshots.
+Nothing here is an integrated release or a new deployment.
+
+---
+
 # Nomad Lima driver and nomad-workers
 
 Current source snapshots, published as a prototype. This update preserves the

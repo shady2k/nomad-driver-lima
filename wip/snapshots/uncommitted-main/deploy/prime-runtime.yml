@@ -1,0 +1,32 @@
+---
+- name: Prepare the existing official Prime runtime inside one owned Lima guest
+  hosts: lima_canary
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Require exact owned allocation and guest identity confirmation
+      ansible.builtin.assert:
+        that:
+          - lima_owned_allocation_confirmed | bool
+          - lima_prime_instance is match('^nomad-[a-f0-9]{24}$')
+          - lima_prime_runtime_script is defined
+          - lima_prime_legacy_bootstrap is defined
+    - name: Install only the foreground backend transport helper
+      ansible.builtin.copy:
+        src: prime-existing-flow.py
+        dest: /var/lib/nomad-lima/prime-existing-flow.py
+        owner: root
+        group: root
+        mode: '0700'
+    - name: Install the same pinned official runtime inside the owned guest
+      ansible.builtin.command:
+        argv: [runuser, -u, '{{ lima_runtime_user }}', '--', env, 'LIMA_HOME={{ lima_home }}', '{{ lima_limactl }}', shell, '{{ lima_prime_instance }}', sudo, -n, /bin/bash, -o, pipefail, -c, '/bin/sh -s 2>&1 | tee /tmp/prime-runtime-install.log']
+        stdin: "{{ lookup('ansible.builtin.file', lima_prime_runtime_script) }}"
+      register: lima_prime_provision
+      changed_when: "'RUNTIME_ALREADY_READY' not in lima_prime_provision.stdout"
+      when: not ansible_check_mode
+    - name: Place the unchanged existing guest bootstrap and readiness markers
+      ansible.builtin.command:
+        argv: [runuser, -u, '{{ lima_runtime_user }}', '--', env, 'LIMA_HOME={{ lima_home }}', '{{ lima_limactl }}', shell, '{{ lima_prime_instance }}', sudo, -n, /usr/bin/python3, -c, 'import sys,pathlib; p=pathlib.Path("/opt/worker/assets/bootstrap.py"); p.write_text(sys.stdin.read()); p.chmod(0o644); pathlib.Path("/opt/worker/.runtime-v1").touch(); pathlib.Path("/opt/worker/.kernel-defaults-v1").touch()']
+        stdin: "{{ lookup('ansible.builtin.file', lima_prime_legacy_bootstrap) }}"
+      when: not ansible_check_mode

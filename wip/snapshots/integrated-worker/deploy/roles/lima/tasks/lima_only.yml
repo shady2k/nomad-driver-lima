@@ -1,0 +1,87 @@
+---
+- name: Read existing full client configuration privately
+  ansible.builtin.slurp:
+    src: '{{ lima_client_config_path }}'
+  register: lima_current_client
+  no_log: true
+
+- name: Compute complete desired JSON using the review planner projection
+  ansible.builtin.set_fact:
+    lima_client_projection: "{{ lima_current_client.content | b64decode | from_json | lima_only_transition(lima_driver_config, lima_disabled_plugin_dir) }}"
+  vars:
+    lima_driver_config: '{{ lima_legacy_driver_config | combine(lima_catalog_driver_config) | combine(lima_vault_driver_config) }}'
+    lima_vault_driver_config: "{{ {'vault_address': lima_vault_address} if lima_vault_address | default('') | length > 0 else {} }}"
+    lima_catalog_driver_config: "{{ {'catalog_file': lima_catalog_dest, 'catalog_sha256': lima_catalog_sha256, 'max_total_disk_gib': lima_max_total_disk_gib | int} if lima_catalog_src | default('') | length > 0 else {} }}"
+    lima_legacy_driver_config:
+      runtime_user: '{{ lima_runtime_user }}'
+      limactl: '{{ lima_limactl }}'
+      lima_home: '{{ lima_home }}'
+      state_dir: '{{ lima_state_dir }}'
+      template_file: '{{ lima_template_dest }}'
+      template_sha256: '{{ lima_template_sha256 }}'
+      expected_version: '{{ lima_expected_version }}'
+      memory_overhead_mib: '{{ lima_memory_overhead_mib | int }}'
+      disk_free_floor_mib: '{{ lima_disk_free_floor_mib | int }}'
+  no_log: true
+
+- name: Write private full config candidate
+  ansible.builtin.copy:
+    content: "{{ lima_client_projection.config | to_json(indent=2, sort_keys=False) }}\n"
+    dest: '{{ lima_candidate_config_path }}'
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+
+- name: Validate candidate before activation into configured path
+  ansible.builtin.command:
+    argv: ['{{ lima_nomad_binary }}', config, validate, '{{ lima_candidate_config_path }}']
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Reconcile complete client JSON with rollback backup
+  ansible.builtin.copy:
+    content: "{{ lima_client_projection.config | to_json(indent=2, sort_keys=False) }}\n"
+    dest: '{{ lima_client_config_path }}'
+    owner: root
+    group: root
+    mode: '0600'
+    backup: true
+  register: lima_client_copy
+  no_log: true
+
+- name: Ensure private disabled-plugin directory outside discovery
+  ansible.builtin.file:
+    path: '{{ lima_disabled_plugin_dir }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Inspect old driver discovery path
+  ansible.builtin.stat:
+    path: '{{ lima_plugin_dir }}/nomad-driver-boxlite'
+    checksum_algorithm: sha256
+  register: lima_old_plugin
+
+- name: Inspect old driver archival destination
+  ansible.builtin.stat:
+    path: '{{ lima_disabled_plugin_dir }}/nomad-driver-boxlite'
+    checksum_algorithm: sha256
+  register: lima_old_disabled
+
+- name: Require exact old binary and no overwrite before moving discovery entry
+  ansible.builtin.assert:
+    that:
+      - not lima_old_plugin.stat.exists or lima_old_plugin.stat.checksum == lima_old_binary_sha256
+      - not lima_old_plugin.stat.exists or not lima_old_disabled.stat.exists
+      - not lima_old_disabled.stat.exists or lima_old_disabled.stat.checksum == lima_old_binary_sha256
+
+- name: Move only old discovery executable to private recoverable archive
+  ansible.builtin.command:
+    argv: [/bin/mv, '--', '{{ lima_plugin_dir }}/nomad-driver-boxlite', '{{ lima_disabled_plugin_dir }}/nomad-driver-boxlite']
+  when: lima_old_plugin.stat.exists
+
+- name: Retire dedicated BoxLite service and binaries when explicitly selected
+  ansible.builtin.include_tasks: retire_boxlite.yml
+  when: lima_retire_boxlite | bool

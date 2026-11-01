@@ -1,0 +1,84 @@
+---
+- name: Prepare isolated catalog acceptance without production changes
+  hosts: lima_canary
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Require explicit isolated paths and accepted inputs
+      ansible.builtin.assert:
+        that:
+          - dev_root is match('^/var/lib/nomad-lima/catalog-accept-[a-z0-9-]+$')
+          - dev_lima_home != lima_home
+          - dev_catalog_sha256 is match('^[a-f0-9]{64}$')
+          - dev_http_port | int > 1024
+          - dev_max_total_disk_gib | int >= 20
+    - name: Create private isolated dev-agent paths
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      loop: ['{{ dev_root }}', '{{ dev_root }}/plugins', '{{ dev_root }}/state', '{{ dev_root }}/data']
+    - name: Create isolated runtime-user home
+      ansible.builtin.file:
+        path: '{{ dev_lima_home }}'
+        state: directory
+        owner: '{{ lima_runtime_user }}'
+        group: '{{ lima_runtime_user }}'
+        mode: '0700'
+    - name: Pin existing accepted local catalog on test host
+      ansible.builtin.copy:
+        src: '{{ base_build_root }}/artifact/catalog.json'
+        dest: '{{ dev_root }}/catalog.json'
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0644'
+    - name: Verify isolated catalog checksum
+      ansible.builtin.stat:
+        path: '{{ dev_root }}/catalog.json'
+        checksum_algorithm: sha256
+      register: dev_catalog_stat
+    - name: Refuse artifact drift before dev-agent launch
+      ansible.builtin.assert:
+        that: dev_catalog_stat.stat.checksum == dev_catalog_sha256
+    - name: Stage loopback-only dev-agent configuration (not launch)
+      ansible.builtin.copy:
+        content: '{{ dev_agent_config | to_nice_json }}'
+        dest: '{{ dev_root }}/agent.json'
+        owner: root
+        group: root
+        mode: '0600'
+      vars:
+        dev_agent_config:
+          name: agent-catalog-accept
+          data_dir: '{{ dev_root }}/data'
+          bind_addr: 127.0.0.1
+          plugin_dir: '{{ dev_root }}/plugins'
+          ports: {http: '{{ dev_http_port | int }}', rpc: '{{ dev_rpc_port | int }}', serf: '{{ dev_serf_port | int }}'}
+          advertise: {http: '127.0.0.1:{{ dev_http_port }}', rpc: '127.0.0.1:{{ dev_rpc_port }}', serf: '127.0.0.1:{{ dev_serf_port }}'}
+          client:
+            enabled: true
+            network_interface: lo
+            options: {driver.allowlist: lima}
+          plugin:
+            - nomad-driver-lima:
+                - config:
+                    - runtime_user: '{{ lima_runtime_user }}'
+                      limactl: '{{ lima_limactl }}'
+                      lima_home: '{{ dev_lima_home }}'
+                      state_dir: '{{ dev_root }}/state'
+                      catalog_file: '{{ dev_root }}/catalog.json'
+                      catalog_sha256: '{{ dev_catalog_sha256 }}'
+                      expected_version: '2.2.1'
+                      memory_overhead_mib: 128
+                      disk_free_floor_mib: 10240
+                      max_vms: 1
+                      max_total_vcpus: 2
+                      max_total_memory_mib: 4096
+                      max_total_disk_gib: '{{ dev_max_total_disk_gib | int }}'
+    - name: Validate official Nomad syntax without starting another agent
+      ansible.builtin.command:
+        argv: ['{{ lima_nomad_binary }}', config, validate, '{{ dev_root }}/agent.json']
+      changed_when: false

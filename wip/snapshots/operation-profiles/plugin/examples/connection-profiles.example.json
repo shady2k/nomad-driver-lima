@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "nodes": {
+    "REPLACE_WITH_ACTUAL_NODE_UUID": {
+      "id": "existing-human-shell",
+      "ssh_alias": "existing-worker-alias",
+      "shell_argv": ["limactl", "shell", "{instance}"],
+      "environment_verified": false
+    }
+  }
+}

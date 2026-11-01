@@ -1,0 +1,30 @@
+---
+- name: Stop only this own isolated official Nomad dev-agent
+  hosts: lima_canary
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Require no active isolated allocations and exact process identity before stop
+      ansible.builtin.shell: |
+        /usr/bin/python3 - <<'PY'
+        import json,os,pathlib,signal,time,urllib.request
+        root=pathlib.Path({{ dev_root | to_json }});port={{ dev_http_port | int }}
+        assert str(root).startswith('/var/lib/nomad-lima/catalog-accept-')
+        with urllib.request.urlopen('http://127.0.0.1:'+str(port)+'/v1/allocations',timeout=5) as f:allocs=json.load(f)
+        assert all(a['ClientStatus'] in ('complete','failed','lost') for a in allocs),'isolated workload active; refuse stop'
+        pid=int((root/'agent.pid').read_text());p=pathlib.Path('/proc')/str(pid)
+        args=(p/'cmdline').read_bytes().split(b'\0')
+        assert b'agent' in args and b'-dev' in args and ('-config='+str(root/'agent.json')).encode() in args,'not owned dev-agent'
+        os.kill(pid,signal.SIGINT)
+        deadline=time.monotonic()+20
+        while p.exists() and time.monotonic()<deadline:
+          if (p/'stat').read_text().split()[2]=='Z':break
+          time.sleep(.1)
+        assert not p.exists() or (p/'stat').read_text().split()[2]=='Z','graceful dev-agent stop pending; do not force kill'
+        (root/'agent.pid').rename(root/('agent.stopped-'+str(pid)+'.pid'))
+        print(json.dumps({'stopped_owned_dev_agent_pid':pid,'allocations_preserved':len(allocs)}))
+        PY
+      register: dev_stop
+    - name: Report own dev-agent stop
+      ansible.builtin.debug:
+        var: dev_stop.stdout

@@ -1,0 +1,59 @@
+---
+- name: Permit only approved internal ingress to the private file browser
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Inspect target and source labels and preserve original isolation spec
+      ansible.builtin.command:
+        argv:
+          - "{{ storage_network_python }}"
+          - -c
+          - |
+            import json,pathlib,subprocess
+            k={{ storage_kubectl | to_json }}
+            def get(ns,kind,name):return json.loads(subprocess.check_output([k,'-n',ns,'get',kind,name,'-o','json']))
+            service=get({{ storage_namespace | to_json }},'service','storage-browser');assert service['spec']['selector']=={'app':'seaweedfs'} and service['spec']['ports']==[{'name':'filer','port':8888,'protocol':'TCP','targetPort':8888}]
+            pod=get({{ storage_namespace | to_json }},'pod','seaweedfs-0');assert pod['metadata']['labels']['app']=='seaweedfs'
+            sources=json.loads(subprocess.check_output([k,'-n','traefik','get','pods','-l','app.kubernetes.io/name=traefik','-o','json']));assert any(x['status']['phase']=='Running' for x in sources['items'])
+            isolation=get({{ storage_namespace | to_json }},'networkpolicy','seaweedfs-isolation')['spec'];assert isolation['ingress'][0]['ports']==[{'port':8333,'protocol':'TCP'}]
+            root=pathlib.Path('{{ storage_network_evidence_dir }}');root.mkdir(parents=True,exist_ok=True,mode=0o700);p=root/'isolation-before.json'
+            if p.exists():assert json.loads(p.read_text())==isolation,'Existing isolation drift'
+            else:p.write_text(json.dumps(isolation,indent=2)+'\n');p.chmod(0o600)
+            print(json.dumps({'service_and_labels_verified':True,'original_isolation_preserved':True}))
+      changed_when: false
+    - name: Stage exact additive policy for review and apply
+      ansible.builtin.copy:
+        dest: '{{ storage_network_evidence_dir }}/approved-policy.json'
+        mode: '0600'
+        content: |
+          {
+            "apiVersion":"networking.k8s.io/v1",
+            "kind":"NetworkPolicy",
+            "metadata":{"name":"storage-browser-from-internal-ingress","namespace":{{ storage_namespace | to_json }}},
+            "spec":{
+              "podSelector":{"matchLabels":{"app":"seaweedfs"}},
+              "policyTypes":["Ingress"],
+              "ingress":[{
+                "from":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"traefik"}},"podSelector":{"matchLabels":{"app.kubernetes.io/name":"traefik"}}}],
+                "ports":[{"protocol":"TCP","port":8888}]
+              }]
+            }
+          }
+    - name: Apply only the exact approved additive policy
+      ansible.builtin.command:
+        argv: ['{{ storage_kubectl }}', apply, -f, '{{ storage_network_evidence_dir }}/approved-policy.json']
+      register: storage_network_apply
+      changed_when: "' created' in storage_network_apply.stdout or ' configured' in storage_network_apply.stdout"
+    - name: Verify exact policy readback and unchanged original isolation
+      ansible.builtin.command:
+        argv:
+          - "{{ storage_network_python }}"
+          - -c
+          - |
+            import subprocess,json,pathlib
+            root=pathlib.Path('{{ storage_network_evidence_dir }}');wanted=json.loads((root/'approved-policy.json').read_text())
+            def get(name):return json.loads(subprocess.check_output([{{ storage_kubectl | to_json }},'-n',{{ storage_namespace | to_json }},'get','networkpolicy',name,'-o','json']))
+            actual=get(wanted['metadata']['name']);assert actual['spec']==wanted['spec'];assert get('seaweedfs-isolation')['spec']==json.loads((root/'isolation-before.json').read_text())
+            print(json.dumps({'readback':'PASS','s3_isolation_unchanged':True}))
+      changed_when: false

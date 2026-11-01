@@ -1,0 +1,19 @@
+---
+- name: Reconcile approved stock Nomad server Vault integration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Apply narrow server configuration with actual-binary validation and backup
+      ansible.builtin.command:
+        argv:
+          - '{{ nomad_admin_python }}'
+          - '{{ playbook_dir }}/nomad-vault-server.py'
+          - '{{ nomad_server_spec }}'
+          - "{{ 'check' if ansible_check_mode else 'apply' }}"
+      check_mode: false
+      register: server_vault_result
+      changed_when: server_vault_result.stdout is defined and (server_vault_result.stdout | from_json).changed
+    - name: Report nonsecret server integration state
+      ansible.builtin.debug:
+        msg: '{{ server_vault_result.stdout | from_json }}'

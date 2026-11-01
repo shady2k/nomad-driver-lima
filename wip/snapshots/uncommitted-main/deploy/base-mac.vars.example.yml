@@ -1,0 +1,26 @@
+# External inventory uses lima_macos and ansible_connection=local.
+# Replace paths/user/digests in a private vars file; this example is not runnable.
+base_hosts: lima_macos
+base_become: false
+base_architecture: arm64
+base_vm_type: vz
+base_disk_gib: 8
+base_acceptance_cpus: 2
+base_acceptance_memory_mib: 2048
+base_runtime_home: /Users/OPERATOR
+lima_runtime_user: OPERATOR
+base_runtime_group: staff
+base_host_python: /usr/bin/python3
+lima_limactl: /PATH/TO/official-lima-2.2.1/bin/limactl
+lima_home: /PATH/TO/production-lima-home
+base_lima_home: /Users/OPERATOR/.local/state/agent-base-v4-arm64/lima
+base_build_root: /Users/OPERATOR/.local/state/agent-base-v4-arm64/build
+base_builder_name: agent-base-build-v4-8g-arm64
+base_version: v4-20261031-8g-provider
+base_recipe_source: /PRIVATE/PATH/rendered-2cpu-2gib-8gib.yaml
+base_recipe_sha256: REPLACE_WITH_REVIEWED_RENDER_SHA256
+base_creator: OPERATOR
+base_session_id: REPLACE_WITH_ACTUAL_PREPARATION_SESSION
+base_start_authorized: false
+# Provide base_guest_assets_confirmed, base_guest_assets_source and the exact
+# authoritative base_guest_assets_frozen manifest only after its hash review.

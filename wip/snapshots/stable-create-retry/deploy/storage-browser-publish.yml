@@ -1,0 +1,22 @@
+---
+- import_playbook: storage-browser-prepare.yml
+- name: Publish only the explicitly approved private read-only route
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Require exact approved host and successful owner-only Authentik setup
+      ansible.builtin.assert:
+        that:
+          - storage_browser_publication_approved | default(false) | bool
+          - storage_browser_authentik_verified | default(false) | bool
+          - storage_browser_host == storage_browser_approved_host
+          - not ansible_check_mode
+    - name: Apply reviewed new browser resources without changing existing storage resources
+      ansible.builtin.command:
+        argv: ['{{ storage_kubectl }}', apply, -f, '{{ storage_browser_manifest }}']
+      register: browser_apply
+      changed_when: "' created' in browser_apply.stdout or ' configured' in browser_apply.stdout"
+    - name: Report created resource names
+      ansible.builtin.debug:
+        var: browser_apply.stdout_lines

@@ -1,0 +1,75 @@
+---
+- name: Require the optional private_copy source and checksum together
+  ansible.builtin.assert:
+    that:
+      - (lima_private_copies_src | default('') | length > 0) == (lima_private_copies_sha256 | default('') | length > 0)
+
+- name: Validate and optionally stage the private pinned recovery input file
+  when: lima_private_copies_src | default('') | length > 0
+  block:
+    - name: Require an exact private destination in the existing driver state directory
+      ansible.builtin.assert:
+        that:
+          - lima_private_copies_src is match('^/')
+          - lima_private_copies_dest is match('^/')
+          - lima_private_copies_dest | dirname == lima_state_dir
+          - not (lima_private_copies_dest | lower).endswith('.json')
+          - lima_private_copies_sha256 is match('^[a-f0-9]{64}$')
+    - name: Inspect the controller recovery input without following symlinks
+      ansible.builtin.stat:
+        path: '{{ lima_private_copies_src }}'
+        follow: false
+        checksum_algorithm: sha256
+      delegate_to: localhost
+      become: false
+      register: lima_private_copy_source
+    - name: Require an unchanged private regular recovery input source
+      ansible.builtin.assert:
+        that:
+          - lima_private_copy_source.stat.isreg | default(false)
+          - not lima_private_copy_source.stat.islnk | default(false)
+          - lima_private_copy_source.stat.mode | default('') == '0600'
+          - lima_private_copy_source.stat.checksum | default('') == lima_private_copies_sha256
+    - name: Read the declared recovery input privately on the controller
+      ansible.builtin.slurp:
+        src: '{{ lima_private_copies_src }}'
+      delegate_to: localhost
+      become: false
+      register: lima_private_copy_content
+      no_log: true
+    - name: Inspect the destination without following symlinks
+      ansible.builtin.stat:
+        path: '{{ lima_private_copies_dest }}'
+        follow: false
+      register: lima_private_copy_destination
+    - name: Reject a destination symlink or unexpected ownership
+      ansible.builtin.assert:
+        that:
+          - not lima_private_copy_destination.stat.exists or (lima_private_copy_destination.stat.isreg | default(false) and not lima_private_copy_destination.stat.islnk | default(false) and lima_private_copy_destination.stat.uid == 0 and lima_private_copy_destination.stat.mode == '0600')
+    - name: Install the pinned private JSON atomically with rollback backup
+      ansible.builtin.copy:
+        src: '{{ lima_private_copies_src }}'
+        dest: '{{ lima_private_copies_dest }}'
+        owner: root
+        group: root
+        mode: '0600'
+        backup: true
+      when: lima_action == 'install'
+      no_log: true
+      register: lima_private_copy_copy
+    - name: Read back exact installed bytes and private ownership
+      ansible.builtin.stat:
+        path: '{{ lima_private_copies_dest }}'
+        follow: false
+        checksum_algorithm: sha256
+      when: lima_action == 'install' and not ansible_check_mode
+      register: lima_private_copy_installed
+    - name: Require exact installed recovery input before emitting the driver configuration
+      ansible.builtin.assert:
+        that:
+          - lima_private_copy_installed.stat.isreg
+          - not lima_private_copy_installed.stat.islnk
+          - lima_private_copy_installed.stat.uid == 0
+          - lima_private_copy_installed.stat.mode == '0600'
+          - lima_private_copy_installed.stat.checksum == lima_private_copies_sha256
+      when: lima_action == 'install' and not ansible_check_mode

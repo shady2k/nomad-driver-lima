@@ -1,0 +1,70 @@
+---
+- name: Add pinned plugin assets to the clean builder before sealing
+  hosts: "{{ base_hosts | default('lima_canary') }}"
+  gather_facts: false
+  become: "{{ base_become | default(true) }}"
+  tasks:
+    - name: Require tested frozen guest release before copying any core asset
+      ansible.builtin.assert:
+        that:
+          - base_guest_assets_confirmed | default(false) | bool
+          - base_guest_assets_frozen is mapping
+          - base_guest_assets_frozen.files is mapping
+    - name: Verify immutable selected local guest bytes against the reviewed freeze
+      ansible.builtin.stat:
+        path: '{{ base_guest_assets_source | default(playbook_dir + "/../plugin/guest") }}/{{ item }}'
+        checksum_algorithm: sha256
+      loop: [task-main.py, adapter.mjs, launcher.mjs]
+      delegate_to: localhost
+      become: false
+      register: reviewed_guest_assets
+    - name: Refuse stale or mixed source bytes
+      ansible.builtin.assert:
+        that:
+          - item.stat.checksum == base_guest_assets_frozen.files['plugin/guest/' + item.item]
+      loop: '{{ reviewed_guest_assets.results }}'
+      loop_control: {label: '{{ item.item }}'}
+    - name: Stage nonsecret read-only guest assets outside discovery
+      ansible.builtin.copy:
+        src: '{{ item.source }}'
+        dest: '{{ base_build_root }}/{{ item.name }}'
+        owner: '{{ lima_runtime_user }}'
+        group: '{{ base_runtime_group | default(lima_runtime_user) }}'
+        mode: '0444'
+      loop:
+        - {source: '{{ base_guest_assets_source | default(playbook_dir + "/../plugin/guest") }}/task-main.py', name: task-main.py}
+        - {source: '{{ base_guest_assets_source | default(playbook_dir + "/../plugin/guest") }}/adapter.mjs', name: adapter.mjs}
+        - {source: '{{ base_guest_assets_source | default(playbook_dir + "/../plugin/guest") }}/launcher.mjs', name: launcher.mjs}
+        - {source: base-seal.sh, name: base-seal.sh}
+        - {source: base-artifact.py, name: base-artifact.py}
+        - {source: base_platform.py, name: base_platform.py}
+    - name: Create image-owned asset directory
+      ansible.builtin.command:
+        argv: [/usr/bin/env, -i, 'HOME={{ base_runtime_home | default("/home/" + lima_runtime_user) }}', 'PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', 'LIMA_HOME={{ base_lima_home }}', '{{ lima_limactl }}', shell, '{{ base_builder_name }}', sudo, install, -d, -m, '0755', /opt/nomad-workers]
+      become_user: '{{ lima_runtime_user }}'
+      changed_when: false
+    - name: Install exact plugin files into the builder without dependency reinstall
+      ansible.builtin.shell: >-
+        {{ ([ '/usr/bin/env', '-i', 'HOME=' + (base_runtime_home | default('/home/' + lima_runtime_user)), 'PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', 'LIMA_HOME=' + base_lima_home, lima_limactl, 'shell', base_builder_name, 'sudo', 'tee', '/opt/nomad-workers/' + item ] | map('quote') | join(' ')) }}
+        < {{ (base_build_root + '/' + item) | quote }} > /dev/null
+      become_user: '{{ lima_runtime_user }}'
+      loop: [task-main.py, adapter.mjs, launcher.mjs]
+      changed_when: false
+    - name: Restrict guest assets to read-only source files
+      ansible.builtin.command:
+        argv: [/usr/bin/env, -i, 'HOME={{ base_runtime_home | default("/home/" + lima_runtime_user) }}', 'PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', 'LIMA_HOME={{ base_lima_home }}', '{{ lima_limactl }}', shell, '{{ base_builder_name }}', sudo, chmod, '0444', /opt/nomad-workers/task-main.py, /opt/nomad-workers/adapter.mjs, /opt/nomad-workers/launcher.mjs]
+      become_user: '{{ lima_runtime_user }}'
+      changed_when: false
+    - name: Record explicitly frozen core guest hashes before final sealing
+      ansible.builtin.copy:
+        content: '{{ base_guest_assets_frozen | to_nice_json }}'
+        dest: '{{ base_build_root }}/guest-assets-frozen.json'
+        owner: '{{ lima_runtime_user }}'
+        group: '{{ base_runtime_group | default(lima_runtime_user) }}'
+        mode: '0444'
+      when: base_guest_assets_frozen is defined
+    - name: Give only the empty session workspace to the existing default guest user
+      ansible.builtin.command:
+        argv: [/usr/bin/env, -i, 'HOME={{ base_runtime_home | default("/home/" + lima_runtime_user) }}', 'PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', 'LIMA_HOME={{ base_lima_home }}', '{{ lima_limactl }}', shell, '{{ base_builder_name }}', /bin/sh, -c, 'test ! -e /workspace/repo/.git && sudo chown "$(id -u):$(id -g)" /workspace/repo && chmod 0700 /workspace/repo']
+      become_user: '{{ lima_runtime_user }}'
+      changed_when: false

@@ -1,0 +1,67 @@
+---
+- name: Require explicit retirement inventory and fresh empty-node guard
+  ansible.builtin.assert:
+    that:
+      - lima_empty_node_confirmed | bool
+      - lima_retire_archive is match('^/')
+      - lima_retire_paths | length > 0
+      - lima_retire_service == 'boxlite-rest.service'
+
+- name: Recheck native VM and logmon use immediately before retirement
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import glob,os
+        busy=[]
+        for p in glob.glob('/proc/[0-9]*'):
+            try:
+                if b'logmon' in open(p+'/cmdline','rb').read().split(b'\0'): busy.append(p)
+            except OSError: pass
+            for f in glob.glob(p+'/fd/*'):
+                try:
+                    if any(x in os.readlink(f) for x in ['kvm-vm','kvm-vcpu']): busy.append(p)
+                except OSError: pass
+        assert not busy, 'Live native VM/logmon use; do not retire components'
+        print('Native VM/logmon guard passed')
+  changed_when: false
+  check_mode: false
+
+- name: Create recoverable component archive
+  ansible.builtin.file:
+    path: '{{ lima_retire_archive }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Check dedicated REST unit presence
+  ansible.builtin.stat:
+    path: /etc/systemd/system/boxlite-rest.service
+  register: lima_rest_unit
+
+- name: Stop and disable only the retired BoxLite REST service
+  ansible.builtin.systemd_service:
+    name: '{{ lima_retire_service }}'
+    state: stopped
+    enabled: false
+  when: lima_rest_unit.stat.exists
+
+- name: Archive exact component inventory in one bounded operation
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - "{{ lookup('ansible.builtin.file', role_path + '/files/archive-components.py') }}"
+      - '{{ lima_retire_paths | to_json }}'
+      - '{{ lima_retire_archive }}'
+      - "{{ 'check' if ansible_check_mode else 'apply' }}"
+  check_mode: false
+  register: lima_retire_moves
+  changed_when: (lima_retire_moves.stdout | from_json).changed
+
+- name: Reload systemd unit inventory after archiving retired unit
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: lima_retire_moves.changed

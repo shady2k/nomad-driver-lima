@@ -1,0 +1,32 @@
+---
+# Copy outside the repository and replace every placeholder.
+lima_release_id: checkpoint-REPLACE
+lima_binary_src: /ABSOLUTE/LOCAL/nomad-driver-lima-linux-amd64
+lima_binary_sha256: REPLACE_64_HEX
+lima_template_src: /ABSOLUTE/LOCAL/reviewed-template.yaml
+lima_template_sha256: REPLACE_64_HEX
+lima_plugin_dir: /ABSOLUTE/REMOTE/existing-plugin-dir
+lima_config_dir: /ABSOLUTE/REMOTE/existing-nomad-config-dir
+lima_config_dest: /ABSOLUTE/REMOTE/existing-nomad-config-dir/90-lima.hcl
+lima_template_dest: /ABSOLUTE/REMOTE/existing-template-dir/approved.yaml
+lima_runtime_user: REPLACE_EXISTING_NONROOT_USER
+lima_limactl: /ABSOLUTE/REMOTE/limactl
+lima_home: /ABSOLUTE/REMOTE/private-lima-home
+lima_state_dir: /ABSOLUTE/REMOTE/private-driver-state
+lima_nomad_binary: /ABSOLUTE/REMOTE/nomad
+# Exact ordered -config paths used by the service, plus reviewed plugin fragment.
+# If the fragment is not already included by the service, changing its config
+# arguments is a separate approved action. Validation alone does not load it.
+lima_nomad_config_paths:
+  - /ABSOLUTE/REMOTE/existing-nomad-config-dir
+# Complete Lima-only desired state (the configured service path is retained).
+lima_client_config_path: /ABSOLUTE/REMOTE/current-client.json
+lima_candidate_config_path: /ABSOLUTE/REMOTE/private-state/client.desired.json
+lima_disabled_plugin_dir: /ABSOLUTE/REMOTE/private-disabled-plugins
+lima_old_binary_sha256: REPLACE_REVIEWED_OLD_DRIVER_SHA256
+# True only after the immediate complete-allocation/native VM/logmon check.
+lima_empty_node_confirmed: false
+# Explicit optional retirement inventory; no disk/data/source directories here.
+lima_retire_boxlite: false
+lima_retire_archive: /ABSOLUTE/REMOTE/private-retired-components
+lima_retire_paths: []

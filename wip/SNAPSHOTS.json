@@ -1,0 +1,49 @@
+{
+  "status": "preserved-unmerged-untested",
+  "snapshots": [
+    {
+      "path": "snapshots/paused-recovery",
+      "source_revision": "10894141a5856b7acbe2f711ef096e9bb920f899"
+    },
+    {
+      "path": "snapshots/long-turn-docs",
+      "source_revision": "d7961c837011b992c157fc9112c20a5f5f36cfa3"
+    },
+    {
+      "path": "snapshots/operation-profiles",
+      "source_revision": "a4367ee0785ebd49b926dc4a88ed99674958e478"
+    },
+    {
+      "path": "snapshots/abandoned-purge",
+      "source_revision": "ff86c90daaedf44e6b9244fa121fef80ba2f196a"
+    },
+    {
+      "path": "snapshots/stable-create-retry",
+      "source_revision": "3d427ca8e614f26b055e80ed49c3e8416e833ba3"
+    },
+    {
+      "path": "snapshots/operator-current-job",
+      "source_revision": "3e961e28c656e39906899c42d07ed79affca63d4"
+    },
+    {
+      "path": "snapshots/integrated-worker",
+      "source_revision": "9164d4f6b80abea091a1f9b36714e192239f80aa"
+    },
+    {
+      "path": "snapshots/uncommitted-main",
+      "source_revision": "7bbdfed77640e8f595034f0b79c8d3d2428252e6 plus uncommitted code"
+    }
+  ],
+  "superseded_heads_preserved_by_descendants": {
+    "fix/acp-native-conversation": "snapshots/stable-create-retry",
+    "fix/terminal-finish-observability": "snapshots/stable-create-retry",
+    "task/disk-expand": "snapshots/stable-create-retry"
+  },
+  "excluded_categories": [
+    "private installation/configuration",
+    "receipts/logs/dumps",
+    "credentials",
+    "binary artifacts",
+    "private Git histories"
+  ]
+}

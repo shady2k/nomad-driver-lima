@@ -1,0 +1,100 @@
+---
+- name: Prepare a new isolated builder from a previously accepted immutable image
+  hosts: lima_canary
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Require a new version and an explicitly frozen guest release
+      ansible.builtin.assert:
+        that:
+          - base_version is match('^v[2-9][0-9]*-[a-z0-9-]+$')
+          - base_builder_name is match('^agent-base-build-v[2-9][0-9]*-[a-z0-9-]+$')
+          - base_lima_home != lima_home
+          - base_source_sha256 is match('^[a-f0-9]{64}$')
+          - base_guest_assets_frozen.schema_version == 1
+          - base_guest_assets_frozen.release_sha256 != '0cdbd84f0e40fef2cb46f9fc435a5fe9b586f0eee257d67bea7439f2a44b25af'
+          - base_guest_assets_confirmed | default(false) | bool
+    - name: Verify each frozen source asset on the controller before creating any VM
+      ansible.builtin.stat:
+        path: '{{ base_guest_assets_source | default(playbook_dir + "/../plugin/guest") }}/{{ item.key | basename }}'
+        checksum_algorithm: sha256
+      loop: '{{ base_guest_assets_frozen.files | dict2items }}'
+      delegate_to: localhost
+      become: false
+      register: frozen_sources
+    - name: Refuse an asset freeze that differs from its files
+      ansible.builtin.assert:
+        that: item.stat.checksum == item.item.value
+      loop: '{{ frozen_sources.results }}'
+      loop_control: {label: '{{ item.item.key }}'}
+    - name: Verify accepted source image without modifying it
+      ansible.builtin.stat:
+        path: '{{ base_source_disk }}'
+        checksum_algorithm: sha256
+      register: accepted_source
+    - name: Require accepted immutable source and isolated destination paths
+      ansible.builtin.assert:
+        that:
+          - accepted_source.stat.checksum == base_source_sha256
+          - base_build_root not in base_source_disk
+          - base_lima_home not in base_source_disk
+    - name: Create only new private versioned directories
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        owner: '{{ lima_runtime_user }}'
+        group: '{{ lima_runtime_user }}'
+        mode: '0700'
+      loop: ['{{ base_lima_home }}', '{{ base_build_root }}']
+    - name: Write pinned runtime-only builder recipe without dependency provisioning
+      ansible.builtin.copy:
+        dest: '{{ base_build_root }}/builder.yaml'
+        owner: '{{ lima_runtime_user }}'
+        group: '{{ lima_runtime_user }}'
+        mode: '0600'
+        force: false
+        content: |
+          minimumLimaVersion: "2.2.1"
+          vmType: qemu
+          os: Linux
+          arch: x86_64
+          cpus: {{ base_acceptance_cpus | default(2) | int }}
+          memory: {{ base_acceptance_memory_mib | default(2048) | int }}MiB
+          disk: {{ base_disk_gib | default(20) | int }}GiB
+          images:
+            - location: {{ base_source_disk | to_json }}
+              digest: "sha256:{{ base_source_sha256 }}"
+          mounts: []
+          containerd:
+            system: false
+            user: false
+          ssh:
+            loadDotSSHPubKeys: false
+            forwardAgent: false
+          plain: true
+    - name: Create independent versioned VM without touching the source builder or disk
+      ansible.builtin.command:
+        argv: [/usr/bin/env, -i, 'HOME=/home/{{ lima_runtime_user }}', 'PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', 'LIMA_HOME={{ base_lima_home }}', '{{ lima_limactl }}', create, '--tty=false', '--name={{ base_builder_name }}', '{{ base_build_root }}/builder.yaml']
+        creates: '{{ base_lima_home }}/{{ base_builder_name }}/lima.yaml'
+      become_user: '{{ lima_runtime_user }}'
+    - name: Inspect durable versioned start receipt
+      ansible.builtin.stat:
+        path: '{{ base_build_root }}/prepare-operation.json'
+      register: refresh_operation
+    - name: Boot refreshed version from the accepted image without reinstalling dependencies
+      ansible.builtin.shell: >-
+        {{ ([ '/usr/bin/env', '-i', 'HOME=/home/' + lima_runtime_user, 'PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin', 'LIMA_HOME=' + base_lima_home, lima_limactl, 'start', '--tty=false', '--progress', '--timeout=10m', base_builder_name ] | map('quote') | join(' ')) }}
+        > {{ (base_build_root + '/builder-start.log') | quote }} 2>&1
+      become_user: '{{ lima_runtime_user }}'
+      async: 900
+      poll: 0
+      register: refresh_start
+      when: not refresh_operation.stat.exists
+    - name: Record only the new version's operation receipt
+      ansible.builtin.copy:
+        content: '{{ {"builder":base_builder_name,"source_sha256":base_source_sha256,"guest_release":base_guest_assets_frozen.release_sha256,"creator":base_creator,"session_id":base_session_id,"async":refresh_start} | to_nice_json }}'
+        dest: '{{ base_build_root }}/prepare-operation.json'
+        owner: '{{ lima_runtime_user }}'
+        group: '{{ lima_runtime_user }}'
+        mode: '0600'
+      when: not refresh_operation.stat.exists
