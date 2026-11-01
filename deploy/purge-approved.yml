@@ -1,0 +1,14 @@
+---
+- name: Purge only the five expressly approved retained test instances
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Run tested addressed controller sequentially, stopping on unknown outcome
+      ansible.builtin.command:
+        argv: [/opt/homebrew/bin/python3, '{{ playbook_dir }}/purge-approved.py', --spec, '{{ purge_execution_spec }}']
+      register: addressed_purge_result
+      changed_when: addressed_purge_result.rc == 0
+    - name: Report only nonsecret per-target audit receipts
+      ansible.builtin.debug:
+        var: addressed_purge_result.stdout_lines

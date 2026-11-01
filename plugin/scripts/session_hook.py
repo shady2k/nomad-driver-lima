@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Native Claude lifecycle observation only: no daemon, network or VM heartbeat.
-Never reads transcript/tool_input/prompts; never treats this as authenticated life.
+Never reads transcripts or persists command/prompt input. Bash input is only
+forwarded through native updatedInput with a private per-call context reference.
+This observation is never treated as authenticated liveness.
 """
-import fcntl,hashlib,json,os,pathlib,sys,tempfile,time,uuid,stat
+import fcntl,hashlib,json,os,pathlib,sys,tempfile,time,uuid,stat,re,shlex
 
 def state_root(home=None):
  # Claude removes CLAUDE_PLUGIN_DATA on marketplace removal. Ownership must outlive it.
@@ -55,6 +57,10 @@ def record(root,event,now=None):
    if old is None:return None,None
    d=old
   d.update(sequence=d['sequence']+1,observed_at=now,last_event=event_name)
+  if event_name=='PreToolUse':
+   d.pop('native_tool_use_id',None)
+   # A shared last-tool field cannot identify parallel Bash invocations.
+   # Each invocation instead receives its immutable context through updatedInput.
   if event_name=='SessionEnd':d['ended']=True
   fd,tmp=tempfile.mkstemp(prefix='.initiator-',dir=root)
   try:
@@ -64,12 +70,47 @@ def record(root,event,now=None):
    if os.path.exists(tmp):os.unlink(tmp)
  return str(p),d
 
+def export_context(path,env_file):
+ # Use only the native SessionStart-provided destination. Persist a reference,
+ # never identity adoption, credentials or tool/prompt input.
+ fd=os.open(env_file,os.O_WRONLY|os.O_APPEND|os.O_CREAT|os.O_NOFOLLOW,0o600)
+ with os.fdopen(fd,'a')as f:
+  st=os.fstat(f.fileno())
+  if not stat.S_ISREG(st.st_mode)or st.st_uid!=os.getuid()or st.st_mode&0o022:raise ValueError('Unsafe native environment file')
+  f.write('export NOMAD_WORKERS_CREATOR_RECORD='+shlex.quote(path)+'\n');f.flush();os.fsync(f.fileno())
+
+def call_context(event,path,row):
+ # Native protocol only. No permissionDecision is returned, and input is never
+ # logged or written to disk. Other tool fields and shell syntax remain intact.
+ if event.get('hook_event_name')!='PreToolUse' or event.get('tool_name')!='Bash':return None
+ call=event.get('tool_use_id');tool=event.get('tool_input')
+ if not isinstance(call,str)or not re.fullmatch('[A-Za-z0-9._:-]{1,256}',call):return None
+ if not isinstance(tool,dict)or not isinstance(tool.get('command'),str)or len(tool['command'].encode())>1048576:return None
+ folder=pathlib.Path(path).parent/'calls';folder.mkdir(mode=0o700,exist_ok=True);st=folder.lstat()
+ if not stat.S_ISDIR(st.st_mode)or st.st_uid!=os.getuid()or st.st_mode&0o077:raise ValueError('Unsafe native call root')
+ target=folder/(hashlib.sha256((row['generation']+':'+call).encode()).hexdigest()+'.json')
+ value={k:row[k]for k in ('version','native_session_id','agent_instance_id','generation','evidence','ended')}
+ value.update(native_tool_use_id=call,native_creator_record=str(pathlib.Path(path).absolute()))
+ try:
+  fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+  with os.fdopen(fd,'w')as f:json.dump(value,f);f.flush();os.fsync(f.fileno())
+ except FileExistsError:
+  from exchange import protected
+  if protected(target)!=value:raise ValueError('Native call identity changed')
+ command='export NOMAD_WORKERS_CREATOR_RECORD='+shlex.quote(str(target.absolute()))+';\n'+tool['command']
+ return {'hookSpecificOutput':{'hookEventName':'PreToolUse','updatedInput':{**tool,'command':command}}}
+
 def main():
  raw=sys.stdin.buffer.read(1048577)
  if len(raw)>1048576:return
  event=json.loads(raw);root=state_root()
  p,d=record(root,event)
- if d and event.get('hook_event_name')=='SessionStart':print(json.dumps({'hookSpecificOutput':{'hookEventName':'SessionStart','additionalContext':'Nomad originating-agent record: '+p+'. Use --creator-record with dynamic request; it is an observation, not authenticated liveness. Never renew VM leases from a background loop.'}}))
+ if d and event.get('hook_event_name')=='PreToolUse':
+  output=call_context(event,p,d)
+  if output:print(json.dumps(output))
+ if d and event.get('hook_event_name')=='SessionStart':
+  if os.environ.get('CLAUDE_ENV_FILE'):export_context(p,os.environ['CLAUDE_ENV_FILE'])
+  print(json.dumps({'hookSpecificOutput':{'hookEventName':'SessionStart','additionalContext':'Use nomad-workers vm create/list/connect/send/status/history/reconnect/finish. VM IDs are the public handle; request IDs and cursors are internal. Native creator record for legacy compatibility: '+p+'. Never invent identity or renew VM leases in a background loop.'}}))
 if __name__=='__main__':
  try:main()
  except Exception:print('Nomad initiator hook observation unavailable; VM lifecycle unchanged',file=sys.stderr)

@@ -14,7 +14,7 @@ def checked(a,s,write=False):
  if a.attempt(row)!=state.get('attempt'):raise RuntimeError('OPERATION_ATTEMPT_CHANGED_NO_REPLAY')
  if row.get('ClientStatus')!='running' or row.get('TaskStates',{}).get(a.c['task'],{}).get('State')!='running':raise RuntimeError('OPERATION_TASK_NOT_RUNNING')
  if write:
-  if state.get('phase')!='ready':raise RuntimeError('SESSION_NOT_READY_OR_FINISHING')
+  if state.get('phase')not in ('ready','management_ready'):raise RuntimeError('SESSION_NOT_READY_OR_FINISHING')
  return state
 
 def remote(a,s,p):
@@ -31,7 +31,10 @@ def remote(a,s,p):
  except RuntimeError:raise
  except Exception:raise RuntimeError('OPERATION_TRANSPORT_OUTCOME_UNKNOWN_NO_REPLAY') from None
 
-def base(a,s):return {'state_dir':a.c['guest']['state_dir'],'session_id':s,'guest_config':a.c['guest']}
+def base(a,s):
+ result={'state_dir':a.c['guest']['state_dir'],'session_id':s,'guest_config':a.c['guest']}
+ if a.load(s).get('phase')=='management_ready':result.update(allow_management_session=True,owner_binding={'session_id':s,'attempt':a.load(s)['attempt'],'creator_agent_id':a.c['agent_instance_id'],'creator_session_id':a.c['creator_session_id'],'creator_generation':a.c['creator_generation']})
+ return result
 def path(a,s,op):
  from workerctl import uid
  return a.local(s)/('operation-'+uid(op)+'.json')
@@ -64,7 +67,7 @@ def start(a,s,op,argv,label,timeout=None,cwd=None):
   probe=remote(a,s,{**base(a,s),'action':'probe'})
   binding={'session_id':s,'attempt':state['attempt'],'creator_agent_id':a.c['agent_instance_id'],'creator_session_id':a.c['creator_session_id'],'creator_generation':a.c['creator_generation']}
   identity={k:probe[k] for k in ['machine_id','boot_id']}
-  row={'operation_id':op,'label':label,'binding':binding,'machine_identity':identity,'command_sha256':fingerprint,'phase':'start_unknown','policy':policy,'native_log_schema':probe['native_log_schema'],'prompt_retry':False,'log_cursor':0}
+  row={'operation_id':op,'work_kind':'managed_operation','label':label,'binding':binding,'machine_identity':identity,'command_sha256':fingerprint,'phase':'start_unknown','policy':policy,'native_log_schema':probe['native_log_schema'],'prompt_retry':False,'log_cursor':0}
   import activity
   # Only a new, owner-checked explicit command is an activity observation.
   # Polling/reconnect never proves the initiating agent alive or renews this lease.
@@ -76,6 +79,13 @@ def start(a,s,op,argv,label,timeout=None,cwd=None):
    v=remote(a,s,payload(a,s,row,'start',argv=argv,cwd=cwd,label=label,timeout=timeout,policy=policy,runner_source=program()));row.update(state=v,phase=v['phase']);save(a,s,op,row);return row
   except Exception:
    save(a,s,op,row);raise
+
+def snapshot(a,s,op):
+ """One bounded read when adapter transport has a deadline; no lock/wait/write."""
+ from exchange import protected
+ row=protected(path(a,s,op));value=remote(a,s,payload(a,s,row,'status'))
+ if value.get('binding')!=row['binding']or value.get('command_sha256')!=row['command_sha256']:raise RuntimeError('OPERATION_RECEIPT_BINDING_MISMATCH')
+ return value
 
 def status(a,s,op):
  with a.lock(s):checked(a,s);return fresh(a,s,op)

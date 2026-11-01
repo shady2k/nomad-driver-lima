@@ -1,0 +1,23 @@
+{
+  "linux_driver": {
+    "revision": "60ecf69e950afbe406c4c05fe4b9e4763e3415cc",
+    "path": "."
+  },
+  "darwin_driver": {
+    "revision": "1a1ffe1b8484dba9a322a4ecf793b1ffbc0bb43b",
+    "path": "variants/darwin-driver",
+    "status": "separate-platform-snapshot"
+  },
+  "caller_installed_core": {
+    "revision": "1a351c97fbe769742b94c134d8e85dab25ea028d",
+    "path": "variants/caller-core-0.1.48",
+    "status": "maintainer-reported-installed"
+  },
+  "caller_current_candidate": {
+    "revision": "25e42b8e304498fc971f37a57ffd46c6bb7d7851",
+    "path": "plugin",
+    "status": "reviewed-source-only-not-live-accepted"
+  },
+  "publication": "Source projections only; private Git histories, operational state and build artifacts excluded",
+  "functional_refactoring": false
+}

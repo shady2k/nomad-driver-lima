@@ -50,8 +50,8 @@ this change does not create or modify that role. Token values never enter the
 journal or events. Every token exposure intent is fingerprinted in an immutable fsynced audit before
 delivery. The stopped receipt binds that complete set; reuse of any ancestor
 token, missing audit or receipt/audit mismatch is refused, including after restart.
-Existing role configuration is not changed by the package; a compatible
-periodic-role configuration is a separate installation prerequisite.
+The baseline bounded-TTL role described in `vault-integration.md` is not changed
+by this source branch; periodic-role configuration is a separate rollout prerequisite.
 
 Normal stop first seals token delivery, revokes/clears guest credentials, stops
 Lima, confirms stopped status and absent runtime PIDs, then fsyncs a receipt bound
@@ -111,4 +111,5 @@ Do not roll an active resumed ledger back to an older driver that does not
 understand `ResumeNext` fencing. A separately authorized acceptance run should
 use a disposable VM, verify the same instance/disk across allocations, fresh
 periodic token and ACP session, old-handle rejection, and crash reconciliation.
-Acceptance targets must be explicitly selected disposable workloads.
+The original VM designated for deletion and the private template clone are not
+acceptance targets.

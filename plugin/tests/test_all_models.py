@@ -5,7 +5,7 @@ import model_catalog,workerctl
 spec=importlib.util.spec_from_file_location('models_guest',ROOT/'guest/task-main.py');guest=importlib.util.module_from_spec(spec);spec.loader.exec_module(guest)
 class AllModelTests(unittest.TestCase):
  def config(self,d):
-  raw=(ROOT/'tests/fixtures/provider-models.synthetic.json').read_bytes();p=pathlib.Path(d)/'models.json';p.write_bytes(raw)
+  raw=(ROOT/'tests/fixtures/provider-models.f02d.json').read_bytes();p=pathlib.Path(d)/'models.json';p.write_bytes(raw)
   return {'model_catalog_file':str(p),'model_catalog_sha256':hashlib.sha256(raw).hexdigest(),'guest':{'model':None,'runtime_contract':{'approved_total_usd':1,'output_token_budget':512},'prime_vault':{'provider':{'name':'fixture-gateway','base_url':'https://gateway.invalid/v1','model':'deepseek-v4.1-flash-auto','max_tokens':16384,'context_window':1000000}}}}
  def test_all_ten_one_gateway_two_native_groups_no_compat_contamination(self):
   with tempfile.TemporaryDirectory() as d:

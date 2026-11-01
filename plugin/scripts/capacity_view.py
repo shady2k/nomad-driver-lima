@@ -37,3 +37,23 @@ def fits_snapshot(result,cpus,memory,disk):
  if 'additional_vm_slots'not in result:return False
  slots=result['additional_vm_slots']
  return slots is None or(type(slots)==int and slots>0)
+
+
+def describe(nodes):
+ """Nonbreaking explicit aliases. Physical availability is filesystem space."""
+ for n in nodes:
+  driver=(n.get('occupied')or{}).get('driver')or{};a=n.get('available_for_one_new_vm')or{}
+  n['observed_unix']=driver.get('observed_unix')
+  n['effective_available']={k:a.get(k)for k in ('vcpus','guest_memory_mib','disk_gib','additional_vm_slots')}
+  n['physical_disk']={'available_mib':driver.get('physical_available_mib'),'floor_mib':driver.get('disk_floor_mib'),'meaning':'filesystem_free_space_not_ram','shared_cache':'included_in_physical_usage_not_independently_measured'}
+  n['snapshot_not_reservation']=True
+ return nodes
+
+
+def summarize(result):
+ """Put every node's actionable snapshot first, preserving legacy detail."""
+ rows=[]
+ for n in result['nodes']:
+  a=n.get('available_for_one_new_vm')or{};eligible=n.get('placement_eligible')is True
+  rows.append({'node_id':n.get('node_id'),'architecture':n.get('architecture'),'host_os':n.get('host_os'),'status':n.get('node_status'),'eligible':eligible,'reasons':n.get('placement_reasons',[]),'vcpus':a.get('vcpus')if eligible else None,'guest_memory_mib':a.get('guest_memory_mib')if eligible else None,'disk_gib':a.get('disk_gib')if eligible else None,'observed_unix':n.get('observed_unix')})
+ return {'capacity_summary':rows,'capacity_guidance':'Read every summary row; nodes[0] is one node, not cluster capacity. Check architecture and exact template version. Capacity alone never authorizes finish.',**result}

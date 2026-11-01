@@ -31,7 +31,7 @@ def preflight(packet,context,receipts=None):
  hashes={name:hashlib.sha256((assets/name).read_bytes()).hexdigest() for name in ('task-main.py','adapter.mjs','launcher.mjs')}
  frozen('guest-assets-frozen.json',save.canonical({'files':hashes}))
  for name in ('base-seal.sh','base-native-output-probe.py'):frozen(name,(deploy/name).read_bytes())
- definitions=pathlib.Path(context.get('model_definitions_file',str(deploy.parent/'plugin/tests/fixtures/provider-models.synthetic.json')))
+ definitions=pathlib.Path(context.get('model_definitions_file',str(deploy.parent/'plugin/tests/fixtures/provider-models.f02d.json')))
  frozen('model-definitions.json',definitions.read_bytes())
  disk=int(context['disk_gib']);reserve=int(context.get('physical_reserve_gib',5));mem=int(context.get('acceptance_memory_mib',4096));cpu=int(context.get('acceptance_cpus',2))
  if disk<1 or disk>1024 or reserve<1 or not 1<=cpu<=8 or not 1024<=mem<=16384:raise RuntimeError('CANDIDATE_RESOURCE_BOUNDS')

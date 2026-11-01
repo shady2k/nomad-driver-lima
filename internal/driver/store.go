@@ -27,8 +27,9 @@ type StopReceipt struct {
 	RevocationConfirmed                        bool
 }
 type State struct {
-	PrivateCopy       *PrivateCopyAdmission   `json:"PrivateCopy,omitempty"`
-	RepositoryProfile *repositories.Selection `json:"RepositoryProfile,omitempty"`
+	CleanupVaultRequired *bool                   `json:"CleanupVaultRequired,omitempty"`
+	PrivateCopy          *PrivateCopyAdmission   `json:"PrivateCopy,omitempty"`
+	RepositoryProfile    *repositories.Selection `json:"RepositoryProfile,omitempty"`
 	// ResumeNext is an irreversible, durable transfer intent containing the exact
 	// successor. Its existence fences the source even before successor materialization.
 	ResumeNext                                                                                                    *State
@@ -110,7 +111,7 @@ func (s *Store) read(key string) (*State, error) {
 	}
 	var v State
 	if e = json.NewDecoder(f).Decode(&v); e != nil {
-		return nil, e
+		return nil, fmt.Errorf("ledger decode (bytes=%d): %w", st.Size(), e)
 	}
 	if (v.Version != 1 && v.Version != 2 && v.Version != 3) || (v.RepositoryProfile != nil && v.Version != 2 && v.Version != 3) || (v.PrivateCopy != nil && v.Version != 3) || v.Key != key || v.Owner != s.Owner {
 		return nil, fmt.Errorf("state identity mismatch")

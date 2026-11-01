@@ -67,7 +67,7 @@
       ansible.builtin.copy:
         content: |
           #!/bin/sh
-          exec {{ caller_python | quote }} {{ (caller_release_root + '/plugin/scripts/workerctl.py') | quote }} --config {{ (caller_home + '/.config/nomad-workers/catalog-client.json') | quote }} --operations-config {{ (caller_home + '/.config/nomad-workers/operations.json') | quote }} "$@"
+          exec {{ caller_python | quote }} {{ (caller_release_root + '/plugin/scripts/workerctl.py') | quote }} --config {{ (caller_home + '/.config/nomad-workers/catalog-client.json') | quote }} --operations-config {{ (caller_home + '/.config/nomad-workers/operations.json') | quote }} --discovery-config {{ (caller_home + '/.config/nomad-workers/catalog-client.json') | quote }} "$@"
         dest: '{{ caller_home }}/.local/bin/nomad-workers'
         owner: '{{ caller_user }}'
         group: '{{ caller_group }}'

@@ -59,7 +59,7 @@ func TestFailedCreateRecoveryAuditIdempotenceAndNoReplay(t *testing.T) {
 	if calls != 2 || result.AlreadyRecovered || result.Phase != "no_vm_failed" || result.AuditSHA256 == "" {
 		t.Fatal(result, calls)
 	}
-	budget := &Driver{store: store, config: Config{MaxVMs: 1, MaxTotalDiskGiB: 20}}
+	budget := &Driver{ctx: t.Context(), client: &lima.Client{Runner: newFake()}, store: store, config: Config{MaxVMs: 1, MaxTotalDiskGiB: 20}}
 	if e := budget.checkBudget(TaskConfig{CPUs: 1, MemoryMiB: 512, DiskGiB: 20}); e != nil {
 		t.Fatal("audit broke admission or reservation not released", e)
 	}

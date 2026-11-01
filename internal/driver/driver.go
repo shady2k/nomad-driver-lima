@@ -322,7 +322,20 @@ func (d *Driver) Fingerprint(ctx context.Context) (<-chan *drivers.Fingerprint, 
 			for k, v := range policy {
 				fp.Attributes["driver.lima.operator_limits."+k] = pstructs.NewIntAttribute(int64(v), "")
 			}
-			for k, v := range capacityAttributesContext(ctx, capacityConfig, capacityStore) {
+			for k, v := range capacityAttributesContext(ctx, capacityConfig, capacityStore, func(rows []*State) (runtimeCommitment, int64, error) {
+				probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				defer cancel()
+				probe := &Driver{ctx: probeCtx, client: client, config: capacityConfig, store: capacityStore}
+				mem, err := probe.runtimeResourceCommitment(rows)
+				if err != nil {
+					return runtimeCommitment{}, 0, err
+				}
+				limit, err := hostMemoryMiB()
+				if capacityConfig.MaxTotalMemoryMiB > 0 && int64(capacityConfig.MaxTotalMemoryMiB) < limit {
+					limit = int64(capacityConfig.MaxTotalMemoryMiB)
+				}
+				return mem, limit, err
+			}) {
 				fp.Attributes[k] = v
 			}
 			capacityReason, _ := fp.Attributes["driver.lima.capacity.reason"].GetString()
@@ -523,10 +536,20 @@ func (d *Driver) payload(s *State, action string) map[string]any {
 	return map[string]any{"key": s.Key, "owner": s.Owner, "action": action, "stdout_offset": s.OutOffset, "stderr_offset": s.ErrOffset}
 }
 func (d *Driver) handle(t *task) (*drivers.TaskHandle, error) {
-	h := drivers.NewTaskHandle(1)
+	var tc TaskConfig
+	if err := t.cfg.DecodeDriverConfig(&tc); err != nil {
+		return nil, fmt.Errorf("encode recovery config: %w", err)
+	}
+	st := t.state
+	r := recoveryConfig{Version: 1, Allocation: st.AllocID, Task: st.TaskName, Namespace: st.Namespace, Node: st.NodeID, Session: st.WorkerSessionID, CPUs: st.CPUs, MemoryMiB: st.MemoryMiB, DiskGiB: st.DiskGiB, VaultRequired: tc.VaultRequired}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	h := drivers.NewTaskHandle(2)
 	h.Config = t.cfg
-	e := h.SetDriverState(map[string]string{"key": t.state.Key, "owner": t.state.Owner, "spec": t.state.SpecHash})
-	return h, e
+	err = h.SetDriverState(map[string]string{"key": st.Key, "owner": st.Owner, "spec": st.SpecHash, "recovery": string(raw)})
+	return h, err
 }
 func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
 	tc, hash, e := d.validate(cfg)
@@ -545,11 +568,14 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	// Nomad logmon reads until FIFO EOF. Keep a writer continuously open from
 	// the first control-stage message until attach owns the guest stream writer.
 	// Per-stage open/close alone would terminate logmon before VM boot finishes.
-	logGuard, e := os.OpenFile(cfg.StdoutPath, os.O_WRONLY|os.O_APPEND, 0600)
-	if e != nil {
-		return nil, nil, fmt.Errorf("native stdout unavailable before startup")
-	}
+	logGuard := newTaskLog(d.ctx, cfg.StdoutPath)
 	defer logGuard.Close()
+	logCtx, logCancel := context.WithTimeout(d.ctx, 2*time.Second)
+	e = logGuard.waitOpen(logCtx)
+	logCancel()
+	if e != nil {
+		return nil, nil, fmt.Errorf("native stdout reader unavailable before startup: %w", e)
+	}
 	key := lima.Hash([]byte(cfg.ID))
 	lock, e := d.store.lock(key)
 	if e != nil {
@@ -589,6 +615,9 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 			return nil, nil, e
 		}
 		defer unlock(admission)
+		if e = d.guardAllocationInvocation(cfg); e != nil {
+			return nil, nil, e
+		}
 		if e = d.checkBudget(tc); e != nil {
 			return nil, nil, e
 		}
@@ -596,7 +625,8 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		if e != nil {
 			return nil, nil, e
 		}
-		s = &State{PrivateCopy: privateAdmission, Version: 1, NodeID: cfg.NodeID, Namespace: cfg.Namespace, Generation: 1, Key: key, Owner: d.store.Owner, TaskID: cfg.ID, AllocID: cfg.AllocID, TaskName: cfg.Name, Instance: instanceName(tc, key), SpecHash: hash, Phase: "intent", RepositoryProfile: selectedRepositories, CPUs: tc.CPUs, MemoryMiB: tc.MemoryMiB, DiskGiB: tc.DiskGiB, CreatorAgentID: tc.CreatorAgentID, CreatorSessionID: tc.CreatorSessionID, WorkerSessionID: tc.WorkerSessionID, TemplateID: tc.TemplateID, TemplateVersion: tc.TemplateVersion, TemplateDiskSHA256: tc.TemplateDiskSHA256, TemplateCatalogSHA256: tc.TemplateCatalogSHA256, TemplateYAMLSHA256: tc.resolvedYAMLSHA256, ResolvedArchitecture: tc.Architecture, ResolvedVMType: tc.resolvedVMType, Purpose: tc.Purpose, Project: tc.Project, TaskLink: tc.TaskLink}
+		cleanupVaultRequired := tc.VaultRequired
+		s = &State{CleanupVaultRequired: &cleanupVaultRequired, PrivateCopy: privateAdmission, Version: 1, NodeID: cfg.NodeID, Namespace: cfg.Namespace, Generation: 1, Key: key, Owner: d.store.Owner, TaskID: cfg.ID, AllocID: cfg.AllocID, TaskName: cfg.Name, Instance: instanceName(tc, key), SpecHash: hash, Phase: "intent", RepositoryProfile: selectedRepositories, CPUs: tc.CPUs, MemoryMiB: tc.MemoryMiB, DiskGiB: tc.DiskGiB, CreatorAgentID: tc.CreatorAgentID, CreatorSessionID: tc.CreatorSessionID, WorkerSessionID: tc.WorkerSessionID, TemplateID: tc.TemplateID, TemplateVersion: tc.TemplateVersion, TemplateDiskSHA256: tc.TemplateDiskSHA256, TemplateCatalogSHA256: tc.TemplateCatalogSHA256, TemplateYAMLSHA256: tc.resolvedYAMLSHA256, ResolvedArchitecture: tc.Architecture, ResolvedVMType: tc.resolvedVMType, Purpose: tc.Purpose, Project: tc.Project, TaskLink: tc.TaskLink}
 		if selectedRepositories != nil {
 			s.Version = 2
 		}
@@ -772,17 +802,24 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	h, e := d.handle(t)
 	return h, nil, e
 }
-func (d *Driver) attach(cfg *drivers.TaskConfig, s *State, lock *os.File) (*task, error) {
-	out, e := os.OpenFile(cfg.StdoutPath, os.O_WRONLY|os.O_APPEND, 0600)
-	if e != nil {
-		return nil, e
+func (d *Driver) attach(cfg *drivers.TaskConfig, s *State, lock *os.File, recovering ...bool) (*task, error) {
+	// New launches still reject invalid log endpoint types. Recovery must not
+	// turn a log endpoint outage into Nomad DestroyTask of a surviving VM.
+	if !(len(recovering) > 0 && recovering[0]) {
+		for _, path := range []string{cfg.StdoutPath, cfg.StderrPath} {
+			info, err := os.Lstat(path)
+			if err != nil {
+				return nil, fmt.Errorf("native log endpoint unavailable: %w", err)
+			}
+			if !info.Mode().IsRegular() && info.Mode()&os.ModeNamedPipe == 0 && path != os.DevNull {
+				return nil, fmt.Errorf("unsupported native log endpoint")
+			}
+		}
 	}
-	errout, e := os.OpenFile(cfg.StderrPath, os.O_WRONLY|os.O_APPEND, 0600)
-	if e != nil {
-		out.Close()
-		return nil, e
-	}
-	if s.Exit == nil && !s.VaultFinalizing {
+	out := newTaskLog(d.ctx, cfg.StdoutPath)
+	errout := newTaskLog(d.ctx, cfg.StderrPath)
+	var e error
+	if s.Exit == nil && !s.VaultFinalizing && !(len(recovering) > 0 && recovering[0]) {
 		secretCtx, secretCancel := context.WithTimeout(d.ctx, 15*time.Second)
 		_, e = d.syncVault(secretCtx, cfg, s, "")
 		secretCancel()
@@ -851,15 +888,23 @@ func (d *Driver) monitor(t *task) {
 			if snap.Phase == "unknown" {
 				e = fmt.Errorf("guest workload state unknown; no replay")
 			}
+			outN, errN := 0, 0
 			if e == nil {
-				_, e = t.out.Write(snap.Stdout)
+				outN, e = t.out.Write(snap.Stdout)
 				if e == nil {
-					_, e = t.err.Write(snap.Stderr)
+					errN, e = t.err.Write(snap.Stderr)
 				}
 			}
 			t.mu.Lock()
+			// A FIFO can accept a prefix before backpressure or reader loss. Commit
+			// exactly that prefix independently for each stream; do not replay stdout
+			// just because stderr is waiting for its own reader.
+			t.state.OutOffset = s.OutOffset + int64(outN)
+			t.state.ErrOffset = s.ErrOffset + int64(errN)
+			if outN > 0 {
+				d.observeActivity(t, snap.Stdout[:outN], time.Now())
+			}
 			if e == nil {
-				d.observeActivity(t, snap.Stdout, time.Now())
 				t.state.OutOffset = snap.StdoutOffset
 				t.state.ErrOffset = snap.StderrOffset
 				t.lastErr = nil
@@ -894,7 +939,7 @@ func (d *Driver) RecoverTask(h *drivers.TaskHandle) error {
 	}
 	var b map[string]string
 	if e := h.GetDriverState(&b); e != nil {
-		return e
+		return fmt.Errorf("recover handle decode (version=%d bytes=%d): %w", h.Version, len(h.DriverState), e)
 	}
 	if b["key"] != lima.Hash([]byte(h.Config.ID)) || b["owner"] != d.store.Owner {
 		return fmt.Errorf("handle owner mismatch")
@@ -917,7 +962,20 @@ func (d *Driver) RecoverTask(h *drivers.TaskHandle) error {
 		unlock(lock)
 		return fmt.Errorf("recovery identity mismatch")
 	}
-	if s.TemplateCatalogSHA256 != "" {
+	if h.Version == 2 {
+		if e = d.restoreAttachmentConfig(h, s, b["recovery"]); e != nil {
+			unlock(lock)
+			return e
+		}
+	} else if h.Version == 1 && missingLegacyConfig(h.Config) {
+		if e = d.restoreLegacyAttachmentConfig(h, s); e != nil {
+			unlock(lock)
+			return e
+		}
+	} else if h.Version != 1 {
+		unlock(lock)
+		return fmt.Errorf("unsupported task handle version")
+	} else if s.TemplateCatalogSHA256 != "" {
 		tc, currentSpec, err := d.validate(h.Config)
 		if err != nil {
 			unlock(lock)
@@ -947,7 +1005,7 @@ func (d *Driver) RecoverTask(h *drivers.TaskHandle) error {
 		unlock(lock)
 		return e
 	}
-	t, e := d.attach(h.Config, s, lock)
+	t, e := d.attach(h.Config, s, lock, true)
 	if e != nil {
 		unlock(lock)
 		return e
@@ -1043,7 +1101,8 @@ func (d *Driver) signalTask(id, sig string) error {
 	return e
 }
 func (d *Driver) StopTask(id string, timeout time.Duration, sig string) error {
-	t, e := d.get(id)
+	t, release, e := d.cleanupTask(id)
+	defer release()
 	if e != nil {
 		return e
 	}
@@ -1167,7 +1226,8 @@ func (d *Driver) stopTask(id string, timeout time.Duration, sig string) error {
 	return e
 }
 func (d *Driver) DestroyTask(id string, force bool) error {
-	t, e := d.get(id)
+	t, release, e := d.cleanupTask(id)
+	defer release()
 	if e != nil {
 		return e
 	}

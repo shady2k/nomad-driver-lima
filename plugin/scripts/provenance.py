@@ -6,7 +6,6 @@ def text(value,field,minimum=1,maximum=256):
  if not isinstance(value,str)or not minimum<=len(value.strip())<=maximum or any(ord(c)<32 for c in value)or Redactor().text(value)!=value:raise ValueError('INVALID_DESCRIPTIVE_'+field.upper())
  return value.strip()
 def descriptions(config,native,task_title,name=None,kind=None,link='',purpose=''):
- if task_title is None or not str(task_title).strip():raise ValueError('TASK_TITLE_REQUIRED: provide --task-title describing the concrete task; no job was submitted')
  title=text(task_title,'task_title',minimum=5)
  if title.casefold()in ('unknown','busy-terminal','terminal','worker','agent','environment','tests'):raise ValueError('MEANINGFUL_TASK_TITLE_REQUIRED')
  defaults=config.get('source_agent',{})

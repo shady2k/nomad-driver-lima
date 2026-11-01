@@ -1,0 +1,1004 @@
+{
+  "platforms": {
+    "linux-amd64": {
+      "compiled_dependency_packages": 589,
+      "modules_including_go": 105
+    },
+    "darwin-arm64": {
+      "compiled_dependency_packages": 579,
+      "modules_including_go": 103
+    }
+  },
+  "modules": [
+    {
+      "module": "dario.cat/mergo",
+      "version": "v1.0.2",
+      "notice_files": [
+        "licenses/dario.cat/mergo@v1.0.2/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/dario.cat/mergo/@v/v1.0.2.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/LK4D4/joincontext",
+      "version": "v0.0.0-20171026170139-1724345da6d5",
+      "notice_files": [
+        "licenses/github.com/LK4D4/joincontext@v0.0.0-20171026170139-1724345da6d5/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/!l!k4!d4/joincontext/@v/v0.0.0-20171026170139-1724345da6d5.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/Masterminds/goutils",
+      "version": "v1.1.1",
+      "notice_files": [
+        "licenses/github.com/Masterminds/goutils@v1.1.1/LICENSE.txt"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/!masterminds/goutils/@v/v1.1.1.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/Masterminds/semver/v3",
+      "version": "v3.4.0",
+      "notice_files": [
+        "licenses/github.com/Masterminds/semver/v3@v3.4.0/LICENSE.txt"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/!masterminds/semver/v3/@v/v3.4.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/Masterminds/sprig/v3",
+      "version": "v3.3.0",
+      "notice_files": [
+        "licenses/github.com/Masterminds/sprig/v3@v3.3.0/LICENSE.txt"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/!masterminds/sprig/v3/@v/v3.3.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/agext/levenshtein",
+      "version": "v1.2.3",
+      "notice_files": [
+        "licenses/github.com/agext/levenshtein@v1.2.3/LICENSE",
+        "licenses/github.com/agext/levenshtein@v1.2.3/NOTICE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/agext/levenshtein/@v/v1.2.3.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/apparentlymart/go-textseg/v15",
+      "version": "v15.0.0",
+      "notice_files": [
+        "licenses/github.com/apparentlymart/go-textseg/v15@v15.0.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/apparentlymart/go-textseg/v15/@v/v15.0.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/armon/go-radix",
+      "version": "v1.0.0",
+      "notice_files": [
+        "licenses/github.com/armon/go-radix@v1.0.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/armon/go-radix/@v/v1.0.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/bgentry/speakeasy",
+      "version": "v0.2.0",
+      "notice_files": [
+        "licenses/github.com/bgentry/speakeasy@v0.2.0/LICENSE",
+        "licenses/github.com/bgentry/speakeasy@v0.2.0/LICENSE_WINDOWS"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/bgentry/speakeasy/@v/v0.2.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/cenkalti/backoff/v4",
+      "version": "v4.3.0",
+      "notice_files": [
+        "licenses/github.com/cenkalti/backoff/v4@v4.3.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/cenkalti/backoff/v4/@v/v4.3.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/container-storage-interface/spec",
+      "version": "v1.12.0",
+      "notice_files": [
+        "licenses/github.com/container-storage-interface/spec@v1.12.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/container-storage-interface/spec/@v/v1.12.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/creack/pty",
+      "version": "v1.1.24",
+      "notice_files": [
+        "licenses/github.com/creack/pty@v1.1.24/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/creack/pty/@v/v1.1.24.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/dustin/go-humanize",
+      "version": "v1.0.1",
+      "notice_files": [
+        "licenses/github.com/dustin/go-humanize@v1.0.1/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/dustin/go-humanize/@v/v1.0.1.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/fatih/color",
+      "version": "v1.19.0",
+      "notice_files": [
+        "licenses/github.com/fatih/color@v1.19.0/LICENSE.md"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/fatih/color/@v/v1.19.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/go-jose/go-jose/v3",
+      "version": "v3.0.5",
+      "notice_files": [
+        "licenses/github.com/go-jose/go-jose/v3@v3.0.5/LICENSE",
+        "licenses/github.com/go-jose/go-jose/v3@v3.0.5/json/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/go-jose/go-jose/v3/@v/v3.0.5.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/go-jose/go-jose/v4",
+      "version": "v4.1.4",
+      "notice_files": [
+        "licenses/github.com/go-jose/go-jose/v4@v4.1.4/LICENSE",
+        "licenses/github.com/go-jose/go-jose/v4@v4.1.4/json/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/go-jose/go-jose/v4/@v/v4.1.4.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/go-viper/mapstructure/v2",
+      "version": "v2.5.0",
+      "notice_files": [
+        "licenses/github.com/go-viper/mapstructure/v2@v2.5.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/go-viper/mapstructure/v2/@v/v2.5.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/golang/protobuf",
+      "version": "v1.5.4",
+      "notice_files": [
+        "licenses/github.com/golang/protobuf@v1.5.4/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/golang/protobuf/@v/v1.5.4.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/google/btree",
+      "version": "v1.1.3",
+      "notice_files": [
+        "licenses/github.com/google/btree@v1.1.3/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/google/btree/@v/v1.1.3.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/google/go-cmp",
+      "version": "v0.7.0",
+      "notice_files": [
+        "licenses/github.com/google/go-cmp@v0.7.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/google/go-cmp/@v/v0.7.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/google/uuid",
+      "version": "v1.6.0",
+      "notice_files": [
+        "licenses/github.com/google/uuid@v1.6.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/google/uuid/@v/v1.6.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/grpc-ecosystem/go-grpc-middleware",
+      "version": "v1.4.0",
+      "notice_files": [
+        "licenses/github.com/grpc-ecosystem/go-grpc-middleware@v1.4.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/grpc-ecosystem/go-grpc-middleware/@v/v1.4.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/cli",
+      "version": "v1.1.7",
+      "notice_files": [
+        "licenses/github.com/hashicorp/cli@v1.1.7/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/cli/@v/v1.1.7.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/consul/api",
+      "version": "v1.34.5",
+      "notice_files": [
+        "licenses/github.com/hashicorp/consul/api@v1.34.5/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/consul/api/@v/v1.34.5.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/cronexpr",
+      "version": "v1.1.3",
+      "notice_files": [
+        "licenses/github.com/hashicorp/cronexpr@v1.1.3/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/cronexpr/@v/v1.1.3.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/errwrap",
+      "version": "v1.1.0",
+      "notice_files": [
+        "licenses/github.com/hashicorp/errwrap@v1.1.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/errwrap/@v/v1.1.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-bexpr",
+      "version": "v0.1.16",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-bexpr@v0.1.16/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-bexpr/@v/v0.1.16.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-cleanhttp",
+      "version": "v0.5.2",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-cleanhttp@v0.5.2/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-cleanhttp/@v/v0.5.2.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-hclog",
+      "version": "v1.6.3",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-hclog@v1.6.3/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-hclog/@v/v1.6.3.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-immutable-radix",
+      "version": "v1.3.1",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-immutable-radix@v1.3.1/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-immutable-radix/@v/v1.3.1.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-immutable-radix/v2",
+      "version": "v2.1.0",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-immutable-radix/v2@v2.1.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-immutable-radix/v2/@v/v2.1.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-kms-wrapping/v2",
+      "version": "v2.0.25",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-kms-wrapping/v2@v2.0.25/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-kms-wrapping/v2/@v/v2.0.25.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-metrics",
+      "version": "v0.7.0",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-metrics@v0.7.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-metrics/@v/v0.7.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-msgpack/v2",
+      "version": "v2.1.5",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-msgpack/v2@v2.1.5/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-msgpack/v2/@v/v2.1.5.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-multierror",
+      "version": "v1.1.1",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-multierror@v1.1.1/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-multierror/@v/v1.1.1.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-plugin",
+      "version": "v1.8.0",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-plugin@v1.8.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-plugin/@v/v1.8.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-retryablehttp",
+      "version": "v0.7.8",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-retryablehttp@v0.7.8/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-retryablehttp/@v/v0.7.8.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-rootcerts",
+      "version": "v1.0.2",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-rootcerts@v1.0.2/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-rootcerts/@v/v1.0.2.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-secure-stdlib/listenerutil",
+      "version": "v0.1.10",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-secure-stdlib/listenerutil@v0.1.10/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-secure-stdlib/listenerutil/@v/v0.1.10.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-secure-stdlib/parseutil",
+      "version": "v0.2.0",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-secure-stdlib/parseutil@v0.2.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-secure-stdlib/parseutil/@v/v0.2.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-secure-stdlib/reloadutil",
+      "version": "v0.1.1",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-secure-stdlib/reloadutil@v0.1.1/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-secure-stdlib/reloadutil/@v/v0.1.1.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-secure-stdlib/strutil",
+      "version": "v0.1.2",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-secure-stdlib/strutil@v0.1.2/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-secure-stdlib/strutil/@v/v0.1.2.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-secure-stdlib/tlsutil",
+      "version": "v0.1.3",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-secure-stdlib/tlsutil@v0.1.3/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-secure-stdlib/tlsutil/@v/v0.1.3.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-set/v3",
+      "version": "v3.0.1",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-set/v3@v3.0.1/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-set/v3/@v/v3.0.1.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-sockaddr",
+      "version": "v1.0.7",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-sockaddr@v1.0.7/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-sockaddr/@v/v1.0.7.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-uuid",
+      "version": "v1.0.3",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-uuid@v1.0.3/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-uuid/@v/v1.0.3.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/go-version",
+      "version": "v1.9.0",
+      "notice_files": [
+        "licenses/github.com/hashicorp/go-version@v1.9.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/go-version/@v/v1.9.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/golang-lru",
+      "version": "v1.0.2",
+      "notice_files": [
+        "licenses/github.com/hashicorp/golang-lru@v1.0.2/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/golang-lru/@v/v1.0.2.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/golang-lru/v2",
+      "version": "v2.0.7",
+      "notice_files": [
+        "licenses/github.com/hashicorp/golang-lru/v2@v2.0.7/LICENSE",
+        "licenses/github.com/hashicorp/golang-lru/v2@v2.0.7/simplelru/LICENSE_list"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/golang-lru/v2/@v/v2.0.7.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/hcl",
+      "version": "v1.0.1-vault-7",
+      "notice_files": [
+        "licenses/github.com/hashicorp/hcl@v1.0.1-vault-7/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/hcl/@v/v1.0.1-vault-7.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/hcl/v2",
+      "version": "v2.20.2-nomad-1",
+      "notice_files": [
+        "licenses/github.com/hashicorp/hcl/v2@v2.20.2-nomad-1/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/hcl/v2/@v/v2.20.2-nomad-1.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/memberlist",
+      "version": "v0.7.0",
+      "notice_files": [
+        "licenses/github.com/hashicorp/memberlist@v0.7.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/memberlist/@v/v0.7.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/nomad",
+      "version": "v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec",
+      "notice_files": [
+        "licenses/github.com/hashicorp/nomad@v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec/LICENSE",
+        "licenses/github.com/hashicorp/nomad@v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec/command/license.go",
+        "licenses/github.com/hashicorp/nomad@v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec/command/license_get.go",
+        "licenses/github.com/hashicorp/nomad@v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec/command/license_get_test.go",
+        "licenses/github.com/hashicorp/nomad@v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec/helper/crypto/LICENSE",
+        "licenses/github.com/hashicorp/nomad@v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec/helper/grpc-middleware/LICENSE",
+        "licenses/github.com/hashicorp/nomad@v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec/helper/pluginutils/grpcutils/LICENSE",
+        "licenses/github.com/hashicorp/nomad@v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec/helper/pointer/LICENSE",
+        "licenses/github.com/hashicorp/nomad@v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec/helper/testlog/LICENSE",
+        "licenses/github.com/hashicorp/nomad@v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec/helper/uuid/LICENSE",
+        "licenses/github.com/hashicorp/nomad@v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec/nomad/license_config.go",
+        "licenses/github.com/hashicorp/nomad@v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec/nomad/license_config_ce.go",
+        "licenses/github.com/hashicorp/nomad@v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec/plugins/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/nomad/@v/v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/raft",
+      "version": "v1.8.0",
+      "notice_files": [
+        "licenses/github.com/hashicorp/raft@v1.8.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/raft/@v/v1.8.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/raft-autopilot",
+      "version": "v0.1.6",
+      "notice_files": [
+        "licenses/github.com/hashicorp/raft-autopilot@v0.1.6/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/raft-autopilot/@v/v0.1.6.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/serf",
+      "version": "v0.11.0",
+      "notice_files": [
+        "licenses/github.com/hashicorp/serf@v0.11.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/serf/@v/v0.11.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/vault/api",
+      "version": "v1.23.0",
+      "notice_files": [
+        "licenses/github.com/hashicorp/vault/api@v1.23.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/vault/api/@v/v1.23.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hashicorp/yamux",
+      "version": "v0.1.2",
+      "notice_files": [
+        "licenses/github.com/hashicorp/yamux@v0.1.2/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hashicorp/yamux/@v/v0.1.2.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/hpcloud/tail",
+      "version": "v1.0.1-0.20170814160653-37f427138745",
+      "notice_files": [
+        "licenses/github.com/hpcloud/tail@v1.0.1-0.20170814160653-37f427138745/LICENSE.txt"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/hpcloud/tail/@v/v1.0.1-0.20170814160653-37f427138745.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/huandu/xstrings",
+      "version": "v1.5.0",
+      "notice_files": [
+        "licenses/github.com/huandu/xstrings@v1.5.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/huandu/xstrings/@v/v1.5.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/jefferai/isbadcipher",
+      "version": "v0.0.0-20190226160619-51d2077c035f",
+      "notice_files": [
+        "licenses/github.com/jefferai/isbadcipher@v0.0.0-20190226160619-51d2077c035f/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/jefferai/isbadcipher/@v/v0.0.0-20190226160619-51d2077c035f.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/kr/pretty",
+      "version": "v0.3.1",
+      "notice_files": [
+        "licenses/github.com/kr/pretty@v0.3.1/License"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/kr/pretty/@v/v0.3.1.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/kr/text",
+      "version": "v0.2.0",
+      "notice_files": [
+        "licenses/github.com/kr/text@v0.2.0/License"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/kr/text/@v/v0.2.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/mattn/go-colorable",
+      "version": "v0.1.15",
+      "notice_files": [
+        "licenses/github.com/mattn/go-colorable@v0.1.15/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/mattn/go-colorable/@v/v0.1.15.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/mattn/go-isatty",
+      "version": "v0.0.24",
+      "notice_files": [
+        "licenses/github.com/mattn/go-isatty@v0.0.24/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/mattn/go-isatty/@v/v0.0.24.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/miekg/dns",
+      "version": "v1.1.73",
+      "notice_files": [
+        "licenses/github.com/miekg/dns@v1.1.73/COPYRIGHT",
+        "licenses/github.com/miekg/dns@v1.1.73/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/miekg/dns/@v/v1.1.73.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/mitchellh/copystructure",
+      "version": "v1.2.0",
+      "notice_files": [
+        "licenses/github.com/mitchellh/copystructure@v1.2.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/mitchellh/copystructure/@v/v1.2.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/mitchellh/go-homedir",
+      "version": "v1.1.0",
+      "notice_files": [
+        "licenses/github.com/mitchellh/go-homedir@v1.1.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/mitchellh/go-homedir/@v/v1.1.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/mitchellh/go-wordwrap",
+      "version": "v1.0.1",
+      "notice_files": [
+        "licenses/github.com/mitchellh/go-wordwrap@v1.0.1/LICENSE.md"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/mitchellh/go-wordwrap/@v/v1.0.1.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/mitchellh/hashstructure",
+      "version": "v1.1.0",
+      "notice_files": [
+        "licenses/github.com/mitchellh/hashstructure@v1.1.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/mitchellh/hashstructure/@v/v1.1.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/mitchellh/mapstructure",
+      "version": "v1.5.0",
+      "notice_files": [
+        "licenses/github.com/mitchellh/mapstructure@v1.5.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/mitchellh/mapstructure/@v/v1.5.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/mitchellh/pointerstructure",
+      "version": "v1.2.1",
+      "notice_files": [
+        "licenses/github.com/mitchellh/pointerstructure@v1.2.1/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/mitchellh/pointerstructure/@v/v1.2.1.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/mitchellh/reflectwalk",
+      "version": "v1.0.2",
+      "notice_files": [
+        "licenses/github.com/mitchellh/reflectwalk@v1.0.2/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/mitchellh/reflectwalk/@v/v1.0.2.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/moby/sys/mount",
+      "version": "v0.3.5",
+      "notice_files": [
+        "licenses/github.com/moby/sys/mount@v0.3.5/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/moby/sys/mount/@v/v0.3.5.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/moby/sys/mountinfo",
+      "version": "v0.7.2",
+      "notice_files": [
+        "licenses/github.com/moby/sys/mountinfo@v0.7.2/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/moby/sys/mountinfo/@v/v0.7.2.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/oklog/run",
+      "version": "v1.2.0",
+      "notice_files": [
+        "licenses/github.com/oklog/run@v1.2.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/oklog/run/@v/v1.2.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/posener/complete",
+      "version": "v1.2.3",
+      "notice_files": [
+        "licenses/github.com/posener/complete@v1.2.3/LICENSE.txt"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/posener/complete/@v/v1.2.3.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/rogpeppe/go-internal",
+      "version": "v1.14.1",
+      "notice_files": [
+        "licenses/github.com/rogpeppe/go-internal@v1.14.1/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/rogpeppe/go-internal/@v/v1.14.1.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/ryanuber/go-glob",
+      "version": "v1.0.0",
+      "notice_files": [
+        "licenses/github.com/ryanuber/go-glob@v1.0.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/ryanuber/go-glob/@v/v1.0.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/sean-/seed",
+      "version": "v0.0.0-20170313163322-e2103e2c3529",
+      "notice_files": [
+        "licenses/github.com/sean-/seed@v0.0.0-20170313163322-e2103e2c3529/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/sean-/seed/@v/v0.0.0-20170313163322-e2103e2c3529.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/shirou/gopsutil/v3",
+      "version": "v3.24.5",
+      "notice_files": [
+        "licenses/github.com/shirou/gopsutil/v3@v3.24.5/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/shirou/gopsutil/v3/@v/v3.24.5.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/shoenig/go-landlock",
+      "version": "v1.3.1",
+      "notice_files": [
+        "licenses/github.com/shoenig/go-landlock@v1.3.1/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/shoenig/go-landlock/@v/v1.3.1.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/shoenig/go-m1cpu",
+      "version": "v0.2.2",
+      "notice_files": [
+        "licenses/github.com/shoenig/go-m1cpu@v0.2.2/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/shoenig/go-m1cpu/@v/v0.2.2.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/shoenig/test",
+      "version": "v1.13.2",
+      "notice_files": [
+        "licenses/github.com/shoenig/test@v1.13.2/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/shoenig/test/@v/v1.13.2.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/shopspring/decimal",
+      "version": "v1.4.0",
+      "notice_files": [
+        "licenses/github.com/shopspring/decimal@v1.4.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/shopspring/decimal/@v/v1.4.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/spf13/cast",
+      "version": "v1.10.0",
+      "notice_files": [
+        "licenses/github.com/spf13/cast@v1.10.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/spf13/cast/@v/v1.10.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/tklauser/go-sysconf",
+      "version": "v0.3.12",
+      "notice_files": [
+        "licenses/github.com/tklauser/go-sysconf@v0.3.12/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/tklauser/go-sysconf/@v/v0.3.12.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/tklauser/numcpus",
+      "version": "v0.6.1",
+      "notice_files": [
+        "licenses/github.com/tklauser/numcpus@v0.6.1/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/tklauser/numcpus/@v/v0.6.1.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/vmihailenco/msgpack/v5",
+      "version": "v5.3.5",
+      "notice_files": [
+        "licenses/github.com/vmihailenco/msgpack/v5@v5.3.5/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/vmihailenco/msgpack/v5/@v/v5.3.5.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/vmihailenco/tagparser/v2",
+      "version": "v2.0.0",
+      "notice_files": [
+        "licenses/github.com/vmihailenco/tagparser/v2@v2.0.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/vmihailenco/tagparser/v2/@v/v2.0.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "github.com/zclconf/go-cty",
+      "version": "v1.19.0",
+      "notice_files": [
+        "licenses/github.com/zclconf/go-cty@v1.19.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/github.com/zclconf/go-cty/@v/v1.19.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "go",
+      "version": "1.26.7",
+      "notice_files": [
+        "licenses/go@1.26.7/LICENSE",
+        "licenses/go@1.26.7/src/crypto/internal/boring/LICENSE",
+        "licenses/go@1.26.7/src/vendor/golang.org/x/crypto/LICENSE",
+        "licenses/go@1.26.7/src/vendor/golang.org/x/net/LICENSE",
+        "licenses/go@1.26.7/src/vendor/golang.org/x/sys/LICENSE",
+        "licenses/go@1.26.7/src/vendor/golang.org/x/text/LICENSE"
+      ],
+      "corresponding_source_url": "https://go.dev/dl/go1.26.7.src.tar.gz",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "go.yaml.in/yaml/v3",
+      "version": "v3.0.5",
+      "notice_files": [
+        "licenses/go.yaml.in/yaml/v3@v3.0.5/LICENSE",
+        "licenses/go.yaml.in/yaml/v3@v3.0.5/NOTICE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/go.yaml.in/yaml/v3/@v/v3.0.5.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "golang.org/x/crypto",
+      "version": "v0.57.0",
+      "notice_files": [
+        "licenses/golang.org/x/crypto@v0.57.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/golang.org/x/crypto/@v/v0.57.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "golang.org/x/exp",
+      "version": "v0.0.0-20260908205506-85c1c2202aba",
+      "notice_files": [
+        "licenses/golang.org/x/exp@v0.0.0-20260908205506-85c1c2202aba/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/golang.org/x/exp/@v/v0.0.0-20260908205506-85c1c2202aba.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "golang.org/x/net",
+      "version": "v0.59.0",
+      "notice_files": [
+        "licenses/golang.org/x/net@v0.59.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/golang.org/x/net/@v/v0.59.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "golang.org/x/sync",
+      "version": "v0.23.0",
+      "notice_files": [
+        "licenses/golang.org/x/sync@v0.23.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/golang.org/x/sync/@v/v0.23.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "golang.org/x/sys",
+      "version": "v0.48.0",
+      "notice_files": [
+        "licenses/golang.org/x/sys@v0.48.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/golang.org/x/sys/@v/v0.48.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "golang.org/x/text",
+      "version": "v0.42.0",
+      "notice_files": [
+        "licenses/golang.org/x/text@v0.42.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/golang.org/x/text/@v/v0.42.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "golang.org/x/time",
+      "version": "v0.16.0",
+      "notice_files": [
+        "licenses/golang.org/x/time@v0.16.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/golang.org/x/time/@v/v0.16.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "google.golang.org/genproto/googleapis/rpc",
+      "version": "v0.0.0-20260825221802-da73d73af1c5",
+      "notice_files": [
+        "licenses/google.golang.org/genproto/googleapis/rpc@v0.0.0-20260825221802-da73d73af1c5/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/google.golang.org/genproto/googleapis/rpc/@v/v0.0.0-20260825221802-da73d73af1c5.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "google.golang.org/grpc",
+      "version": "v1.83.2",
+      "notice_files": [
+        "licenses/google.golang.org/grpc@v1.83.2/LICENSE",
+        "licenses/google.golang.org/grpc@v1.83.2/NOTICE.txt"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/google.golang.org/grpc/@v/v1.83.2.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "google.golang.org/protobuf",
+      "version": "v1.36.12",
+      "notice_files": [
+        "licenses/google.golang.org/protobuf@v1.36.12/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/google.golang.org/protobuf/@v/v1.36.12.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "gopkg.in/fsnotify.v1",
+      "version": "v1.4.7",
+      "notice_files": [
+        "licenses/gopkg.in/fsnotify.v1@v1.4.7/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/gopkg.in/fsnotify.v1/@v/v1.4.7.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "gopkg.in/tomb.v1",
+      "version": "v1.0.0-20141024135613-dd632973f1e7",
+      "notice_files": [
+        "licenses/gopkg.in/tomb.v1@v1.0.0-20141024135613-dd632973f1e7/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/gopkg.in/tomb.v1/@v/v1.0.0-20141024135613-dd632973f1e7.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "kernel.org/pub/linux/libs/security/libcap/psx",
+      "version": "v1.2.78",
+      "notice_files": [
+        "licenses/kernel.org/pub/linux/libs/security/libcap/psx@v1.2.78/License"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/kernel.org/pub/linux/libs/security/libcap/psx/@v/v1.2.78.zip",
+      "modifications": "No dependency source modifications in this build"
+    },
+    {
+      "module": "oss.indeed.com/go/libtime",
+      "version": "v1.6.0",
+      "notice_files": [
+        "licenses/oss.indeed.com/go/libtime@v1.6.0/LICENSE"
+      ],
+      "corresponding_source_url": "https://proxy.golang.org/oss.indeed.com/go/libtime/@v/v1.6.0.zip",
+      "modifications": "No dependency source modifications in this build"
+    }
+  ],
+  "artifact_hashes": {},
+  "project_license": "Apache-2.0 (original project code only)"
+}

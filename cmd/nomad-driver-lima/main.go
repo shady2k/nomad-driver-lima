@@ -13,6 +13,11 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "recover-owned-pair" {
+		recoveryPairMain(os.Args[2:])
+		return
+	}
+
 	if len(os.Args) > 1 && (os.Args[1] == "recover-absent-create" || os.Args[1] == "purge-retained") {
 		f := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
 		var o driver.FailedCreateOptions

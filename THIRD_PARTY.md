@@ -26,3 +26,11 @@ The source/caller archives do not bundle Nomad, Lima, QEMU, Node, acpx, Prime,
 OpenBao executables or a prepared VM image. Runtime dependencies downloaded by
 installation recipes retain their own terms. Publishing a prepared VM image
 requires a separate installed-package license inventory.
+
+## Current source snapshots
+
+The current main branch contains additional frozen source modules. The notices in
+the older prototype release apply to that release's exact binaries, not to a new
+binary built from this branch. Current per-module dependency notices and source
+locations are provided in `third_party/current-source/`. No new binary release
+is produced by this source update.

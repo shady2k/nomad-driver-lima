@@ -1,84 +1,58 @@
-# nomad-driver-lima
+# Nomad Lima driver and nomad-workers
 
-A prototype of a Nomad `lima` task driver using the **official Lima CLI**.
-Lima, QEMU/VZ and guest distributions are unmodified upstream dependencies.
-There is no REST server, scheduler, companion service or runtime/kernel fork.
-The public release targets Linux amd64 hosts. Mac host support remains
-experimental and is not included in the release binaries.
+Current source snapshots, published as a prototype. This update preserves the
+existing implementation; it does not redesign the system or claim an integrated
+production-ready feature set.
 
-Read [the architectural decision](docs/adr/0001-upstream-lima.md).
+## Source layout and status
 
-## Implemented
+| Component | Source revision | Location | Status |
+|---|---|---|---|
+| Linux driver | `60ecf69` | `cmd/`, `internal/`, root Go module | Frozen maintained Linux implementation |
+| Darwin driver | `1a1ffe1` | `variants/darwin-driver/` | Separate frozen platform implementation; not merged with Linux |
+| Caller core 0.1.48 | `1a351c97` | `variants/caller-core-0.1.48/plugin/` | Snapshot identified as installed by the source maintainer |
+| Caller upload/shell candidate 0.1.49 | `25e42b8` | `plugin/` | Reviewed source candidate; not live accepted or activated |
 
-- Start, wait, inspect, signal, stop, destroy-with-disk-retention and recover.
-- Durable allocation/task/owner, instance config, machine and boot identity.
-- Exclusive launch intent and per-task process lock; uncertain commands are not
-  replayed. Recovery attaches to the same guest process rather than calling start.
-- Real guest exit codes and atomic guest result; bounded stdout/stderr forwarding
-  to Nomad. Complete logs remain on the guest disk. A crash can replay the last
-  forwarded chunk because the Nomad log FIFO has no transactional acknowledgement.
-- Official `limactl shell` non-TTY exec/streaming and `copy` transfer primitive.
-- PTY exec and terminal resize through the instance-generated official SSH config;
-  Lima-managed key only, no agent forwarding or personal SSH configuration.
-- Native architecture Linux guests, host mounts/personal keys/agent forwarding
-  disabled, operator-pinned template and exact stable Lima version.
-- CPU/RAM reservation validation using Nomad agent compute, explicit guest RAM
-  overhead, physical free-space guard. Group ephemeral disk belongs in the jobspec.
-- Fingerprint and lifecycle events. Network isolation is explicitly **false**.
+The shared embedded repository helpers match across the selected driver and
+caller revisions. The Linux and Darwin driver implementations have divergent
+changes; they are deliberately preserved separately.
 
-## Deliberate limitations
+Broader preliminary work, including the caller 0.1.50 create/retry branch, is
+preserved on `wip/preserved-current-source` under `wip/snapshots/`, with a source
+inventory and explicit untested status. It is not silently merged into this main
+snapshot. Private Git histories are not published.
 
-**Not production ready.** Stats sample the owned host VM process: RSS bytes and
-CPU percent (100% = one core), with Nomad CPU ticks expressed in MHz. They do not
-represent guest free memory, command-only usage, or helper process overhead.
-Sampling stops on missing/changed process identity; no synthetic zero samples.
-macOS guests,
-workload environment/secrets injection and automatic artifact export are not yet
-implemented. A transport failure stays unknown and is not successful completion.
-Early ambiguous startup preserves the instance and ledger for reconciliation.
-Automatic idle close, disk purge, broad file sync and automatic acceptance of edits
-are not implemented. `force=true` never grants disk deletion.
+## Known gaps
 
-Default Lima networking can reach host loopback/LAN; this prototype does not claim
-the former BoxLite egress allowlist. An additional reviewed **upstream/host network
-policy** is required before untrusted production workloads. No host firewall or VPN
-changes are made by this driver. Linux requires an unprivileged runtime owner with
-KVM access and official QEMU/OVMF. A root Nomad agent must configure an existing non-root `runtime_user`. The driver
-drops UID/GID and supplementary groups only for official limactl child processes;
-it never invokes sudo or creates accounts/grants. Its private Lima home must already
-belong to that account and its template must be readable by it. Unprivileged drivers
-can only select their own identity. This path has unit coverage; live root-agent
-acceptance remains pending.
+- Resize, destroy, template editing/publication and recovery remain distinct
+  paths with incomplete or uneven interfaces. Their presence in source does not
+  establish acceptance of every workflow.
+- Nomad-only placement is not implemented as a unified architecture. Existing
+  caller-side placement/gates remain in this source.
+- Caller 0.1.49 adds scoped multipart upload and finite shell without requiring
+  ACP readiness. It has source/offline coverage, not live environment acceptance.
+- The Darwin snapshot is separate experimental platform code. No combined
+  cross-platform production acceptance is claimed.
+- Prepared-image acceptance, operational configuration and live deployment are
+  outside this publication. No running VM or service was changed.
 
-`limactl shell --sync` is upstream interactive review functionality, not a headless
-remote coordinator protocol. The driver uses explicit official copy. Sync excludes
-and `.limasyncignore` are documented for 2.3, not stable 2.2.1.
+## Development
 
-## Local development
+Build the root Linux driver with `go build ./cmd/nomad-driver-lima`. Build the
+Darwin implementation from `variants/darwin-driver/` as a separate Go module.
+Use `python3 -m unittest discover -s plugin/tests -p 'test_*.py'` for the caller's
+offline tests. Platform/live tests require separately configured disposable
+environments. No CI success is claimed by this source update.
 
-The pinned Nomad SDK source revision matches the tested Nomad 2.0.7 revision
-`9dcbdc5e64ecc4ec63e42b225af729c87c87cf83`; the Go module's historical pseudo-version
-name must not be mistaken for the deployed Nomad version.
+The existing `linux-prototype-0.1.29` release is an older immutable snapshot. Its
+binaries are not rebuilt or replaced by this source publication.
 
-```sh
-go test -race ./...
-go build -trimpath -o bin/nomad-driver-lima ./cmd/nomad-driver-lima
-```
+## Configuration and licensing
 
-Tests use a fake official CLI and a real Nomad SDK gRPC adapter. Real VM tests are
-opt-in and require an isolated operator JSON file via `NOMAD_LIMA_LIVE_CONFIG` and a
-private `NOMAD_LIMA_LIVE_ROOT`; they must never target production state. No paid model
-is called. Acceptance evidence is installation-local and is not committed here.
+Use operator-owned configuration outside the repository for endpoints, node
+identities, paths and credentials. Private inventories, receipts, tokens, logs,
+build artifacts and installation-specific contexts are excluded.
 
-## License
-
-Original driver and plugin code is licensed under [Apache-2.0](LICENSE). See
-[NOTICE](NOTICE) and [third-party licensing](THIRD_PARTY.md) for dependencies.
-The compiled driver's dependency licenses, including Nomad BUSL/MPL scopes,
-remain applicable; the project license does not replace them.
-
-
-The caller plugin is in `plugin/`. It includes owned project-session discovery,
-durable execution, retained-disk resume and terminal Nomad refusal reporting.
-See [the caller configuration guide](docs/public-quickstart.md) and
-[the retained resume contract](docs/retained-resume.md).
+Original code is Apache-2.0: see [LICENSE](LICENSE), [NOTICE](NOTICE), and
+[third-party licensing](THIRD_PARTY.md). Dependencies retain their own licenses,
+including Nomad's BUSL/MPL scopes.

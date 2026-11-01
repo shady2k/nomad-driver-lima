@@ -173,3 +173,29 @@ func TestCapacityConcurrentActualReconciliationReadsFreshChangedLedger(t *testin
 		}
 	}
 }
+
+func TestCapacityUsesSameRuntimeMemoryAndFiniteLimit(t *testing.T) {
+	root := t.TempDir()
+	os.Chmod(root, 0700)
+	store, err := openStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{LimaHome: root, MemoryOverheadMiB: 128}
+	attrs := capacityAttributesContext(t.Context(), cfg, store, func([]*State) (runtimeCommitment, int64, error) {
+		return runtimeCommitment{VMs: 3, CPUs: 3, MemoryMiB: 29056}, 30053, nil
+	})
+	known, _ := attrs["driver.lima.capacity.known"].GetBool()
+	used, _ := attrs["driver.lima.capacity.used_reservation_mib"].GetInt()
+	limit, _ := attrs["driver.lima.capacity.host_memory_limit_mib"].GetInt()
+	if !known || used != 29056 || limit != 30053 {
+		t.Fatal("runtime memory disagreement")
+	}
+	attrs = capacityAttributesContext(t.Context(), cfg, store, func([]*State) (runtimeCommitment, int64, error) {
+		return runtimeCommitment{}, 0, context.DeadlineExceeded
+	})
+	known, _ = attrs["driver.lima.capacity.known"].GetBool()
+	if known {
+		t.Fatal("unknown runtime inventory advertised free RAM")
+	}
+}

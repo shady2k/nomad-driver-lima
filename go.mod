@@ -6,12 +6,13 @@ require (
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.8.0
 	github.com/hashicorp/nomad v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec
+	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/term v0.46.0
 )
 
 require (
 	github.com/stretchr/testify v1.12.1 // indirect
-	go.yaml.in/yaml/v3 v3.0.5 // indirect
+	go.etcd.io/bbolt v1.5.0 // indirect
 )
 
 require (

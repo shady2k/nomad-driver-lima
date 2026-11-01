@@ -16,7 +16,7 @@ import (
 func capacityAttributes(cfg Config, store *Store) map[string]*pstructs.Attribute {
 	return capacityAttributesContext(context.Background(), cfg, store)
 }
-func capacityAttributesContext(parent context.Context, cfg Config, store *Store) map[string]*pstructs.Attribute {
+func capacityAttributesContext(parent context.Context, cfg Config, store *Store, runtimeMemory ...func([]*State) (runtimeCommitment, int64, error)) map[string]*pstructs.Attribute {
 	binding, _ := json.Marshal([]any{cfg.StateDir, cfg.LimaHome, os.Geteuid(), os.Getegid()})
 	out := map[string]*pstructs.Attribute{"driver.lima.capacity.known": pstructs.NewBoolAttribute(false), "driver.lima.capacity.attempted_unix": pstructs.NewIntAttribute(time.Now().Unix(), ""), "driver.lima.capacity.scope_sha256": pstructs.NewStringAttribute(lima.Hash(binding)), "driver.lima.capacity.effective_uid": pstructs.NewIntAttribute(int64(os.Geteuid()), ""), "driver.lima.capacity.effective_gid": pstructs.NewIntAttribute(int64(os.Getegid()), "")}
 	reason := func(code string) map[string]*pstructs.Attribute {
@@ -76,11 +76,23 @@ func capacityAttributesContext(parent context.Context, cfg Config, store *Store)
 			mem += int64(s.MemoryMiB + cfg.MemoryOverheadMiB)
 		}
 	}
+	var memoryLimit int64
+	if len(runtimeMemory) > 0 {
+		var resources runtimeCommitment
+		resources, memoryLimit, err = runtimeMemory[0](rows)
+		count, cpu, mem = resources.VMs, resources.CPUs, resources.MemoryMiB
+		if err != nil || mem < 0 || memoryLimit <= 0 {
+			return reason("runtime_memory_unavailable")
+		}
+	}
 	var fs syscall.Statfs_t
 	if syscall.Statfs(cfg.LimaHome, &fs) != nil {
 		return reason("physical_statfs_unavailable")
 	}
 	values := map[string]int64{"observed_unix": time.Now().Unix(), "used_vms": count, "used_vcpus": cpu, "used_reservation_mib": mem, "used_disk_gib": disk, "physical_available_mib": int64(uint64(fs.Bavail) * uint64(fs.Bsize) / 1048576), "disk_floor_mib": int64(cfg.DiskFreeFloorMiB)}
+	if memoryLimit > 0 {
+		values["host_memory_limit_mib"] = memoryLimit
+	}
 	out["driver.lima.capacity.known"] = pstructs.NewBoolAttribute(true)
 	for k, v := range values {
 		out["driver.lima.capacity."+k] = pstructs.NewIntAttribute(v, "")

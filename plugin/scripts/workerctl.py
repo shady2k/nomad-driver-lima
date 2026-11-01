@@ -54,6 +54,9 @@ class Adapter:
   if self.c.get('resolved_template'):result['resolved_template']=self.c['resolved_template']
   return result
  def remote(self,s,action,**fields):
+  if action=='watch':
+   import request_transcript
+   yield from request_transcript.watch(self,s,fields['request_id'],fields.get('cursor'));return
   allocation=self.target()
   if action in ('create','submit') and (allocation.get('ClientStatus')!='running' or allocation.get('TaskStates',{}).get(self.c['task'],{}).get('State')!='running'):raise RuntimeError('TASK_NOT_RUNNING_NO_PROMPT_DISPATCH')
   current=self.attempt(allocation);f=self.local(s)/'session.json'
@@ -85,8 +88,17 @@ class Adapter:
    except FileExistsError:
     if json.loads(binding.read_text())!={'session_id':s,'owner_id':self.c['owner_id']}:raise RuntimeError('ALLOCATION_ALREADY_BOUND')
    f=self.local(s)/'session.json'
-   if f.exists():return self.load(s)
-   v={'session_id':s,'config_hash':self.hash,'phase':'create_intent','actual_backend':'lima/nomad-exec/acpx','attempt':attempt};atomic(f,v)
+   previous=self.load(s)if f.exists()else{}
+   if previous and previous.get('phase')!='management_ready':return previous
+   if previous:
+    self.require_initiator(s)
+    import exec_checkpoint
+    exec_checkpoint.verify_owner(self,s,current)
+    if previous.get('attempt')!=attempt:raise RuntimeError('MANAGEMENT_SESSION_ATTEMPT_CHANGED')
+    import activity,operations
+    activity.pending(self,s);operations.verify_terminal(self,s)
+    atomic(self.local(s)/'management-before-acp.json',previous)
+   v={'session_id':s,'config_hash':self.hash,'phase':'create_intent','actual_backend':'lima/nomad-exec/acpx','attempt':attempt,**({k:previous[k]for k in ('activity_revision','management_machine_identity')if k in previous}if previous else{})};atomic(f,v)
    import lease
    lease.create(self.local(s),self.c.get('agent_instance_id',self.c['owner_id']),s,attempt)
    try:
@@ -146,18 +158,34 @@ class Adapter:
    state=self.load(s);observed=lease.create(self.local(s),self.c.get('agent_instance_id',self.c['owner_id']),s,state.get('attempt'))
    lease.observe(self.local(s),observed['owner'],s,observed['attempt'],observed['generation'],observed['sequence']+1,r)
    try:
-    frame=list(self.remote(s,'submit',request_id=r,prompt=prompt))[-1];v.update(frame);v['phase']='queued';atomic(f,v)
+    frame=list(self.remote(s,'submit',request_id=r,prompt=prompt))[-1]
+    import request_transcript
+    request_transcript.validate_submit_ack(frame,s,r,h)
+    v.update(frame);v['phase']='queued';atomic(f,v)
    except Exception:
     v['phase']='submit_unknown';atomic(f,v);raise
    return v
  def watch(self,s,r):
-  self.load(s);f=self.local(s)/(uid(r)+'.json');v=json.loads(f.read_text())
+  self.load(s);self.require_initiator(s) if self.c.get('creator_record') else None
+  f=self.local(s)/(uid(r)+'.json');v=json.loads(f.read_text())
+  import request_transcript
+  next_action='request-transcript --session '+s+' --request '+r
+  if v.get('phase')=='terminal':
+   terminal=request_transcript.terminal_summary(v.get('terminal'))
+   public={'status':terminal['status']} if terminal else {'status':'unknown'}
+   if terminal and terminal['stop_reason']!='unknown':public['stopReason']=terminal['stop_reason']
+   if public['status']=='failed':public['error']={'code':'RETAINED_TURN_FAILED','message':'Inspect retained transcript/diagnostics; do not resubmit.'}
+   yield {'type':'watch','session_id':s,'request_id':r,'event':{'type':'turn_result','requestId':v.get('acpx_request_id'),'cursor':v.get('cursor'),'result':public},'cached_local_terminal':True,'terminal_summary':terminal,'prompt_retry':False,'next_action':next_action};return
+  stream=self.remote(s,'watch',request_id=r,cursor=v.get('cursor'))
   try:
-   for frame in self.remote(s,'watch',request_id=r,cursor=v.get('cursor')):
-    e=frame['event'];v['cursor']=e['cursor'];v['acpx_request_id']=e['requestId']
+   for frame in stream:
+    e=frame['event']
+    if frame.get('request_id')!=r or not isinstance(e.get('requestId'),str) or not e['requestId'] or len(e['requestId'])>256 or (v.get('acpx_request_id') is not None and v['acpx_request_id']!=e['requestId']):raise RuntimeError('WATCH_REQUEST_BINDING_CHANGED')
+    v['cursor']=e['cursor'];v['acpx_request_id']=e['requestId']
     if e['type']=='turn_result':
      if v.get('export_verified') and v.get('terminal')!=e['result']:raise RuntimeError('TERMINAL_METADATA_CHANGED_AFTER_CHECKPOINT')
      v.update(phase='terminal',terminal=e['result'])
+     frame={**frame,'terminal_summary':request_transcript.terminal_summary(e['result']),'next_action':next_action,'prompt_retry':False}
     with self.lock(s):atomic(f,v)
     yield frame
   except Exception:
@@ -165,6 +193,7 @@ class Adapter:
     v['phase']='watch_unknown'
     with self.lock(s):atomic(f,v)
    raise
+  finally:stream.close()
  def event(self,s,stage,r=None):
   list(self.remote(s,'lifecycle',stage=stage,request_id=r))
  def export_record(self,s,r,snapshot=None):
@@ -353,11 +382,12 @@ class Adapter:
   raise RuntimeError('STOP_OR_TOKEN_CLEANUP_PENDING_RESULTS_RETAINED')
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--config',required=True);p.add_argument('--operations-config');sub=p.add_subparsers(dest='cmd',required=True)
- for name in ('templates','models','capacity','request-wait','request-status','propose','request','resume','recover-copy','list','find','index-lineage'):
+ p=argparse.ArgumentParser();p.add_argument('--config',required=True);p.add_argument('--operations-config');p.add_argument('--discovery-config',help='Installer-owned global discovery reference; bound target files stay immutable');sub=p.add_subparsers(dest='cmd',required=True)
+ import vm_interface
+ vm_interface.parser(sub)
+ for name in ('templates','models','capacity','request-status','propose','request','resume','recover-copy','list','find','index-lineage'):
   q=sub.add_parser(name)
-  if name in ('request','request-wait','request-status','resume','recover-copy','index-lineage'):q.add_argument('--session',required=True)
-  if name=='request-wait':q.add_argument('--timeout',type=float,default=120)
+  if name in ('request','request-status','resume','recover-copy','index-lineage'):q.add_argument('--session',required=True)
   if name in ('list','find'):
    q.add_argument('--project');q.add_argument('--creator-record',required=True);scope=q.add_mutually_exclusive_group();scope.add_argument('--mine',action='store_true',help='Default: exact initiating native instance/session/generation');scope.add_argument('--all-owned',action='store_true',help='Read-only other sessions of this configured owner; never adoption')
   if name=='recover-copy':
@@ -377,9 +407,11 @@ def main():
    q.add_argument('--architecture',choices=['auto','amd64','arm64'],default='auto')
   if name=='propose':q.add_argument('--reason',required=True);q.add_argument('--tool',action='append',default=[])
 
- for name in ('create','status','lifecycle','connection-info','model-select','exec','exec-status','exec-abandon-plan','exec-abandon','template-save-plan','template-save','template-save-status','prepare-template','template-draft','operation-start','operation-status','operation-logs','operation-wait','operation-cancel','submit','watch','collect','result','finish'):
+ for name in ('runtime-rebind','create','status','lifecycle','connection-info','model-select','exec','exec-status','exec-abandon-plan','exec-abandon','template-save-plan','template-save','template-save-status','prepare-template','template-draft','operation-start','operation-status','operation-logs','operation-wait','operation-cancel','submit','watch','request-transcript','request-cancel','request-cancel-status','collect','result','finish'):
   a=sub.add_parser(name);a.add_argument('--session',required=True)
-  if name in ('submit','watch','collect','result','finish'):a.add_argument('--request',required=True)
+  if name=='runtime-rebind':
+   a.add_argument('--operation',required=True);a.add_argument('--cleanup-receipt',required=True);a.add_argument('--retry-pre-effect',action='store_true',help='Same-ID retry only when guest has no intent/fence and unchanged ready old binding; never repeats session/new')
+  if name in ('submit','watch','request-transcript','request-cancel','request-cancel-status','collect','result','finish'):a.add_argument('--request',required=True)
   if name=='connection-info':a.add_argument('--access-profile-file');a.add_argument('--format',choices=['text','json'],default='text')
   if name=='model-select':a.add_argument('--selection',required=True);a.add_argument('--model',required=True)
   if name.startswith('template-save'):
@@ -402,13 +434,24 @@ def main():
   if name=='exec-abandon':a.add_argument('--approval-file',required=True)
   if name=='exec':
    a.add_argument('--exec-id',required=True);a.add_argument('--timeout',type=int);a.add_argument('--cwd');a.add_argument('argv',nargs=argparse.REMAINDER)
+  if name=='request-transcript':
+   a.add_argument('--cursor');a.add_argument('--limit',type=int,default=50);a.add_argument('--max-bytes',type=int,default=65536)
   if name=='submit':a.add_argument('--prompt-file',required=True)
   if name in ('collect','result','finish','prepare-template'):a.add_argument('--snapshot')
   if name=='collect':a.add_argument('paths',nargs='+')
  a=p.parse_args()
- if a.cmd in ('templates','models','capacity','request-wait','request-status','request','propose','resume','recover-copy','list','find','index-lineage'):
+ if a.cmd=='vm':
+  result=vm_interface.run(a,vm_interface.discovery_config(a.config,a.discovery_config),a.operations_config)
+  if isinstance(result,dict):
+   print(json.dumps(result),flush=True)
+   if a.vm_command=='cancel'and result.get('phase')not in ('cancel_accepted','terminal_observed'):raise SystemExit(3)
+  else:
+   for frame in result:print(json.dumps(frame),flush=True)
+  return
+ if a.cmd in ('templates','models','capacity','request-status','request','propose','resume','recover-copy','list','find','index-lineage'):
   from catalog_cli import CatalogClient
-  c=CatalogClient(a.config,read_only=a.cmd in ('list','find'))
+  selected=vm_interface.discovery_config(a.config,a.discovery_config)if a.cmd in ('templates','models','capacity','request','resume','recover-copy','propose')else a.config
+  c=CatalogClient(selected,read_only=a.cmd in ('list','find'))
   if a.cmd=='templates':out=c.templates()
   elif a.cmd=='models':
    import model_catalog
@@ -421,16 +464,27 @@ def main():
    else:out=c.capacity()
   elif a.cmd in ('list','find'):out=c.find_workers(a.project,a.creator_record,a.all_owned)
   elif a.cmd=='index-lineage':out=c.index_lineage(a.session)
-  elif a.cmd=='request-wait':out=c.request_wait(a.session,a.timeout)
   elif a.cmd=='request-status':out=c.request_status(a.session)
   elif a.cmd=='recover-copy':out=c.recover_copy(a.session,a.input_id,a.creator_record,a.vcpus,a.memory_mib)
   elif a.cmd=='resume':out=c.resume(a.session,a.source_allocation,a.creator_record)
   elif a.cmd=='propose':out=c.propose(a.reason,a.tool)
   else:out=c.request(a.session,a.template,a.template_version,a.architecture,a.vcpus,a.memory_mib,a.disk_gib,a.purpose,a.project,a.task_link,a.creator_record,a.model,a.task_title,a.source_agent_name,a.source_agent_type,a.repository_profile,a.repository_profile_sha256)
-  print(json.dumps(out),flush=True)
-  if out.get('exit_code')in (2,3):sys.exit(out['exit_code'])
-  return
+  print(json.dumps(out),flush=True);return
  adapter=Adapter(a.config,a.operations_config);s=uid(a.session)
+ if a.cmd=='runtime-rebind':
+  import runtime_rebind
+  out=runtime_rebind.execute(adapter,s,uid(a.operation),a.cleanup_receipt,a.retry_pre_effect);print(json.dumps(out),flush=True)
+  if out.get('phase')!='ready':raise SystemExit(3)
+  return
+ if a.cmd=='request-transcript':
+  import request_transcript
+  print(json.dumps(request_transcript.read(adapter,s,uid(a.request),a.cursor,a.limit,a.max_bytes)),flush=True);return
+ if a.cmd in ('request-cancel','request-cancel-status'):
+  import request_cancel
+  out=request_cancel.cancel(adapter,s,uid(a.request))if a.cmd=='request-cancel'else request_cancel.status(adapter,s,uid(a.request))
+  print(json.dumps(out),flush=True)
+  if a.cmd=='request-cancel'and out['phase']not in ('cancel_accepted','terminal_observed'):raise SystemExit(3)
+  return
  if a.cmd=='connection-info':
   import connection_info
   out=connection_info.connection_info(adapter,s,a.access_profile_file)

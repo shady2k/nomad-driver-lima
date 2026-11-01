@@ -10,7 +10,7 @@ assert manifest['name']=='nomad-workers'
 assert (root/'hooks/hooks.json').is_file()
 source=pathlib.Path(sys.argv[3])/'plugin'
 assert manifest['version']==json.loads((source/'.claude-plugin/plugin.json').read_text())['version']
-for name in ['scripts/workerctl.py','scripts/catalog_cli.py','scripts/nomad_cli.py','scripts/guest_exec.py','scripts/capacity_view.py','scripts/operations.py','scripts/operation_guest.py','scripts/operation_policy.py','scripts/session_hook.py','scripts/template_draft.py','scripts/activity.py','scripts/placement.py','scripts/model_catalog.py','skills/nomad-workers/SKILL.md','hooks/hooks.json']:
+for name in ['scripts/file_transfer.py','scripts/upload_guest.py','scripts/exec_checkpoint.py','scripts/vm_interface.py','scripts/workerctl.py','scripts/catalog_cli.py','scripts/nomad_cli.py','scripts/guest_exec.py','scripts/capacity_view.py','scripts/operations.py','scripts/operation_guest.py','scripts/operation_policy.py','scripts/session_hook.py','scripts/template_draft.py','scripts/activity.py','scripts/placement.py','scripts/model_catalog.py','skills/nomad-workers/SKILL.md','hooks/hooks.json']:
  assert hashlib.sha256((root/name).read_bytes()).digest()==hashlib.sha256((source/name).read_bytes()).digest(),'Installed source differs from frozen release'
 config=json.loads((home/'.config/nomad-workers/catalog-client.json').read_text());catalog=pathlib.Path(config['catalog_file']).read_bytes()
 assert hashlib.sha256(catalog).hexdigest()==config['catalog_sha256']

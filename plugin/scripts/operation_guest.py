@@ -48,8 +48,17 @@ def alive(row):
  p=process(row['pid']);return p is not None and p['state']!='Z' and all(p.get(k)==row.get(k) for k in ('pid','ticks','uid'))
 def guarded(p):
  if str(uuid.UUID(p['session_id']))!=p['session_id']:raise RuntimeError('INVALID_SESSION')
- root=private(p['state_dir']);session=private(root/p['session_id'])
- s=read(session/'session.json')
+ root=private(p['state_dir']);session=root/p['session_id']
+ if not session.exists()and p.get('allow_management_session')is True:session.mkdir(mode=0o700)
+ session=private(session)
+ state_file=session/'session.json'
+ if not state_file.exists()and p.get('allow_management_session')is True:
+  state_file=session/'management-session.json'
+  with lock(session/'management.lock'):
+   if not state_file.exists():atomic(state_file,{'config':p['guest_config'],'phase':'ready','management_only':True,'owner_binding':p['owner_binding']})
+  management=read(state_file)
+  if management.get('owner_binding')!=p.get('owner_binding'):raise RuntimeError('MANAGEMENT_SESSION_OWNER_CHANGED')
+ s=read(state_file)
  if s.get('config')!=p['guest_config'] or s.get('phase')!='ready':raise RuntimeError('GUEST_SESSION_CONFIG_OR_PHASE_CHANGED')
  return session
 

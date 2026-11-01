@@ -1,6 +1,6 @@
 """Work revisions and checkpoint fences. Caller holds the existing session lock."""
 import json,pathlib
-UNKNOWN={'submit_intent','submit_unknown','queued','watch_unknown','exec_unknown','start_unknown','unknown','launch_intent','launching','running'}
+UNKNOWN={'rebind_unknown','binding_pending','submit_intent','submit_unknown','queued','watch_unknown','exec_unknown','start_unknown','unknown','launch_intent','launching','running'}
 
 def records(a,s):
  paths=list(a.local(s).glob('*.json'));folder=a.local(s)/'checkpoints'
@@ -21,6 +21,7 @@ def pending(a,s,exclude=None,allow_running=False):
  for p,row in records(a,s):
   if exclude is not None and p==exclude:continue
   phase=row.get('phase')
+  if (p.name.startswith('runtime-rebind-')or row.get('type')=='runtime_rebind')and(phase!='ready'or row.get('session_ready')is not True):raise RuntimeError('RUNTIME_RECOVERY_UNCONFIRMED_NO_NEW_ACTIVITY')
   if phase in ('exporting','export_failed_retryable') or (row.get('export_staging_dir') and not row.get('export_verified')):raise RuntimeError('UNVERIFIED_EXPORT_VM_RETAINED_RETRY_TRANSFER')
   work=any(k in row for k in ('request_id','execution_id','operation_id'))
   if work and phase in UNKNOWN:
@@ -30,7 +31,7 @@ def pending(a,s,exclude=None,allow_running=False):
 def record(a,s,path,row):
  from workerctl import atomic
  state=a.load(s)
- if state.get('phase')!='ready':raise RuntimeError('SESSION_NOT_READY_OR_FINISHING')
+ if state.get('phase')!='ready'and not(state.get('phase')=='management_ready'and row.get('work_kind')in ('upload','managed_operation')):raise RuntimeError('SESSION_NOT_READY_OR_FINISHING')
  pending(a,s,allow_running=True)
  if pathlib.Path(path).exists():raise RuntimeError('ACTIVITY_ALREADY_RECORDED_NO_REPLAY')
  row['activity_revision']=revision(a,s)+1

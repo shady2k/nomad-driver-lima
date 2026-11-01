@@ -28,6 +28,8 @@ class CatalogClient:
   try:return json.loads(r.stdout)
   except (ValueError,UnicodeDecodeError):raise RuntimeError('NOMAD_READ_INVALID_JSON') from None
  def templates(self):
+  import catalog_routing
+  if catalog_routing.enabled(self.c):return catalog_routing.metadata(self.c)
   raw=pathlib.Path(self.c['catalog_file']).read_bytes()
   if len(raw)>4194304 or hashlib.sha256(raw).hexdigest()!=self.c['catalog_sha256']:raise ValueError('CATALOG_CHECKSUM_MISMATCH')
   doc=json.loads(raw)
@@ -75,7 +77,12 @@ class CatalogClient:
    if per<=0:reasons.append('lima_cpu_conversion_unknown')
    if reasons:effective={'vcpus':None,'guest_memory_mib':None,'disk_gib':None,'additional_vm_slots':None,'telemetry':'ineligible_or_unknown','advisory':True}
    out.append({'node_status':n.get('Status'),'scheduling_eligibility':n.get('SchedulingEligibility'),'repository_profiles':{k.removeprefix('driver.lima.repositories.profile.'):value(k)for k in set(attrs)|set(da)if k.startswith('driver.lima.repositories.profile.')},'repository_profile_default':value('driver.lima.repositories.default'),'driver':{'name':'lima','detected':bool(drv.get('Detected')),'healthy':bool(drv.get('Healthy'))},'placement_eligible':not reasons,'placement_reasons':reasons,'late_platform_selection':value('driver.lima.catalog.late_platform_selection') in (True,'true'),'catalog_sha256':value('driver.lima.catalog.sha256'),'available_for_one_new_vm':effective,'occupied':{'cpu_mhz':used_cpu,'reservation_mib':used_mem,'driver':telemetry},'node_id':d['ID'],'name':d.get('Name'),'architecture':attrs.get('cpu.arch'),'host_os':attrs.get('kernel.name'),'cpu_mhz_per_vcpu':per,'allocatable_cpu_mhz':max(0,cpu),'used_cpu_mhz':used_cpu,'free_cpu_mhz':max(0,cpu-used_cpu),'free_guest_vcpus_by_cpu':max(0,cpu-used_cpu)//per if per>0 and not reasons else None,'memory_overhead_mib_per_vm':value('driver.lima.operator_limits.memory_overhead_mib'),'free_guest_memory_mib_for_one_vm':None if reasons else max(0,mem-used_mem-int(value('driver.lima.operator_limits.memory_overhead_mib') or self.c.get('memory_overhead_mib',0))),'allocatable_reservation_mib':max(0,mem),'used_reservation_mib':used_mem,'free_reservation_mib':max(0,mem-used_mem),'disk_free':'unknown_until_authoritative_driver_admission','node_operator_limits':{k:value('driver.lima.operator_limits.'+k) for k in ('max_vms','max_total_vcpus','max_total_memory_mib','max_total_disk_gib','max_guest_vcpus','max_guest_memory_mib','max_guest_disk_gib','memory_overhead_mib')},'advisory':True})
-  return {'nodes':out,'resource_scope':'per_node_not_interchangeable_or_summed','operator_limits':self.c.get('request_limits',{}),'quota_authority':'Nomad reservations and configured driver node budgets; displayed free capacity is advisory','auto_close_enabled':False}
+  from capacity_view import describe,summarize
+  result={'observed_unix':int(__import__('time').time()),'snapshot_not_reservation':True,'units':{'cpu':'whole_vcpus','memory':'MiB_guest_plus_explicit_overhead','disk':'GiB_admission_quota'},'nodes':out,'resource_scope':'per_node_not_interchangeable_or_summed','operator_limits':self.c.get('request_limits',{}),'quota_authority':'Nomad reservations and configured driver node budgets; displayed free capacity is advisory','auto_close_enabled':False}
+  import catalog_routing
+  if catalog_routing.enabled(self.c):result=catalog_routing.capacity(result,self.templates())
+  describe(result['nodes'])
+  return summarize(result)
  def request_templates(self):
   entries=self.templates()
   if self.c.get('model_catalog_file'):
@@ -89,7 +96,13 @@ class CatalogClient:
   if any(type(v)!=int or v<1 for v in (cpus,memory,disk)):raise ValueError('POSITIVE_REQUEST_RESOURCES_REQUIRED')
   arch=None if arch in (None,'auto') else arch
   if arch not in (None,'amd64','arm64'):raise ValueError('UNSUPPORTED_REQUEST_ARCHITECTURE')
-  result=self.capacity();pins=placement.variants(self.request_templates(),template,version,arch,disk)
+  result=self.capacity()
+  import catalog_routing
+  if catalog_routing.enabled(self.c):
+   route=catalog_routing.plan(self.request_templates(),self.repository_nodes(result['nodes'],repository_profile,repository_profile_sha256),template,version,arch,cpus,memory,disk)
+   result['auto_placement_request_fit']=dict(route['reservation_envelope'],catalog_source=route['catalog_source'],catalog_sha256=route['catalog_sha256'],selection_policy=route['selection_policy'],catalog_routes=route['catalog_routes'])
+   return result
+  pins=placement.variants(self.request_templates(),template,version,arch,disk)
   result['auto_placement_request_fit']=placement.envelope(pins,self.repository_nodes(result['nodes'],repository_profile,repository_profile_sha256),cpus,memory,disk,self.c['catalog_sha256'])
   return result
  def repository_nodes(self,nodes,profile,sha=None):
@@ -116,7 +129,7 @@ class CatalogClient:
    if native.get('ended') or native.get('evidence')!='native_hook_observation_not_authenticated_liveness':raise ValueError('INITIATOR_RECORD_NOT_ACTIVE')
    uid(native['agent_instance_id']);uid(native['generation']);creator_session=native['native_session_id'];agent=native['agent_instance_id'];generation=native['generation']
   if not re.fullmatch('[A-Za-z0-9][A-Za-z0-9._:-]{0,255}',creator_session):raise ValueError('CREATOR_SESSION_ID_INVALID')
-  if not re.fullmatch('[a-z0-9][a-z0-9-]{0,31}',purpose) or (project and not re.fullmatch('[a-z0-9][a-z0-9-]{0,31}',project)):raise ValueError('project/purpose slug required')
+  if not re.fullmatch('[a-z0-9][a-z0-9-]{0,31}',purpose) or (project and not re.fullmatch('[a-z0-9][a-z0-9-]{0,31}',project)):raise ValueError('PROJECT_PURPOSE_SLUG_REQUIRED: use 1-32 lowercase letters, digits or hyphens, starting with a letter or digit; no spaces')
   if len(link)>1024 or any(c in link for c in '\r\n\x00'):raise ValueError('invalid task link')
   if any(type(x)!=int or x<1 for x in (cpus,memory,disk)):raise ValueError('positive integer resources required')
   limits=self.c.get('request_limits',{})
@@ -135,7 +148,13 @@ class CatalogClient:
     described=descriptions(self.c,native,task_title,source_agent_name,source_agent_type,link,purpose)
     input_hash=hashlib.sha256(canonical({'legacy_input_hash':input_hash,'descriptive_provenance':described})).hexdigest()
    if 'input_hash' in previous:
-    if previous['input_hash']!=input_hash:raise ValueError('SESSION_REQUEST_CHANGED')
+    if previous['input_hash']!=input_hash:
+     # Adding optional discovery sources must not replan an already persisted
+     # legacy request. Every other byte of its original request must still match.
+     legacy_config={k:v for k,v in self.c.items()if k!='catalog_sources'}
+     legacy_hash=hashlib.sha256(canonical(dict(request_input,config=legacy_config))).hexdigest()
+     if previous.get('descriptive_provenance') is not None:legacy_hash=hashlib.sha256(canonical({'legacy_input_hash':legacy_hash,'descriptive_provenance':described})).hexdigest()
+     if 'catalog_sources'not in self.c or legacy_hash!=previous['input_hash']:raise ValueError('SESSION_REQUEST_CHANGED')
     return self.request_status(session)
   from provenance import descriptions
   described=descriptions(self.c,native,task_title,source_agent_name,source_agent_type,link,purpose)
@@ -145,8 +164,13 @@ class CatalogClient:
    import model_catalog
    guest_config=model_catalog.select_guest(self.c,model)
   approved=self.request_templates()
-  placement_plan=None;pins=None
-  if arch is None:
+  placement_plan=None;pins=None;catalog_route=None;selected_catalog=self.c['catalog_sha256']
+  import catalog_routing
+  if catalog_routing.enabled(self.c):
+   catalog_route=catalog_routing.plan(approved,self.repository_nodes(self.capacity()['nodes'],repository_profile,repository_profile_sha256),template,version,arch,cpus,memory,disk)
+   pins=catalog_route['variants'];placement_plan=catalog_route['reservation_envelope'];selected_catalog=catalog_route['catalog_sha256']
+   per=placement_plan['compute_per_core'];overhead=placement_plan['overhead_mib']
+  elif arch is None:
    import placement
    pins=placement.variants(approved,template,version,None,disk)
    placement_plan=placement.envelope(pins,self.repository_nodes(self.capacity()['nodes'],repository_profile,repository_profile_sha256),cpus,memory,disk,self.c['catalog_sha256'])
@@ -169,7 +193,7 @@ class CatalogClient:
   if repository_profile is not None:cfg['repository_profile']=repository_profile
   if repository_profile_sha256 is not None:cfg['repository_profile_sha256']=repository_profile_sha256
   if pins is not None:
-   cfg.update(architecture='',template_catalog_sha256=self.c['catalog_sha256'],template_variants_json=canonical(pins).decode())
+   cfg.update(architecture='',template_catalog_sha256=selected_catalog,template_variants_json=canonical(pins).decode())
   meta={'nomad_workers_owner':self.c['owner_id'],'creator_agent_id':agent,'creator_session_id':creator_session,'worker_session_id':session,'task_link':link or 'unknown','template_id':template,'template_version':version,'template_disk_sha256':entry['disk']['sha256'] if pins is None else '','purpose':purpose,'project':project}
   meta.update(described);meta['source_native_session_id']=native.get('native_session_id','');meta['source_native_session_status']='observed'if native.get('native_session_id')else'not_observed';meta['source_identity_evidence']='descriptive_metadata_not_identity_or_liveness';meta['task_link']=link
   meta['creator_identity_evidence']='native_hook_observation_not_authenticated_liveness' if generation else 'operator_declared_unconfirmed'
@@ -178,8 +202,9 @@ class CatalogClient:
   if pins is None:
    constraints=[{'LTarget':'${attr.cpu.arch}','Operand':'=','RTarget':arch},{'LTarget':'${attr.kernel.name}','Operand':'=','RTarget':'darwin' if entry['vm_type']=='vz' else 'linux'},{'LTarget':'${attr.driver.lima.cpu.nomad_compute_per_core}','Operand':'<=','RTarget':str(per)}]
   else:
-   constraints=[{'LTarget':'${attr.driver.lima.catalog.late_platform_selection}','Operand':'=','RTarget':'true'},{'LTarget':'${attr.driver.lima.catalog.sha256}','Operand':'=','RTarget':self.c['catalog_sha256']},{'LTarget':'${node.unique.id}','Operand':'set_contains_any','RTarget':','.join(placement_plan['candidate_node_ids'])},{'LTarget':'${attr.driver.lima.cpu.nomad_compute_per_core}','Operand':'<=','RTarget':str(per)}]
-   meta.update(requested_architecture='auto',template_catalog_sha256=self.c['catalog_sha256'],template_variants_json=canonical(pins).decode())
+   constraints=[{'LTarget':'${attr.driver.lima.catalog.late_platform_selection}','Operand':'=','RTarget':'true'},{'LTarget':'${attr.driver.lima.catalog.sha256}','Operand':'=','RTarget':selected_catalog},{'LTarget':'${node.unique.id}','Operand':'set_contains_any','RTarget':','.join(placement_plan['candidate_node_ids'])},{'LTarget':'${attr.driver.lima.cpu.nomad_compute_per_core}','Operand':'<=','RTarget':str(per)}]
+   meta.update(requested_architecture=arch or'auto',template_catalog_sha256=selected_catalog,template_variants_json=canonical(pins).decode())
+   if catalog_route:meta['catalog_source']=catalog_route['catalog_source']
   if repository_profile is not None:
    constraints.append({'LTarget':'${attr.driver.lima.repositories.profile.'+repository_profile+'}','Operand':'='if repository_profile_sha256 else'regexp','RTarget':repository_profile_sha256 or'^[a-f0-9]{64}$'})
    meta['repository_profile_requested']=repository_profile
@@ -204,12 +229,26 @@ class CatalogClient:
   intent['descriptive_provenance']=described
   intent.update(project=project,purpose=purpose)
   if guest_config is not None:intent['guest_config']=guest_config
-  if pins is not None:intent.update(placement={'catalog_sha256':self.c['catalog_sha256'],'variants':pins},reservation_envelope=placement_plan)
+  if pins is not None:intent.update(placement={'catalog_sha256':selected_catalog,'variants':pins},reservation_envelope=placement_plan)
+  if catalog_route:intent['catalog_route']=catalog_route
+  intent.update(job_spec=job,job_spec_sha256=hashlib.sha256(canonical(job)).hexdigest(),registration_stage='prepared_not_dispatched')
   atomic(p,intent)
-  result=self.run(['job','run','-detach','-json','-'],input=canonical({'Job':job}))
+  from allocation_retry import start_dispatch
+  start_dispatch(self,p,intent)
+  result=self.run(['job','run','-check-index=0','-detach','-json','-'],input=canonical({'Job':job}))
   intent['phase']='submitted' if result.returncode==0 else 'submit_unknown';atomic(p,intent)
   if result.returncode:raise RuntimeError('JOB_SUBMIT_OUTCOME_UNKNOWN_QUERY_SAME_SESSION_NO_RESUBMIT')
   return self.request_status(session)
+ def registration_status(self,session,allow_register=False):
+  import allocation_retry,fcntl
+  root=self.root/uid(session)
+  fd=os.open(root/'request.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+  with os.fdopen(fd,'a')as lock:
+   import stat
+   st=os.fstat(lock.fileno())
+   if not stat.S_ISREG(st.st_mode)or st.st_uid!=os.getuid()or st.st_mode&0o077:raise RuntimeError('ALLOCATION_PRIVATE_LOCK_REQUIRED')
+   fcntl.flock(lock,fcntl.LOCK_EX)
+   return allocation_retry.reconcile(self,session,allow_register)
  def recover_copy(self,session,identifier,creator_record,cpus,memory):
   import fcntl,exchange,private_copy
   root=self.root/uid(session);root.mkdir(exist_ok=True,mode=0o700)
@@ -286,15 +325,6 @@ class CatalogClient:
    intent['phase']='submitted' if result.returncode==0 else 'submit_unknown';atomic(p,intent)
    if result.returncode:raise RuntimeError('RESUME_SUBMIT_OUTCOME_UNKNOWN_QUERY_SAME_SESSION_NO_RESUBMIT')
    return self.request_status(session)
- def request_wait(self,session,timeout=120):
-  if type(timeout)not in (int,float)or not 0<timeout<=1800:raise ValueError('REQUEST_WAIT_DEADLINE_1_TO_1800_SECONDS')
-  deadline=time.monotonic()+timeout
-  while True:
-   result=self.request_status(session)
-   if result.get('terminal')or result.get('next_action')in ('create','status','inspect_existing_session_no_create_retry'):return result
-   remaining=deadline-time.monotonic()
-   if remaining<=0:return {**result,'observer_timeout':True,'exit_code':3,'instruction':'Observer deadline reached; request outcome is not a failure. Query the same session, do not resubmit.'}
-   time.sleep(min(1,remaining))
  def request_status(self,session):
   uid(session);root=self.root/session;p=root/'allocation-intent.json';intent=json.loads(p.read_text());jobid=intent['job'];ns=self.c['namespace']
   import urllib.parse
@@ -303,11 +333,7 @@ class CatalogClient:
   runtime={'name':self.c.get('runtime_name')or(pathlib.Path(argv[0]).name if argv and isinstance(argv[0],str)else None),'selection_evidence':'configured_command','readiness_observed':False}
   active=[a for a in rows if a.get('ClientStatus') not in ('complete','failed','lost')]
   if len(active)>1:raise RuntimeError('MULTIPLE_ALLOCATIONS_REFUSE_BINDING')
-  if not active:
-   if rows:
-    import request_outcome
-    return request_outcome.terminal(self,session,intent,rows,runtime)
-   return {**intent,'submission_phase':intent.get('phase'),'phase':'awaiting_allocation','terminal':False,'allocation':None,'allocations':[],'vm_ready':None,'runtime_ready':None,'session_ready':None,'transport_ready':None,'runtime':runtime,'readiness_stage':'awaiting_allocation','next_action':'request-status'}
+  if not active:return {**intent,'allocation':None,'allocations':[{'id':a['ID'],'status':a.get('ClientStatus')} for a in rows],'vm_ready':None,'runtime_ready':None,'session_ready':None,'transport_ready':None,'runtime':runtime,'readiness_stage':'allocation_terminal'if rows else'awaiting_allocation','next_action':'inspect_terminal_allocation'if rows else'request-status'}
   a=active[0];full=self.api('/v1/allocation/'+a['ID']);meta=full.get('Job',{}).get('Meta',{})
   if meta.get('nomad_workers_owner')!=self.c['owner_id'] or meta.get('creator_agent_id')!=intent.get('creator_agent_id',self.c['agent_instance_id']) or meta.get('creator_session_id')!=intent.get('creator_session_id',session):raise RuntimeError('ALLOCATION_OWNER_MISMATCH')
   if intent.get('creator_generation') and (meta.get('creator_generation')!=intent['creator_generation'] or meta.get('worker_session_id')!=session):raise RuntimeError('ALLOCATION_OWNER_GENERATION_OR_SESSION_MISMATCH')
@@ -315,16 +341,24 @@ class CatalogClient:
   if intent.get('placement'):
    import placement
    resolved=placement.selected(intent['placement'],full,self.c['task'])
-   if resolved is None or full.get('ClientStatus')!='running' or full.get('TaskStates',{}).get(self.c['task'],{}).get('State')!='running' or not full.get('TaskStates',{}).get(self.c['task'],{}).get('StartedAt'):return {**intent,'submission_phase':intent.get('phase'),'phase':'allocation_'+str(full.get('ClientStatus','unknown')),'terminal':False,'allocation':a['ID'],'client_status':a.get('ClientStatus'),'target_config':None,'vm_ready':None,'runtime_ready':None,'session_ready':None,'transport_ready':None,'runtime':runtime,'readiness':'waiting for durable driver platform selection','readiness_stage':'awaiting_running_platform','next_action':'request-status'}
+   if resolved is None or full.get('ClientStatus')!='running' or full.get('TaskStates',{}).get(self.c['task'],{}).get('State')!='running' or not full.get('TaskStates',{}).get(self.c['task'],{}).get('StartedAt'):return {**intent,'allocation':a['ID'],'client_status':a.get('ClientStatus'),'target_config':None,'vm_ready':None,'runtime_ready':None,'session_ready':None,'transport_ready':None,'runtime':runtime,'readiness':'waiting for durable driver platform selection','readiness_stage':'awaiting_running_platform','next_action':'request-status'}
   binding={**self.c,'allocation':a['ID'],'job':jobid,'diagnostics_required':True,'agent_instance_id':intent.get('creator_agent_id',self.c['agent_instance_id']),'creator_session_id':intent.get('creator_session_id',session),'creator_generation':intent.get('creator_generation'),'creator_record':intent.get('creator_record')}
+  if intent.get('catalog_route'):binding['catalog_route']=intent['catalog_route']
   if intent.get('recovery_parent'):binding['recovery_parent']=intent['recovery_parent']
   if intent.get('resumed_from'):binding['resume_parent']={'allocation_id':intent['resumed_from'],'worker_session_id':intent.get('resumed_from_session'),'historical_only':True}
   if intent.get('guest_config') is not None:binding['guest']=intent['guest_config']
   if resolved is not None:binding.update(resolved_template=resolved,placement_attempt=placement.allocation_attempt(full,self.c['task']))
   path=root/'target-config.json'
-  if path.exists() and json.loads(path.read_text())!=binding:raise RuntimeError('BOUND_ALLOCATION_OR_PLATFORM_CHANGED_NO_REBIND')
+  if path.exists() and json.loads(path.read_text())!=binding:
+   import catalog_routing
+   saved=json.loads(path.read_text())
+   # Only the optional discovery-source list may differ during rollout. Keep
+   # the existing target bytes; allocation, attempt, owner and pins still match.
+   without_sources=lambda v:{k:x for k,x in v.items()if k!='catalog_sources'}
+   if not catalog_routing.enabled(self.c) or without_sources(saved)!=without_sources(binding):raise RuntimeError('BOUND_ALLOCATION_OR_PLATFORM_CHANGED_NO_REBIND')
+   binding=saved
   if not path.exists():atomic(path,binding)
-  status={**intent,'submission_phase':intent.get('phase'),'phase':'allocation_'+str(full.get('ClientStatus','unknown')),'terminal':False,'allocation':a['ID'],'client_status':a.get('ClientStatus'),'target_config':str(path),'vm_ready':None,'runtime_ready':None,'session_ready':None,'transport_ready':None,'runtime':runtime,'readiness':'transport, runtime and session have not been probed by request-status','readiness_stage':'allocation_pending','next_action':'request-status','prompt_retry':False}
+  status={**intent,'allocation':a['ID'],'client_status':a.get('ClientStatus'),'target_config':str(path),'vm_ready':None,'runtime_ready':None,'session_ready':None,'transport_ready':None,'runtime':runtime,'readiness':'transport, runtime and session have not been probed by request-status','readiness_stage':'allocation_pending','next_action':'request-status','prompt_retry':False}
   if intent.get('resumed_from'):status['resume_lineage']={'previous_allocation_id':intent['resumed_from'],'previous_worker_session_id':intent.get('resumed_from_session'),'current_allocation_id':a['ID'],'current_worker_session_id':session,'current_target_config':str(path),'previous_ids_historical_only':True,'automatic_alias_adoption':False}
   task=full.get('TaskStates',{}).get(self.c['task'],{});started=task.get('StartedAt')
   if full.get('ClientStatus')!='running'or task.get('State')!='running'or not started or started.startswith('0001-'):return status

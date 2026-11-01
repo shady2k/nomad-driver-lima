@@ -20,7 +20,7 @@ project repository is baked in. No credential provider is read by this adapter.
 
 Available capacity belongs to all agents; it is not a per-session allocation.
 For DNS/connectivity/tool inventory, start with a small compatible guest:
-**2 vCPU, 4096 MiB guest RAM, max(8 GiB, template minimum disk)**. Always respect the selected catalog entry’s minimum disk size. Use less when
+**2 vCPU, 4096 MiB guest RAM, max(8 GiB, template minimum disk)**. The newer 8 GiB base and older 20 GiB v3 base keep their own catalog minima; never request 8 GiB for a 20 GiB image. Use less when
 sufficient. These are stage recommendations, not hard limits: justify larger
 requests from real compilation/test/E2E requirements and account for concurrent
 agents. Guest RAM excludes the separately reserved VM overhead.
@@ -232,3 +232,138 @@ See docs/model-selection.md in the source repository. Source0.1.9 exposes one
 gateway catalog, exact coordinator selection and independent native RLM worker
 selectors. It needs a new versioned guest image with tools.prime_model_catalog=1;
 no caller installation can hotpatch a v4 guest. No mandatory monetary question.
+
+
+## VM-ID interface (0.1.40 candidate)
+
+Ordinary commands use one stable worker UUID returned as `vm_id`:
+
+```sh
+nomad-workers templates
+nomad-workers capacity
+nomad-workers vm create --template TEMPLATE --template-version VERSION --task-title TITLE --vcpus 2 --memory-mib 2048 --disk-gib 8
+nomad-workers vm connect VM_ID
+nomad-workers vm send VM_ID --text 'Task text'
+nomad-workers vm reconnect VM_ID
+nomad-workers vm history VM_ID
+nomad-workers vm status VM_ID
+nomad-workers vm list --mine
+nomad-workers vm finish VM_ID path/to/result
+```
+
+The installed wrapper passes global discovery separately from immutable bound
+configs. Templates, capacity, models and new requests see approved Linux and ARM
+sources without changing a running VM's binding. Architecture defaults to auto;
+`vm create --model EXACT_ID` selects an approved coordinator model when needed.
+
+Native SessionStart exports a private creator-record reference. PreToolUse uses
+native `updatedInput` to prefix each Bash invocation with its own immutable
+context reference; it returns no permission decision. Command input is forwarded
+without being logged or persisted by the hook. Native tool IDs distinguish
+parallel calls; a shared last-tool ID is never used. Repeated create/send under
+one call uses the original intent and never replays an unknown dispatch. Use one
+create/send per Bash tool call. Old sessions can continue using the legacy CLI;
+missing native context blocks new facade dispatch rather than guessing identity.
+This uses the documented [native hook protocol](https://code.claude.com/docs/en/hooks).
+If another hook overwrites the input/context, the facade refuses dispatch.
+
+List queries Nomad and verifies the exact configured owner plus current native
+initiator generation and Lima worker metadata. Local cache absence does not hide
+a VM, but cannot authorize adoption or reconstruct missing provenance. History
+pages/cursors and request IDs stay internal; `--request` is optional for selecting
+one historical task. Multiple current allocations/tasks fail closed. Reconnect
+observes an existing task and never sends another prompt.
+
+**Current finish stops and retains; it does not destroy.** After verified export,
+it reports `workload_stop_confirmed` and `disk_deleted=false`. Disk quota is not
+claimed released. Failed export/unknown activity keeps the VM; repeating finish
+reuses its durable export IDs. Integrating the separately reviewed finish-v1
+driver protocol is a follow-up prerequisite for a truthful destroy operation.
+No new ACLs, driver changes or automatic disk deletion are bundled here.
+Legacy command syntax remains available.
+
+
+### Observing a long model turn
+
+Read status and visible history on the same VM before repeating long waits.
+Identify the last observed event/tool state and history completeness, then
+reattach with `vm reconnect VM_ID`. A running VM or quiet stream is insufficient
+to establish progress or a lost task. Report uncertainty precisely.
+
+Reader failures such as `TRANSCRIPT_SCAN_BOUND_EXCEEDED` do not prove that the
+turn failed. Preserve its binding and dispatch receipt; repair observability
+without resubmitting, cancelling or restarting work. Caller 0.1.41 reads bounded journal pages with resumable scan checkpoints; follow
+`has_more` even when a page contains no requested events yet. Completeness and
+retention gaps remain explicit; an expired checkpoint requires restarting the
+read, never the task.
+
+### Exact model-turn cancellation
+
+`vm cancel VM_ID` targets the known owned current task; `vm cancel-status VM_ID`
+observes without re-dispatch. Multiple unfinished tasks require an explicit
+request selection. ACK is not terminal: reconnect/history must observe the actual
+result. Unknown transport outcomes are durable and lookup-only. No new model
+request, runtime restart, secret grant or guest-image update is involved. See
+`docs/request-cancel.md` for the legacy exact-request interface and safety limits.
+
+
+## Same-ID creation reconciliation
+
+`vm status VM_ID` is a read-only lookup of the saved create intent and Nomad job.
+`vm retry VM_ID` reconciles that same ID with its frozen payload; create-only
+`nomad job run -check-index=0` prevents overwriting an existing job. An existing
+job resolves by exact job/owner/payload readback. After dispatch intent, retries
+are lookup-only even on 404: the job may have been accepted and garbage-collected. No model prompt is replayed.
+`vm create --vm-id VM_ID` plus identical original flags supports old facade
+receipts for payload checking; changed flags conflict. Missing legacy proof of
+non-dispatch does not authorize registration, even with the original flags. Never allocate a
+new ID to bypass an unknown result. A network partition can still temporarily
+prevent authoritative observation.
+
+Validation errors are reported before registration, including the required
+purpose/project format: `[a-z0-9][a-z0-9-]{0,31}`. Input is never silently corrected.
+After a definitive rejected pre-dispatch attempt, an explicitly corrected new
+request is allowed; the old ID retains its original payload hash. Legacy
+allocation receipts without a frozen job are lookup-only for safe recovery.
+
+Global capacity keeps its legacy fields and adds `effective_available`,
+`physical_disk`, observed timestamps and units. The physical availability metric
+is filesystem space, not RAM. Shared caches are included in physical usage;
+their independent sizes are unknown. Retained VM disks also consume quota.
+Unknown values stay null. Eligibility/maintenance reasons and per-node
+architecture remain explicit; resources from different nodes are not summed.
+Capacity is a snapshot, not a reservation. Registration status exposes available
+Nomad evaluation constraint/resource blockers; unavailable telemetry is explicit.
+
+
+### Conservative post-dispatch retry fence
+
+A persisted `prepared_not_dispatched` receipt is the only state from which an
+explicit retry may perform its first create-only registration. The producer
+persists `dispatch_started` before invoking Nomad. A crash after this marker,
+including before network I/O, is conservatively lookup-only. Lost ACK, failed
+readback and subsequent job GC never permit a second registration. Legacy
+submit_unknown receipts without a dispatch stage are also lookup-only.
+
+CAS is not durable exactly-once idempotency across job deletion. The caller does
+not claim that guarantee; a server-side durable idempotency registry/tombstone is
+still needed for automatic recovery of that ambiguous case. Safe same-ID lookup
+remains available, and no new-ID bypass or model prompt replay is automatic.
+
+
+## Read the whole capacity snapshot
+
+`capacity` starts with a concise `capacity_summary` row for every node; the
+existing `nodes` detail stays available. Read all rows, including eligibility,
+reasons, architecture, vCPU, guest MiB, disk GiB and observation time. Selecting
+`nodes[0]` reports only the first node and cannot describe cluster availability.
+A full first node never authorizes finishing the current VM. Ineligible and
+unknown capacity remains null, including an unrecognized catalog pin.
+
+Architecture is optional and defaults to auto. An explicit AMD64 constraint or
+an exact template version available only for Linux still excludes ARM. Choose a
+capability-compatible approved version from global `templates`; auto does not
+silently rewrite a template version or an existing VM's binding. No automatic
+ARM creation, migration or workload termination is part of this display change.
+
+After a confirmed owned ACP cleanup, `runtime-rebind --session VM_ID --operation RECOVERY_ID --cleanup-receipt RECEIPT_BASENAME` initializes a fresh session on the same runtime without a prompt. Unconfirmed recovery blocks new work; status and historical transcripts remain readable. Reuse the same recovery ID for lookup, never choose a new ID to retry an unknown result.

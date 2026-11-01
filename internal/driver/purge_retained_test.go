@@ -40,7 +40,7 @@ func purgeFixture(t *testing.T) (FailedCreateOptions, *Store, *State, purgeDeps,
 }
 func TestPurgeRetainedAuditQuotaAndIdempotence(t *testing.T) {
 	o, store, s, d, calls := purgeFixture(t)
-	driver := &Driver{store: store, config: Config{MaxTotalDiskGiB: 20}}
+	driver := &Driver{ctx: t.Context(), client: &lima.Client{Runner: newFake()}, store: store, config: Config{MaxTotalDiskGiB: 20}}
 	if driver.checkBudget(TaskConfig{DiskGiB: 1}) == nil {
 		t.Fatal("retained disk did not consume quota")
 	}
@@ -169,7 +169,7 @@ func TestPurgeUnknownDeleteAndPartialFailuresRetainQuota(t *testing.T) {
 			if pending.Phase != "purge_pending" || pending.PurgeIntentSHA256 == "" {
 				t.Fatal(pending)
 			}
-			driver := &Driver{store: store, config: Config{MaxTotalDiskGiB: 20}}
+			driver := &Driver{ctx: t.Context(), client: &lima.Client{Runner: newFake()}, store: store, config: Config{MaxTotalDiskGiB: 20}}
 			if driver.checkBudget(TaskConfig{DiskGiB: 1}) == nil {
 				t.Fatal("unknown deletion released quota")
 			}

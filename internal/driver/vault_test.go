@@ -140,6 +140,16 @@ func TestVaultTaskRecoverDoesNotReplayAndStopClears(t *testing.T) {
 	if e = d2.RecoverTask(h); e != nil {
 		t.Fatal(e)
 	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		f.mu.Lock()
+		synced := f.vaultSyncs > before
+		f.mu.Unlock()
+		if synced || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
 	f.mu.Lock()
 	syncs, creates, launches := f.vaultSyncs, f.creates, f.launches
 	f.mu.Unlock()
@@ -227,5 +237,39 @@ func TestFinalizationRecoveryNeverDeliversFreshToken(t *testing.T) {
 	}
 	if e = d2.StopTask(cfg.ID, time.Second, ""); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestRecoveryKeepsOwnedGuestManagedWhileTaskTokenFileTemporarilyUnavailable(t *testing.T) {
+	f := newFake()
+	root := t.TempDir()
+	d := setup(t, f, root)
+	d.config.VaultAddress = "https://secrets.example.invalid"
+	cfg, path := tokenFixture(t)
+	os.WriteFile(path, []byte("synthetic-recovery-token"), 0600)
+	h, _, err := d.StartTask(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = d.Shutdown(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	cold := setup(t, f, root)
+	cold.config.VaultAddress = d.config.VaultAddress
+	if err = cold.RecoverTask(h); err != nil {
+		t.Fatalf("external token availability caused destructive recovery failure: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	f.mu.Lock()
+	creates, launches, stops := f.creates, f.launches, f.stops
+	f.mu.Unlock()
+	if creates != 1 || launches != 1 || stops != 0 {
+		t.Fatal("owned guest was replayed or stopped")
+	}
+	if _, err = cold.get(cfg.ID); err != nil {
+		t.Fatal("handle not retained for monitor retry")
 	}
 }

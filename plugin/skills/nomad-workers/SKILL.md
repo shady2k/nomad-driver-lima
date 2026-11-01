@@ -2,6 +2,127 @@
 name: nomad-workers
 description: Create owned native Lima work sessions through Nomad using approved prepared templates.
 ---
+Use the VM-ID interface for ordinary coordination. Keep one public `vm_id` from
+creation until finishing. Native session/request/attempt IDs, export snapshot IDs
+and history cursors are internal. Do not generate them or select bound config
+files for this workflow. Legacy commands below remain available for advanced
+operations and compatibility; their explicit IDs are not the ordinary workflow.
+
+1. Use `nomad-workers templates`, `models` and `capacity` for global discovery.
+   The installed entrypoint supplies the global reference, including every
+   approved architecture, even when a legacy bound config was previously used.
+2. Run `nomad-workers vm create --template TEMPLATE --template-version VERSION
+   --task-title TITLE --vcpus N --memory-mib N --disk-gib N [--model EXACT_ID]`.
+   Architecture defaults to auto. Save the returned `vm_id`.
+3. Use `vm connect VM_ID` until the same VM is ready, then `vm send VM_ID --text
+   TEXT`. Observe that task with `vm reconnect VM_ID`; reread with `vm history
+   VM_ID`. `vm status VM_ID` is read-only. A disconnected observer does not cancel
+   the task. Reconnect to the same VM; never send the text again after an unknown
+   dispatch. An optional `--request` selects a particular historical task only.
+4. If the ID was lost, `nomad-workers vm list --mine` queries Nomad using the
+   current native initiator generation. It does not adopt another agent's VM.
+   Multiple allocations/unfinished tasks are explicit ambiguity. Missing durable
+   target state requires recovery; listing alone does not authorize rebinding.
+5. `nomad-workers vm finish VM_ID RESULT_PATH...` exports declared files, verifies
+   receipts, then stops the exact owned workload through the current backend.
+   **This release retains its disk: `disk_deleted=false`. It does not fulfill
+   destroy or free disk quota.** Report this remaining cleanup explicitly; never
+   claim deletion, purge manually, or acquire new cleanup permissions. Failed
+   export or unfinished work retains the VM. Retry finish with the same VM/paths;
+   the plugin keeps snapshot IDs internally. Exec-only sessions without a verified
+   terminal model task cannot use this existing finish backend.
+
+The native SessionStart/PreToolUse hook supplies private identity references and
+an immutable per-Bash-call intent context. No agent-supplied UUIDs are needed.
+Only one create/send is supported per native Bash invocation: run distinct work
+in distinct tool calls. Repeating one call cannot dispatch it twice; changing its
+input under the same call is rejected. Parallel native calls get distinct contexts.
+Without the hook context, create/send refuse to dispatch. Old running sessions
+keep their legacy CLI; do not restart them or invent identity to migrate them.
+No hook permission override is returned. If another hook replaces updatedInput
+and removes this context, report the missing context instead of guessing.
+
+For a long model turn, inspect observable progress instead of spending repeated
+five-minute waits without reading it. Keep the same VM and task. Read `vm status
+VM_ID` and `vm history VM_ID`; identify the latest visible event/tool status,
+terminal evidence, and any reported completeness/retention gaps. Report the last
+observed activity and what remains unknown, without exposing hidden reasoning,
+raw tool arguments, credentials or private prompt contents. `vm reconnect VM_ID`
+reattaches to the existing turn; it does not submit or cancel it. A ready ACP
+session, running VM, elapsed time or quiet stream alone cannot establish model
+progress, completion, failure or a lost request. Long work can be valid.
+
+If progress is unclear, distinguish task state from reader state. A read/watch
+timeout, `TRANSCRIPT_SCAN_BOUND_EXCEEDED`, binding error or incomplete history is
+a reader/observability blocker, not proof the task is idle or lost. Preserve the
+same VM and dispatch receipt, report the exact error plus last verified status,
+and seek repair of the reader. Do not replay, cancel, restart or clear unknown
+gates to obtain a visible answer. Do not claim full visibility when history
+failed. In caller 0.1.42 and later, transcript scans are resumable: follow `has_more` and its returned
+cursor even when entries are empty while older events are scanned. Observe
+`scan_in_progress`, `history_complete`, and explicit retention errors. Legacy CLI
+users follow the same rule with status,
+request-transcript and watch against their existing binding and request.
+
+Creation retry and model-prompt replay are different operations. If allocation
+creation times out, keep the returned VM ID and run `vm status VM_ID` for a
+read-only lookup or `vm retry VM_ID` for safe registration reconciliation.
+Retry uses the persisted exact job and create-only Nomad CAS; an accepted job is
+returned, never updated or recreated. A first registration can be attempted only
+when a durable `prepared_not_dispatched` receipt proves no dispatch intent was
+recorded, the exact job is absent, and frozen payload/current creator are verified. A transport/ACL failure is not absence. Never pick a new VM ID to
+bypass an unknown outcome. Temporary unknown during a network partition is real;
+retry the same ID after connectivity returns. Once dispatch intent is recorded,
+retry is lookup-only even if GET returns 404: a previously accepted job may have
+been garbage-collected. Lost ACK + GC cannot be resolved from CAS alone. Do not
+claim exactly-once registration or auto-create a replacement. A server-side
+durable idempotency registry/tombstone is still required for that stronger contract.
+
+`vm create --vm-id VM_ID` with the exact original flags is also a same-ID retry;
+changed payload conflicts. `--purpose` and nonempty `--project` must be 1-32
+lowercase letters/digits/hyphens, starting with a letter or digit (for example
+`environment-preparation`, not `environment preparation`). Validation rejection
+is explicit and does not mean Nomad accepted anything. Do not normalize or change
+the payload silently. Only after definitive rejection before registration may a
+corrected creation be an explicit new request; check capacity first. Legacy
+facade receipts without durable proof of non-dispatch remain lookup-only, even
+when original flags are available; never infer non-dispatch from missing files. A legacy allocation intent without a frozen job cannot be
+resubmitted automatically. Model send/reconnect never replays a prompt.
+
+Capacity interpretation: read ALL `capacity_summary` rows. Never select
+`nodes[0]` and report it as cluster availability: it is only one node. A full
+Linux node does not mean an eligible ARM node is full. Unknown/ineligible rows
+are explicit; do not turn them into zero or available hardware. A full first
+node is never a reason or authorization to finish the current VM. Preserve it
+and inspect the other nodes and current task state.
+
+Architecture is optional (`auto` by default). Explicit `--architecture amd64`
+restricts placement to AMD64. Auto does not make a Linux-only exact template
+version ARM-compatible: use global `templates` to choose an approved version
+whose architecture/runtime and task capabilities match an eligible node. Do not
+reuse an old bound target's Linux version or change an existing VM's binding to
+move it. Do not silently substitute a version or create another VM without the
+user's task authorizing it.
+
+Before requesting resources, read global `nomad-workers capacity`. Compare each
+node's architecture, status, scheduling eligibility/reasons, `effective_available`
+and `observed_unix` separately; do not add AMD64 and ARM64 resources together.
+CPU is whole guest vCPUs, memory is guest MiB after per-VM overhead, disk is GiB
+bounded by both physical filesystem free space minus its reserve and retained
+worker disk quota. `physical_disk` includes shared caches and other host usage;
+cache usage is not measured separately, and it is not RAM. Retained disks may
+consume quota without a running VM. Configured zero caps mean no additional cap;
+unknown telemetry is null, never zero or unlimited. An ineligible node (including
+maintenance) cannot accept work despite apparent free hardware. Capacity is a
+timestamped advisory snapshot, not a reservation. Request output/retry reports
+Nomad evaluation blockers when observable; unavailable evaluations are reported
+as unavailable, not as proof of no blockers. Lack of capacity must not be guessed
+as the cause of an earlier validation or transport error.
+
+Environment preparation, capacity discipline, project acceptance and artifact
+requirements below still apply to both interfaces. This interface change is not
+permission to start project work, models or VMs outside the user's task.
+
 Use only the operator-installed `nomad-workers` entrypoint and approved config.
 Work in TWO PHASES. Phase 1 is environment preparation, not project execution:
 request a minimal compatible VM, install dependencies, run bounded network/tool
@@ -82,7 +203,23 @@ explicit handoff rather than impersonating an earlier owner.
 
 Generate and persist one request UUID per turn. After disconnect, watch that same
 request/cursor, never resend its prompt. Repeated submit is receipt lookup; owner
-death/unknown is an explicit error, preserve files and stop dispatch. A terminal
+death/unknown is an explicit error, preserve files and stop dispatch.
+To reread an existing response, use `request-transcript --session SESSION --request REQUEST`.
+Its returned cursor is independent from live `watch`; follow `has_more` with
+`request-transcript --cursor CURSOR` until false. Repeating a page does not advance
+watch or send a prompt. The output contains redacted visible text and tool statuses,
+not raw tool arguments or hidden thoughts. Read `history_complete`/`tail_buffered`:
+a growing text block is withheld until a logical boundary, and retention gaps or
+bounds are explicit. A terminal `watch` immediately returns its cached terminal
+receipt and a transcript next action; never submit another prompt just to recover
+an answer. Disconnecting a watch closes only that caller's observer, not the live
+request/queue owner/runtime. Requires the existing guest to remain accessible;
+after stop use previously verified exported results when available.
+Write prompts to a file with a QUOTED heredoc (`cat > prompt.txt <<'PROMPT'`) or a
+literal direct file write, then `submit --prompt-file prompt.txt`. An unquoted
+heredoc expands backticks and `$()` before Python/shell sees the prompt.
+
+A terminal
 model turn does not prove the user's task is complete. Cancelled/limited/error
 outcomes remain visible; do not turn them into successful task completion.
 
@@ -97,7 +234,7 @@ installation endpoints outside public source and prepared images.
 
 Installed caller binding: `nomad-workers` selects the private operator catalog
 config. After `request`/`request-status` returns `target_config`, use
-`nomad-workers --config TARGET_CONFIG create/submit/watch/collect/result/finish`
+`nomad-workers --config TARGET_CONFIG create/submit/watch/request-transcript/collect/result/finish`
 with the original session/request UUIDs. Never invent a config location or use the
 retired plugin for a new Lima session. The returned target is attempt-bound.
 The native SessionStart hook supplies `--creator-record` for a new work session.
@@ -301,16 +438,48 @@ after checking the exact source/target evidence; this writes only the local mapp
 not owner records, jobs or VM data. Installation of this release does not itself
 index or migrate existing sessions.
 
+For an intended stop of your own current model turn, use `vm cancel VM_ID`, then
+`vm cancel-status VM_ID` and `vm reconnect VM_ID`/`vm history VM_ID` to observe its
+actual result. Ambiguity is an error, never guess a task. `cancel_accepted` means
+only the existing runtime accepted cancellation; it does not mean the turn/tool
+has stopped. Unknown outcomes are lookup-only, never resend under a new ID or
+clear the gate. Status/history/transcript and operation status/logs remain usable
+while work/cancellation is unfinished. They still verify current ownership and
+attempt. Do not turn a quiet watch/read error into an automatic cancel, prompt
+replay, daemon/VM restart or unrestricted exec workaround.
 
-A terminal request refusal is final for that session: `request-status` and
-`request-wait` return `terminal: true`, `phase: allocation_failed`, the safe
-Nomad TaskEvents/reason, and CLI exit 2. Stop waiting immediately.
-`submission_phase: submitted` is history, not current readiness. Report the
-reason and requested/available resources (fresh telemetry is advisory, not a
-historical reservation). Adjust the request or release completed disks first;
-use a new session for a newly authorized request, never repeat submit on the
-failed/unknown session. Lost allocations need inspection, not another VM.
-`request-wait --session UUID --timeout 120` waits only for allocation readiness;
-it never creates ACP or stops a VM. Observer timeout exits 3, not a task failure.
-A new request needs a concrete `--task-title`; missing title is an actionable
-input error and creates no job.
+## File transfer and finite shell
+
+Use existing VM ID; default configuration and verified native initiator identity
+are supplied by the normal wrapper/hook. No SSH key or Git credential is needed.
+
+```sh
+nomad-workers vm upload VM_ID ./source.tar.gz --destination input/source.tar.gz --extract-to source
+nomad-workers vm upload-status VM_ID
+nomad-workers vm upload-reconcile VM_ID
+nomad-workers vm upload-abort VM_ID
+nomad-workers vm exec VM_ID --timeout 60 -- /usr/bin/id
+```
+
+Upload uses existing S3 exchange, 8 MiB multipart chunks, full SHA-256/size checks
+and atomic workspace publication. Maximum input is 256 MiB. Optional extraction
+supports plain/gzip tar with bounded metadata and rejects traversal, links,
+special files, duplicate paths and overwriting existing output trees. Never embed
+source bytes as base64 in shell commands or transfer Git credentials.
+
+Retry the same file/destination after an interrupted upload, or reconcile its
+existing receipt; do not invent an ID or replay a model prompt. Status performs a
+read-only inspection. Abort follows the durable exact transfer binding and
+removes only its private unpublished file; published outputs and objects already
+in exchange retention remain intact. Incomplete extraction staging requires
+reconciliation. An optional transfer ID only disambiguates multiple transfers;
+normal use needs the VM ID alone.
+
+Finite exec uses existing Nomad allocation-exec and managed operation receipts,
+independent of ACP availability. It is not direct SSH. The native tool-call
+context keeps command retries bound; changing command input under one call
+conflicts rather than dispatching a replacement. Unknown operations/transfers
+retain their normal safety gates. This update does not implement resource resize,
+disk destruction or change finish semantics. Shell-only cleanup still requires
+the separately approved existing lifecycle/operator path; do not submit a dummy
+model request just to satisfy a missing cleanup capability.

@@ -12,7 +12,8 @@ class CheckpointTests(unittest.TestCase):
   w.atomic(a.local(s)/(rid+'.json'),{'session_id':s,'request_id':rid,'phase':'terminal','acpx_request_id':rid,'terminal':{'stopReason':'end_turn'}})
   def remote(session,action,**kw):
    guest['calls'].append(action)
-   if action=='artifact':yield {'data':base64.b64encode(guest['data']).decode(),'size':len(guest['data']),'sha256':w.digest(guest['data'])}
+   if action=='submit':yield {'type':'submitted','request_id':kw['request_id'],'prompt_sha256':w.digest(kw['prompt'].encode()),'acpx_request_id':str(uuid.uuid4()),'phase':'queued'}
+   elif action=='artifact':yield {'data':base64.b64encode(guest['data']).decode(),'size':len(guest['data']),'sha256':w.digest(guest['data'])}
    elif action=='prepare_finish':
     for f in kw['files']:assert f['sha256']==w.digest(guest['data'])
     guest['prepared']=True;yield {'type':'finish_ready'}

@@ -1,9 +1,9 @@
 package driver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -103,12 +103,23 @@ func (d *Driver) checkBudget(tc TaskConfig) error {
 			mem += int64(s.MemoryMiB + d.config.MemoryOverheadMiB)
 		}
 	}
-	for _, v := range []struct {
-		name                    string
-		total, requested, limit int64
-	}{{"vms", count, 1, int64(d.config.MaxVMs)}, {"vcpus", cpu, int64(tc.CPUs), int64(d.config.MaxTotalCPUs)}, {"reservation_mib", mem, int64(tc.MemoryMiB + d.config.MemoryOverheadMiB), int64(d.config.MaxTotalMemoryMiB)}, {"disk_gib", disk, int64(tc.DiskGiB), int64(d.config.MaxTotalDiskGiB)}} {
-		if v.limit > 0 && v.total > v.limit {
-			return fmt.Errorf("node operator quota exceeded: resource=%s requested=%d used=%d total=%d limit=%d (retained/uncertain resources included)", v.name, v.requested, v.total-v.requested, v.total, v.limit)
+	physical, err := hostMemoryMiB()
+	if err != nil {
+		return err
+	}
+	committed, err := d.runtimeResourceCommitment(rows)
+	if err != nil {
+		return err
+	}
+	count = committed.VMs + 1
+	cpu = committed.CPUs + int64(tc.CPUs)
+	mem = committed.MemoryMiB + int64(tc.MemoryMiB+d.config.MemoryOverheadMiB)
+	if mem > physical {
+		return fmt.Errorf("host physical RAM commitment exceeded: requested aggregate %d MiB, physical %d MiB", mem, physical)
+	}
+	for _, v := range [][2]int64{{count, int64(d.config.MaxVMs)}, {cpu, int64(d.config.MaxTotalCPUs)}, {mem, int64(d.config.MaxTotalMemoryMiB)}, {disk, int64(d.config.MaxTotalDiskGiB)}} {
+		if v[1] > 0 && v[0] > v[1] {
+			return fmt.Errorf("node operator quota exceeded (retained/uncertain resources included)")
 		}
 	}
 	return nil
@@ -155,12 +166,46 @@ func (d *Driver) stage(cfg *drivers.TaskConfig, s *State, phase string, counts m
 	if e != nil {
 		return e
 	}
-	f, e := os.OpenFile(cfg.StdoutPath, os.O_WRONLY|os.O_APPEND, 0600)
-	if e != nil {
-		return fmt.Errorf("native task stage log unavailable")
-	}
+	f := newTaskLog(d.ctx, cfg.StdoutPath)
 	_, e = f.Write(append(raw, '\n'))
 	f.Close()
 	d.emit(s, phase)
 	return e
+}
+
+// guardAllocationInvocation runs under node-admission. Nomad may allocate a new
+// invocation ID after RecoverTask fails even though the allocation is unchanged.
+// A lost handle is never permission to create another VM for the same task.
+func (d *Driver) guardAllocationInvocation(cfg *drivers.TaskConfig) error {
+	rows, err := d.ledger()
+	if err != nil {
+		return err
+	}
+	for _, s := range rows {
+		if s.TaskID == cfg.ID || s.AllocID != cfg.AllocID || s.TaskName != cfg.Name || s.Namespace != cfg.Namespace {
+			continue
+		}
+		if s.Phase == "no_vm_failed" {
+			continue
+		}
+		purged, err := d.store.purged(s)
+		if err != nil {
+			return err
+		}
+		if purged {
+			continue
+		}
+		// A phase/exit flag alone is not a physical stop receipt. In particular,
+		// stale destroyed state must not authorize a duplicate of a surviving VM.
+		if s.StopReceipt == nil || !s.StopReceipt.RevocationConfirmed {
+			return fmt.Errorf("allocation task already has a retained or uncertain invocation; recover or confirm cleanup before starting another VM")
+		}
+		ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
+		v, err := d.owned(ctx, s)
+		cancel()
+		if err != nil || v.Status != "Stopped" || v.DriverPID != 0 || v.HostAgentPID != 0 {
+			return fmt.Errorf("previous allocation task runtime is not confirmed stopped; new VM creation refused")
+		}
+	}
+	return nil
 }

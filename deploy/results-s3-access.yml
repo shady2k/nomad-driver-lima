@@ -1,0 +1,20 @@
+---
+- name: Reconcile approved results-only SeaweedFS identity without a service restart
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Require scoped external operation specification
+      ansible.builtin.assert:
+        that:
+          - results_access_spec is defined
+          - not ansible_check_mode
+    - name: Reconcile through official per-user IAM commands and OpenBao
+      ansible.builtin.command:
+        argv: [/opt/homebrew/bin/python3, '{{ playbook_dir }}/results-s3-access.py', '{{ results_access_spec }}']
+      register: results_access
+      no_log: true
+      changed_when: results_access.rc == 0 and (results_access.stdout | from_json).changed
+    - name: Report only redacted permission and fixture receipt
+      ansible.builtin.debug:
+        msg: '{{ results_access.stdout | from_json }}'
