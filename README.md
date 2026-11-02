@@ -33,8 +33,9 @@ goes with it.
 - **An unprivileged user on each node** for the VMs. The Nomad client runs as
   root and Lima refuses to run as root, so the driver starts every VM process as
   this user.
-- **A base image** you build (or fetch) and publish, and an HTTP store to publish
-  it to. This project publishes no images.
+- **A base image** you build (or fetch) and publish, and somewhere to serve it
+  and its index from. This project publishes no image; `docs/guest-image.md` is
+  what one has to contain.
 - `ansible-core` and `go` on the machine you deploy from.
 
 ## Quick start, from nothing
@@ -46,11 +47,16 @@ your own.
 # 1. build the release the deploy kit installs (the version must be semver)
 ./deploy/build.sh --version 0.1.0          # -> dist/0.1.0/
 
-# 2. build a base image, publish it to your own store, prove it boots
-images/build.sh amd64 1.0.0                # -> out/box-base-1.0.0-amd64.qcow2 + .sha256
-images/publish.sh amd64 1.0.0              # the store URL and token come from the environment
-images/verify.sh amd64 1.0.0               # downloads, boots and checks what you published
+# 2. put boxd into an image of your own, and publish that image
+#    run both of these inside the image being built, as root:
+sudo guest/boxd-install.sh --from dist/0.1.0/boxd_linux_amd64 --no-start
+sudo guest/no-secrets.sh 1.0.0             # before you capture it: no credential inside
+#    docs/guest-image.md is the whole of what such an image needs
 ```
+
+Boxes boot an image you publish and index yourself; this repository builds none.
+`docs/guest-image.md` is what such an image must contain, and the `index.json`
+the CLI reads through `BOX_IMAGE_INDEX`.
 
 Then install the platform with the Ansible kit:
 
@@ -150,7 +156,7 @@ Claude Code that cannot add a marketplace.
 | `internal/volume` | the dynamic host volume plugin logic |
 | `internal/cli` | the CLI: jobs, volumes, executors, capacity, sessions, ACL policies |
 | `internal/boxd` | the guest daemon, the session store, the executors |
-| `images/` | the base image: recipe, build, publish, verify, guest checks |
+| `guest/` | the operator's tools for their own image: `boxd-install.sh`, `no-secrets.sh` |
 | `deploy/` | the deploy kit: Ansible roles, ACL policies, the acceptance script |
 | `claude-plugin/` | the `box` skill as a Claude Code plugin |
 | `docs/` | architecture, the boxctl contract, the CLI reference, decisions, limits |
@@ -226,7 +232,7 @@ What is **not** hardened:
 - `docs/design-decisions.md` — why it is built this way, and what was rejected
 - `docs/known-limits.md` — what is missing, fragile or unproven
 - `deploy/README.md` — installing, rolling back, the kit's own checks
-- `images/README.md` — building, publishing and verifying a base image
+- `docs/guest-image.md` — what a box image must contain, and the image index format
 - `claude-plugin/skills/box/SKILL.md` — the skill an agent reads
 
 ## License

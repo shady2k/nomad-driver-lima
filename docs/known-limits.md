@@ -14,10 +14,8 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   `launchctl bootstrap` in the system domain, a `kickstart -k` that leaves a box
   alive, `plutil -lint` and `vz` itself have never been exercised. Closing it
   needs a Mac.
-- **arm64 has no end-to-end test.** The arm64 image is built (under emulation)
-  and passes `images/verify.sh`, but no driver or CLI suite has run a box on
-  arm64. A cross-build also needs a lima tree that carries the aarch64 guest
-  agent.
+- **arm64 has no end-to-end test.** `boxd` cross-builds for `linux/arm64` in
+  every release, but no driver or CLI suite has run a box on arm64.
 - **NixOS is refused by the client role.** The role writes `/etc/nomad.d`, which
   on NixOS is lost at the next `nixos-rebuild switch`, so the play stops unless
   `nomad_allow_nixos` is set. A NixOS node needs a hand-written configuration.
@@ -55,8 +53,6 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   journal. Putting the box user in `systemd-journal` in the image would close it.
 - **Credentials at rest are in the Nomad variable**, stored in the cluster's
   state. This project does not encrypt it; mTLS and ACLs are the protection.
-- **Images are trusted by sha256 pin only.** No signature, no transparency log.
-  You publish the images your boxes boot.
 - **ACLs were measured on a cluster without them.** The workload policy is
   applied per box and the operator policy is tested against Nomad's ACL engine,
   but the whole path (a box job reading the variable under real ACLs) was not run
@@ -64,22 +60,23 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   once (`deploy/acl/apply.sh workloads <id>`); until then its executors report
   "not configured".
 
-## Images and publishing
+## Images
 
-- **This project publishes no images.** `images/` builds, verifies and publishes
-  one to a store you own; the quick start in the README is the whole path.
-- **The image is large.** The current amd64 image is about 900 MB, which is close
-  to the body limit some HTTP stores impose on a single upload. Growth needs a
-  store with a higher limit or a smaller cut.
-- **A published version cannot be withdrawn** by the tooling: publishing is
-  one-way and a mistake is fixed by publishing the next version. The store's own
-  permissions decide whether an operator can delete a file.
-- **The guest image's package sources are one recipe.** A site that mirrors
-  packages sets `BOX_MIRROR_*`; a package tree with no proxy of its own (Node.js
-  is the known one) is fetched from upstream, pinned by sha256.
-- **The image installs one executor set.** prime-agent and opencode are in the
-  image; the `claude` executor's binary (`claude-code-acp`) is not, so that
-  executor reports "not available" in a box unless you add it to the image.
+- **This project builds and publishes no images.** The release carries `boxd` for
+  both guest architectures and `boxd-install.sh`; the image, its package sources
+  and its index are the operator's. `docs/guest-image.md` is the contract.
+- **Nothing here checks an operator's image.** `guest/no-secrets.sh` proves that
+  the image it runs in carries no credential, and `boxctl info` reports which
+  executors an image has; whether the image grows its root filesystem after a
+  resize or keeps cloud-init working is proven only when a box is booted.
+- **An image is trusted by sha256 pin only.** No signature, no transparency log:
+  whoever can write the index decides what every box boots.
+- **An image that is too small is found at create, not before.** Lima refuses to
+  shrink a disk, so a box asking for less than the image's virtual size fails at
+  create with `disk shrinking is not supported`.
+- **A published version cannot be withdrawn** by any tooling here: the store's
+  own permissions decide whether an operator can delete a file, and boxes hold
+  the digest of what they pulled.
 
 ## Sessions and executors
 

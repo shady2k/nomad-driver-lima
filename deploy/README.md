@@ -337,9 +337,10 @@ There is no index baked into the binaries: set `box_image_index` in
 `~/.config/box/env`), or pass `--image-index` to a single command. Without it the
 CLI says so and refuses to create a box.
 
-The repository publishes no images of its own. `images/` is the recipe and the
-scripts to build, verify and publish one to any HTTP PUT store; `images/README.md`
-is the whole of it, and the published index is the file the coordinator reads.
+The repository publishes no images of its own and builds none. The release
+carries `boxd` for both guest architectures and `boxd-install.sh`, the operator's
+tool for putting it into an image of their own; `docs/guest-image.md` is what
+such an image must contain and the index format the coordinator reads.
 
 ## The release version must be semver
 

@@ -31,7 +31,7 @@ creating a new one.
 | `cmd/boxd` (`internal/boxd`) | `boxd` and `boxctl` in one binary: the guest daemon that runs agent sessions, and the client the CLI execs |
 | `internal/box` | one Lima instance: the disk on a volume, the image cache, resize, the cgroup memory cap |
 | `internal/limactl` | a thin wrapper over `limactl` (list, create, start, stop, edit, shell, copy) |
-| `images/` | the box base image: the guest recipe, build, publish and verify scripts |
+| `guest/` | the operator's tools for their own image: `boxd-install.sh`, `no-secrets.sh` |
 | `deploy/` | the Ansible kit for a node and a coordinator, the ACL policies, the acceptance script |
 | `claude-plugin/skills/box` | the `box` skill an agent reads, packaged as a Claude Code plugin |
 
@@ -139,14 +139,15 @@ channel; `box ssh` is an interactive shell over it.
 
 ## Images
 
-A box boots a published qcow2: Ubuntu with the toolchain, `boxd`, prime-agent
-and opencode, and no credentials. An image is identified by a URL and a sha256,
-and a published version never changes: a new build is a new version. The recipe
-takes its package sources from variables (`BOX_MIRROR_*`); unset, they are the
-public upstreams (the Ubuntu archive and cloud images, nodejs.org, go.dev, PyPI,
-npm, GitHub releases). Publishing uploads the image, its `.sha256` and a
-manifest to any HTTP PUT store and then updates the index the CLI reads. See
-`images/README.md`.
+A box boots an image the operator built: any qcow2 that boots under Lima, runs
+`boxd` and meets the guest contract (cloud-init on the first boot, passwordless
+`sudo` for Lima's user, the executors on `PATH`, `/run` a tmpfs). The release
+carries `boxd` for both guest architectures and `boxd-install.sh`, which puts it
+into an image of the operator's own; `docs/guest-image.md` is the contract.
+
+An image is identified by a URL and a sha256 through an index the CLI reads
+(`BOX_IMAGE_INDEX`), so a published version never changes: a new build is a new
+version. The driver downloads it, verifies the digest and caches it by digest.
 
 ## The deploy kit
 

@@ -23,8 +23,9 @@ and versions named in "What was measured".
   `constraint`) is the operator's lever, and `sticky = true` keeps a replacement
   allocation on the same disk.
 - **The disk only grows.** Lima refuses to shrink a disk, so the image's virtual
-  size is the floor for `disk_gib`. An image built with a 20 GiB virtual disk
-  made an 8 GiB box impossible; the recipe now defaults to 8 GiB.
+  size is the floor for `disk_gib`: an image built with a 20 GiB virtual disk
+  makes an 8 GiB box impossible, which is why an image should be built as small
+  as the boxes will be.
 
 ## The driver's lifecycle
 
@@ -151,11 +152,12 @@ and versions named in "What was measured".
   runs `boxctl reload`: idle sessions restart their executor now, a session in a
   turn restarts it when the turn ends. The VM, the allocation and the transcripts
   are untouched.
-- **The image grows the root filesystem itself.** cloud-init's growpart refused
-  the root partition of the box image (the image numbers its EFI and boot
-  partitions 14 to 16, so root is not the highest), so the image carries a small
-  service that grows the partition and the filesystem. A 10 GiB box now has 8.7
-  GiB usable instead of 6.
+- **The image grows the root filesystem itself.** cloud-init's growpart refuses
+  a root partition that is not the highest one (the reference image numbers its
+  EFI and boot partitions 14 to 16), so the image is expected to carry a small
+  service that grows the partition and the filesystem after the root is mounted
+  read-write. A 10 GiB box then has 8.7 GiB usable instead of 6.
+  `docs/guest-image.md` has the section that does it.
 
 ## The CLI
 
@@ -211,19 +213,20 @@ and versions named in "What was measured".
 - **Base images are pinned by sha256 through an index, not by a tag.** The index
   lists versions and architectures with `url`, `sha256` and `size`. The driver
   downloads, verifies and caches the image and refuses a corrupt cache entry.
-- **A published version never changes.** Publishing refuses a version whose
-  image, `.sha256` or manifest already exists, and again when the index lists it.
-  The order is: upload, download back and compare, then re-read, merge, write and
-  verify the index under a lock object that goes stale after 30 minutes. A run
-  whose image did not arrive never touches the index. A mistake is fixed by
-  publishing the next version.
-- **The image is built, not just provisioned.** Every package source is a
-  variable (`BOX_MIRROR_*`) with a public upstream default, and the guest checks
-  prove that apt used no other source than the configured one.
+- **A published version never changes.** An index maps a version to one url and
+  one digest per architecture, and a box boots the digest it was created from.
+  Whoever publishes an index is responsible for a version continuing to mean one
+  image; a mistake is fixed by publishing the next version.
+- **The image is the operator's, and the repository ships only what it must.**
+  The release carries `boxd` for both guest architectures and `boxd-install.sh`;
+  what else an image contains is the operator's decision, recorded as a contract
+  in `docs/guest-image.md` rather than as a recipe here. A recipe in this
+  repository would have to be the one shape everyone gets, and it published
+  images the maintainer had to host.
 - **The image carries no secret and no key.** No ssh host keys, no authorized
   keys, no passwords, no machine-id, no shell history, no journal: cloud-init
-  generates them on the first boot of every box. The build fails, and writes
-  nothing to `out/`, if a known credential location in the build VM is non-empty.
+  generates them on the first boot of every box. `guest/no-secrets.sh` is the
+  check an operator runs on an image before capturing it and inside a booted box.
 
 ## Deploy
 

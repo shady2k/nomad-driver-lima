@@ -101,7 +101,7 @@ func LoadImageIndex(ctx context.Context, src ImageSource, url string) (*ImageInd
 
 // ParseImageIndex parses the index document.
 //
-// The canonical shape (written by images/publish.sh) is
+// The canonical shape (docs/guest-image.md) is
 //
 //	{"schema": 1, "images": {"<version>": {"<arch>": {"url","sha256","size",...}}}}
 //

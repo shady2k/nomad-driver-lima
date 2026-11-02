@@ -13,7 +13,7 @@ box_nomad_addr: https://nomad.example:4646
 
 # The base image index the CLI reads (JSON: the versions published for boxes).
 # There is no default: without this, `box create` and `box images` say the index is
-# not configured. Point it at the store you publish images to (images/README.md) or
+# not configured. Point it at the index you publish (docs/guest-image.md) or
 # at one you trust.
 box_image_index: 'https://images.example.com/box-base/index.json'
 
