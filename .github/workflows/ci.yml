@@ -73,8 +73,9 @@ jobs:
           "$RUNNER_TEMP/shellcheck/shellcheck" --version
 
       # Warnings and errors fail the job; the notes and style findings
-      # ("quote this", "use find instead of ls") are advice, not gates.
-      - name: shellcheck the scripts, the image recipe and the deploy kit
+      # ("quote this", "use find instead of ls") are advice, not gates. The
+      # guest/ scripts are the two an operator runs against their own image.
+      - name: shellcheck the scripts, the guest tools and the deploy kit
         run: |
           shellcheck --version
           mapfile -t files < <(git ls-files '*.sh')
@@ -137,9 +138,19 @@ jobs:
           ls -l dist
           (cd dist && sha256sum --check SHA256SUMS)
 
-      # deploy/build.sh builds the targets the deploy kit installs; this also
-      # proves that every command compiles for linux/arm64, which no node of
-      # the kit runs yet.
+      # The release is what an operator puts into their own image: boxd for both
+      # guest architectures, and the installer that looks for it by name.
+      - name: the release carries what an image needs
+        run: |
+          for name in boxd_linux_amd64 boxd_linux_arm64 boxd-install.sh; do
+            [[ -f dist/$name ]] || { echo "dist/$name is missing" >&2; exit 1; }
+            grep -q "  $name\$" dist/SHA256SUMS || { echo "SHA256SUMS does not cover $name" >&2; exit 1; }
+          done
+          [[ -x dist/boxd-install.sh ]] || { echo "dist/boxd-install.sh is not executable" >&2; exit 1; }
+
+      # deploy/build.sh builds the targets the deploy kit installs, and boxd for
+      # both guest architectures; this also proves that every command compiles
+      # for linux/arm64, which no node of the kit runs yet.
       - name: every target compiles
         run: |
           for target in linux/amd64 linux/arm64 darwin/arm64; do

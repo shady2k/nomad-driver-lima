@@ -11,6 +11,9 @@
 #   dist/<version>/box-driver_linux_amd64
 #   dist/<version>/box-volume_linux_amd64
 #   dist/<version>/box_linux_amd64
+#   dist/<version>/boxd_linux_amd64
+#   dist/<version>/boxd_linux_arm64
+#   dist/<version>/boxd-install.sh
 #   dist/<version>/box-driver_darwin_arm64
 #   dist/<version>/box-volume_darwin_arm64
 #   dist/<version>/box_darwin_arm64
@@ -20,6 +23,11 @@
 # external plugin to its `plugin` block by executable name) and box-volume as
 # <host_volume_plugin_dir>/box-volume, so the artifact names here are not the
 # installed names. See deploy/README.md.
+#
+# boxd is not a node binary: it runs inside a box, so it is built for the guest's
+# architecture (linux/amd64 and linux/arm64). boxd-install.sh is the operator's
+# tool that puts it into an image of their own, next to the binary of the image's
+# architecture; docs/guest-image.md is what the rest of that image needs.
 set -euo pipefail
 
 readonly PROG=${0##*/}
@@ -129,12 +137,23 @@ mkdir -p -- "$out_dir" || die "cannot create $out_dir"
 ldflags="-s -w -X github.com/shady2k/nomad-driver-lima/internal/version.Version=$version"
 
 # target -> GOOS GOARCH, one line each; the darwin artifacts are for the Mac
-# node and for an operator laptop that runs the CLI.
+# node and for an operator laptop that runs the CLI. These are the node binaries.
 targets=(
 	'linux amd64'
 )
 if [[ $linux_only == false ]]; then
 	targets+=('darwin arm64')
+fi
+
+# The guest binary. boxd is never installed on a node: a box runs the boxd of
+# its own architecture, so a release carries both guest architectures. --linux-only
+# (a build of the node the owner deploys first) builds the host's own guest
+# architecture.
+guest_targets=(
+	'linux amd64'
+)
+if [[ $linux_only == false ]]; then
+	guest_targets+=('linux arm64')
 fi
 
 # artifact name for a command and a target
@@ -144,30 +163,47 @@ artifact() {
 	box-driver) printf 'box-driver_%s_%s' "$os_name" "$arch" ;;
 	box-volume) printf 'box-volume_%s_%s' "$os_name" "$arch" ;;
 	box) printf 'box_%s_%s' "$os_name" "$arch" ;;
+	boxd) printf 'boxd_%s_%s' "$os_name" "$arch" ;;
 	*) die "unknown command $cmd" ;;
 	esac
+}
+
+# build_one CMD GOOS GOARCH -- build one binary into out_dir.
+build_one() {
+	local cmd=$1 gos=$2 goarch=$3 name tmp
+	name=$(artifact "$cmd" "$gos" "$goarch")
+	printf 'building %s (%s/%s)\n' "$name" "$gos" "$goarch"
+	# Build into a temporary name and move it, so a failed build never leaves a
+	# half-written binary that an install could pick up.
+	tmp=$out_dir/.$name.tmp
+	rm -f -- "$tmp"
+	if ! CGO_ENABLED=0 GOOS=$gos GOARCH=$goarch GOFLAGS='' \
+		go build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$tmp" "./cmd/$cmd"; then
+		rm -f -- "$tmp"
+		die "go build failed for $name"
+	fi
+	chmod 0755 -- "$tmp"
+	mv -f -- "$tmp" "$out_dir/$name"
+	built+=("$name")
 }
 
 built=()
 for target in "${targets[@]}"; do
 	read -r gos goarch <<<"$target"
 	for cmd in box-driver box-volume box; do
-		name=$(artifact "$cmd" "$gos" "$goarch")
-		printf 'building %s (%s/%s)\n' "$name" "$gos" "$goarch"
-		# Build into a temporary name and move it, so a failed build never
-		# leaves a half-written binary that an install could pick up.
-		tmp=$out_dir/.$name.tmp
-		rm -f -- "$tmp"
-		if ! CGO_ENABLED=0 GOOS=$gos GOARCH=$goarch GOFLAGS='' \
-			go build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$tmp" "./cmd/$cmd"; then
-			rm -f -- "$tmp"
-			die "go build failed for $name"
-		fi
-		chmod 0755 -- "$tmp"
-		mv -f -- "$tmp" "$out_dir/$name"
-		built+=("$name")
+		build_one "$cmd" "$gos" "$goarch"
 	done
 done
+for target in "${guest_targets[@]}"; do
+	read -r gos goarch <<<"$target"
+	build_one boxd "$gos" "$goarch"
+done
+
+# The operator's installer goes next to the guest binaries it looks for
+# (boxd_linux_$arch), so an image build needs nothing else from this repository.
+printf 'including %s\n' boxd-install.sh
+install -m 0755 -- "$repo_root/guest/boxd-install.sh" "$out_dir/boxd-install.sh"
+built+=("boxd-install.sh")
 
 # SHA256SUMS covers exactly the artifacts in this directory, in name order.
 (

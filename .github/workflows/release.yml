@@ -1,9 +1,11 @@
 # A tag vX.Y.Z becomes a GitHub release: the binaries deploy/build.sh builds for
-# every target, the SHA256SUMS that covers them, and a build provenance
-# attestation for each artifact.
+# every target (the node binaries, boxd for both guest architectures, and the
+# operator's boxd-install.sh), the SHA256SUMS that covers them, and a build
+# provenance attestation for each artifact.
 #
-# The box images are a separate workflow (image.yml), which a published release
-# also triggers; it adds its assets to the same release.
+# No image is built here. The guest image is the operator's: the release carries
+# what an image needs to run a box (boxd and boxd-install.sh), and
+# docs/guest-image.md says what else that image has to provide.
 name: Release
 
 on:
@@ -17,8 +19,6 @@ permissions:
   # the provenance attestation
   id-token: write
   attestations: write
-  # the image build this workflow asks for (see the last step)
-  actions: write
 
 jobs:
   release:
@@ -64,20 +64,6 @@ jobs:
             --verify-tag \
             --title "$GITHUB_REF_NAME" \
             --generate-notes
-
-      # A release created with the workflow's own token does not trigger the
-      # workflows that listen for `release: published` (GitHub's rule against a
-      # token starting a run), so the image build is asked for by name. Without
-      # it, run image.yml yourself: the "Run workflow" button takes the version.
-      - name: Ask for the box image
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh workflow run image.yml \
-            -f version="${GITHUB_REF_NAME#v}" \
-            -f release_tag="$GITHUB_REF_NAME"
-          echo "the image build is queued; watch it with: gh run list --workflow image.yml"
 
       - name: Say what was published
         env:
