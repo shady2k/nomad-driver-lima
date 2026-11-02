@@ -4,7 +4,9 @@ A box boots a qcow2 image that **you** build and publish. This repository builds
 no image and publishes none: it ships `boxd` (the guest daemon) and `boxctl` (the
 same binary), the installer that puts them into an image, and this page, which is
 the contract between them. Any image that boots under Lima, runs `boxd` and meets
-the requirements below works; how it was built is yours to choose.
+the requirements below works; how it was built is yours to choose. Where this
+page says *the reference image*, it means the image that the recipe this
+repository used to ship built.
 
 The release carries `boxd_linux_amd64`, `boxd_linux_arm64` and `boxd-install.sh`
 (`deploy/build.sh`, `SHA256SUMS` covers all three). Both binaries are built with
