@@ -45,6 +45,11 @@ func (m *Manager) startInstance(ctx context.Context, b *Box) (string, error) {
 		time.Sleep(time.Second)
 		stderr, err = m.runScope(ctx, unit, limitBytes, spec.BoxID)
 	}
+	if err != nil && limactlRan(stderr) {
+		// The scope was made and limactl ran inside it: the failure is lima's,
+		// and its own fatal line says why.
+		return "none", fmt.Errorf("start box %s in cgroup %s: %v: %s", spec.BoxID, unit, err, limaFailure(stderr))
+	}
 	if err != nil {
 		return "none", fmt.Errorf("box %s cannot run under the memory cgroup %s (%d MiB, no swap): %v: %s — "+
 			"the VM was not started, because a box without its memory limit is not the reservation the task asked for. "+
@@ -95,6 +100,29 @@ func (m *Manager) resetScope(ctx context.Context, unit string) {
 func (m *Manager) stopScope(ctx context.Context, unit string) {
 	m.systemctl(ctx, "stop", unit)
 	m.systemctl(ctx, "reset-failed", unit)
+}
+
+// limactlRan reports whether stderr holds limactl's own log lines, which means
+// systemd-run made the scope and the command inside it is what failed.
+func limactlRan(stderr string) bool {
+	return strings.Contains(stderr, "level=")
+}
+
+// limaFailure picks the line of limactl's stderr that says why it failed: the
+// last fatal or error line, else the last line.
+func limaFailure(stderr string) string {
+	lines := strings.Split(strings.TrimSpace(stderr), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.Contains(lines[i], "level=fatal") || strings.Contains(lines[i], "level=error") {
+			return strings.TrimSpace(lines[i])
+		}
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	return "no stderr"
 }
 
 func firstLine(s string) string {

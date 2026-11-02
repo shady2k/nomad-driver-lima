@@ -131,7 +131,7 @@ jobs:
           name: integration-logs-${{ matrix.suite.key }}
           path: |
             ${{ matrix.suite.work }}/*.log
-            ${{ matrix.suite.work }}/lima-home/*/ha.log
+            ${{ matrix.suite.work }}/lima-home/*/ha.*.log
             ${{ matrix.suite.work }}/lima-home/*/serial*.log
             ${{ matrix.suite.work }}/lima-home/*/cloud-init.log
           if-no-files-found: ignore
