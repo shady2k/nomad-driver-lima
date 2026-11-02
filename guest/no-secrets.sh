@@ -1,18 +1,20 @@
 #!/bin/bash
-# images/no-secrets.sh -- prove that an image carries no credential.
+# no-secrets.sh -- prove that an image carries no credential.
 #
-# Runs as root inside a box or a build VM (by images/build.sh before the disk is
-# captured, and by images/verify.sh against a booted image). A published image
-# goes to anyone, so nothing a box ever receives as a credential may be in it:
-# the rule is "no secret in an image", and this is where it is checked.
+# The operator's check on their own image, and the one rule a box image has to
+# keep: an image goes to anyone who can pull it, so nothing a box ever receives
+# as a credential may be in it. Run it as root inside the image being built
+# (before it is captured) and again inside a booted box.
 #
 # In a box the same paths exist but live on tmpfs: /run/box/secrets is where the
 # Nomad driver puts the credentials and /run/boxd is where boxd derives the
 # executor configuration from them. Neither survives a reboot, and neither is in
-# an image: /run of a fresh boot is empty.
+# an image: /run of a fresh boot is empty. When they do exist, both must be a
+# tmpfs.
 #
-# Usage (inside the guest, as root): images/no-secrets.sh [version]
+# Usage (inside the guest, as root): guest/no-secrets.sh [version]
 # Prints one line per check and exits non-zero on the first failed one.
+# docs/guest-image.md is the rest of what an image needs.
 set -uo pipefail
 
 VERSION=${1:-unknown}

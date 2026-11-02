@@ -1,19 +1,26 @@
 #!/bin/sh
-# boxd-install.sh: install the boxd daemon and the boxctl client into a box image.
+# boxd-install.sh: put the boxd daemon and the boxctl client into a box image.
 #
-# Called by the box image recipe (phase 1) after the guest is provisioned.
-# It copies one binary to /usr/local/bin/boxd, links /usr/local/bin/boxctl to it
-# (the binary dispatches on argv[0]), installs /etc/systemd/system/boxd.service,
-# creates the state and runtime directories, and either starts the service (when
-# this runs inside a booted guest) or enables it for the next boot (when it runs
-# in an image build chroot).
+# This is the operator's tool. This repository builds no image: an image is the
+# operator's own, and this script is how boxd gets into it -- into an image being
+# built, or into a guest that is already running. It copies one binary to
+# /usr/local/bin/boxd, links /usr/local/bin/boxctl to it (the binary dispatches
+# on argv[0]), installs /etc/systemd/system/boxd.service, creates the state and
+# runtime directories, and either starts the service (when this runs inside a
+# booted guest) or enables it for the next boot (when it runs in an image build
+# chroot).
 #
-# Usage:
-#   images/boxd-install.sh --from /path/to/boxd [--prefix /usr/local/bin]
-#                          [--no-start] [--dry-run]
+# The release ships it next to boxd_linux_amd64 and boxd_linux_arm64;
+# docs/guest-image.md says what the rest of an image has to provide.
 #
-# The binary is looked up in this order: --from, $BOXD_BIN, ./out/boxd-linux-$ARCH,
-# ./dist/boxd, then `boxd` on PATH.
+# usage-begin
+# usage: guest/boxd-install.sh --from /path/to/boxd [--prefix /usr/local/bin]
+#                              [--no-start] [--dry-run]
+#
+# The binary is looked up in this order: --from, $BOXD_BIN, boxd_linux_$ARCH next
+# to this script, boxd-linux-$ARCH next to it, ./dist/boxd_linux_$ARCH, then
+# `boxd` on PATH.
+# usage-end
 set -eu
 
 PREFIX=/usr/local/bin
@@ -25,7 +32,7 @@ HEALTH_TIMEOUT=20
 DESTDIR=${DESTDIR:-}
 
 usage() {
-	sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '/^# usage-begin/,/^# usage-end/p' "$0" | sed -e '1d;$d' -e 's/^# \{0,1\}//'
 }
 
 log() { printf 'boxd-install: %s\n' "$*" >&2; }
@@ -71,9 +78,9 @@ aarch64 | arm64) arch=arm64 ;;
 esac
 
 if [ -z "$BIN" ]; then
-	for cand in "${BOXD_BIN:-}" "$(dirname "$0")/../out/boxd-linux-$arch" \
-		"$(dirname "$0")/../dist/boxd-linux-$arch" "$(dirname "$0")/../dist/boxd" \
-		"$(dirname "$0")/boxd"; do
+	here=$(dirname "$0")
+	for cand in "${BOXD_BIN:-}" "$here/boxd_linux_$arch" "$here/boxd-linux-$arch" \
+		"$here/../dist/boxd_linux_$arch" "$here/boxd"; do
 		[ -n "$cand" ] || continue
 		if [ -x "$cand" ]; then
 			BIN=$cand

@@ -746,7 +746,7 @@ func TestCLI(t *testing.T) {
 		require.Equal(t, 0, res.code, "the real journalctl was not preserved: %s%s", res.stdout, res.stderr)
 
 		e.boxOK(t, "cp", boxd, testBox+":"+home+"/boxd")
-		e.boxOK(t, "cp", filepath.Join(repo, "images", "boxd-install.sh"), testBox+":"+home+"/boxd-install.sh")
+		e.boxOK(t, "cp", filepath.Join(repo, "guest", "boxd-install.sh"), testBox+":"+home+"/boxd-install.sh")
 		res = e.box(t, "run", testBox, "--", "sudo", "-n", "sh", home+"/boxd-install.sh", "--from", home+"/boxd")
 		require.Equal(t, 0, res.code, "boxd did not install: %s%s", res.stdout, res.stderr)
 		e.installInGuest(t, fakeacp, "/usr/local/bin/prime-agent")
