@@ -40,11 +40,11 @@ jobs:
           - key: driver
             name: driver suite (scripts/integration.sh)
             script: scripts/integration.sh
-            work: .integration
+            work: /tmp/box-it
           - key: cli
             name: CLI suite (scripts/integration-cli.sh)
             script: scripts/integration-cli.sh
-            work: .integration-cli
+            work: /tmp/box-cli
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -110,8 +110,13 @@ jobs:
 
       # KEEP keeps the work directory, so the logs below still exist when the
       # suite fails; the runner is thrown away afterwards, so nothing leaks.
+      # The work directory is short on purpose: LIMA_HOME lives in it, and lima
+      # refuses an instance whose socket path would pass the UNIX socket limit,
+      # which a LIMA_HOME inside the checkout under /home/runner/work does.
       - name: Run ${{ matrix.suite.script }}
         env:
+          BOX_TEST_WORK: ${{ matrix.suite.work }}
+          BOX_CLI_WORK: ${{ matrix.suite.work }}
           BOX_TEST_NOMAD: ${{ runner.temp }}/bin/nomad
           BOX_TEST_LIMACTL: /usr/local/bin/limactl
           BOX_TEST_KEEP: "1"

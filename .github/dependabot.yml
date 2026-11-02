@@ -11,6 +11,12 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps"
+    # Nomad is pinned to the pseudo-versions of the release the driver is built
+    # for (its tags do not resolve as Go module versions): bump it by hand with
+    # a Nomad release, not through Dependabot.
+    ignore:
+      - dependency-name: "github.com/hashicorp/nomad"
+      - dependency-name: "github.com/hashicorp/nomad/api"
     groups:
       go-modules:
         patterns:
