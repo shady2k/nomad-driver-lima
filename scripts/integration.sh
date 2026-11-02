@@ -376,6 +376,10 @@ main() {
   # runs *every* executable in host_volume_plugin_dir as a volume plugin.
   ( cd "$ROOT" && $GO build -o "$WORK/bin/box" ./cmd/box-driver \
                  && $GO build -o "$WORK/dhv/box-volume" ./cmd/box-volume )
+  # boxd for the guest, static (the guest has no NixOS dynamic linker): the
+  # credentials scenario installs it with guest/boxd-install.sh when the image
+  # carries none, so a plain cloud image tests the whole path.
+  ( cd "$ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $GO build -o "$WORK/bin/boxd" ./cmd/boxd )
 
   # box-volume reads which limactl to run, which Lima home to use and which user
   # owns the volumes from a settings file the node writes: Nomad gives a host
@@ -415,6 +419,7 @@ main() {
   BOX_TEST_LIMACTL=$LIMACTL \
   BOX_TEST_LIMA_HOME=$LIMA_HOME \
   BOX_TEST_IMAGE=$IMAGE \
+  BOX_TEST_BOXD=$WORK/bin/boxd \
   BOX_TEST_EXAMPLES=$ROOT/examples \
   BOX_TEST_START_CLIENT=$WORK/scripts/start-client.sh \
   BOX_TEST_CLIENT_PID=$WORK/client.pid \

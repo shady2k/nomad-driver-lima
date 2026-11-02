@@ -940,6 +940,18 @@ containerd:
 		require.Empty(t, e.guestSh(t, allocID, "sudo -n find / -xdev -name rotating.txt 2>/dev/null"))
 		require.FileExists(t, filepath.Join(e.volumeHostPath(t), "box-"+boxID+".qcow2"))
 
+		// An image without boxd (the plain cloud image CI boots) gets the one
+		// from this tree, through the installer an operator uses.
+		if e.guestSh(t, allocID, "command -v boxd || true") == "" {
+			boxd := os.Getenv("BOX_TEST_BOXD")
+			if boxd == "" {
+				t.Skip("the image has no boxd and BOX_TEST_BOXD is not set")
+			}
+			e.lima(t, "copy", boxd, boxID+":/tmp/boxd")
+			e.lima(t, "copy", filepath.Join("..", "guest", "boxd-install.sh"), boxID+":/tmp/boxd-install.sh")
+			e.guestSh(t, allocID, "sudo -n sh /tmp/boxd-install.sh --from /tmp/boxd >/dev/null")
+		}
+
 		// boxd reads the credentials from there and keeps its own copy in
 		// /run/boxd, also a tmpfs.
 		require.Equal(t, "tmpfs", e.guestSh(t, allocID, "findmnt -no FSTYPE --target /run/boxd"))
