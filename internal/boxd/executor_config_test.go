@@ -64,6 +64,9 @@ func TestInfoReportsConfiguredExecutors(t *testing.T) {
 	cfg := testConfig(t)
 	writeSecrets(t, cfg, "prime", map[string]string{"settings.json": "{}", "auth.json": "{}"})
 	writeSecrets(t, cfg, "opencode", map[string]string{"opencode.json": "{}"})
+	// Any executable stands in for opencode: the check is about its config, and
+	// the host running the tests need not have opencode installed.
+	cfg.OpenCode = cfg.PrimeAgent
 	newManager(t, cfg)
 	d, err := NewDaemon(cfg)
 	if err != nil {
