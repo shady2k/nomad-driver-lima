@@ -1,0 +1,186 @@
+---
+# Linux prerequisites: KVM, qemu, lima, and the pieces the memory scope needs.
+# Nothing here changes the node; the install tasks do that, and only when
+# box_install_deps asks for it.
+
+- name: Linux | Look for /dev/kvm
+  ansible.builtin.stat:
+    path: /dev/kvm
+  register: box_kvm
+
+- name: Linux | Require /dev/kvm
+  ansible.builtin.assert:
+    that:
+      - box_kvm.stat.exists
+      - box_kvm.stat.ischr | default(false)
+    fail_msg: >-
+      /dev/kvm is missing on {{ inventory_hostname }}. The boxes are qemu VMs and
+      need hardware virtualisation: enable VT-x/AMD-V in the firmware, load the
+      kvm module, and make sure the node is not itself a VM without nested
+      virtualisation.
+    quiet: true
+
+- name: Linux | Look for the kvm group
+  ansible.builtin.command:
+    argv: ['getent', 'group', 'kvm']
+  register: box_kvm_group_lookup
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Linux | Remember whether the kvm group exists
+  ansible.builtin.set_fact:
+    box_kvm_group_exists: '{{ box_kvm_group_lookup.rc | default(1) == 0 }}'
+
+- name: Linux | Check that the runtime user can open /dev/kvm
+  ansible.builtin.command:
+    argv: ['test', '-r', '/dev/kvm', '-a', '-w', '/dev/kvm']
+  become: true
+  become_user: '{{ box_runtime_user }}'
+  register: box_kvm_access
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Linux | Require read and write access to /dev/kvm for the runtime user
+  ansible.builtin.assert:
+    that:
+      # The install stage puts the user in the kvm group when that group exists,
+      # so a node that has the group is not stopped here on its first run.
+      - box_kvm_access.rc == 0 or (box_kvm_group_exists | bool and box_system_changes | bool)
+    fail_msg: >-
+      {{ box_runtime_user }} cannot read and write /dev/kvm (mode
+      {{ box_kvm.stat.mode }}, {{ box_kvm.stat.uid }}:{{ box_kvm.stat.gid }}):
+      {{ box_kvm_access.stderr | default('') | trim }}. There is no kvm group on
+      this node, so the role cannot add the user to it: give the device to the
+      group {{ box_runtime_group }} (or widen its mode) so the VMs can start.
+    quiet: true
+
+- name: Linux | Look for qemu
+  ansible.builtin.command:
+    argv: ['which', '{{ box_qemu_binary }}']
+  register: box_qemu_which
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Linux | Install qemu from the distribution packages
+  ansible.builtin.package:
+    name: '{{ box_qemu_packages }}'
+    state: present
+  when:
+    - box_qemu_which.rc != 0
+    - box_install_deps | bool
+
+- name: Linux | Look for qemu again after the installation
+  ansible.builtin.command:
+    argv: ['which', '{{ box_qemu_binary }}']
+  register: box_qemu_after_install
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: box_qemu_which.rc != 0 and box_install_deps | bool
+
+- name: Linux | Remember the qemu path
+  ansible.builtin.set_fact:
+    box_qemu_path: >-
+      {{ (box_qemu_after_install.stdout | default(box_qemu_which.stdout | default(''))) | trim }}
+
+- name: Linux | Require qemu
+  ansible.builtin.assert:
+    that:
+      - box_qemu_path | length > 0
+    fail_msg: >-
+      {{ box_qemu_binary }} is not in PATH. lima runs the boxes with qemu: install
+      it (Debian/Ubuntu: apt-get install qemu-system-x86 qemu-utils) or set
+      box_install_deps: true to let this role install box_qemu_packages
+      ({{ box_qemu_packages | join(', ') }}).
+    quiet: true
+
+- name: Linux | Look for limactl
+  ansible.builtin.stat:
+    path: '{{ box_limactl }}'
+  register: box_limactl_stat
+
+- name: Linux | Install lima from the pinned upstream release
+  when:
+    - not box_limactl_stat.stat.exists
+    - box_lima_tarball_url | length > 0
+    - box_lima_tarball_sha256 | length == 64
+    - box_install_deps | bool
+  block:
+    - name: Linux | Create the lima prefix
+      ansible.builtin.file:
+        path: '{{ box_lima_prefix }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Linux | Fetch the pinned lima release
+      ansible.builtin.get_url:
+        url: '{{ box_lima_tarball_url }}'
+        dest: '{{ box_lima_prefix }}/lima.tar.gz'
+        checksum: 'sha256:{{ box_lima_tarball_sha256 }}'
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Linux | Unpack the lima release
+      ansible.builtin.unarchive:
+        src: '{{ box_lima_prefix }}/lima.tar.gz'
+        dest: '{{ box_lima_prefix }}'
+        remote_src: true
+        extra_opts: ['--strip-components=1']
+        creates: '{{ box_lima_prefix }}/bin/limactl'
+
+    - name: Linux | Require the unpacked limactl where box_limactl points
+      ansible.builtin.assert:
+        that:
+          - box_limactl == box_lima_prefix ~ '/bin/limactl'
+        fail_msg: >-
+          lima was unpacked to {{ box_lima_prefix }}/bin/limactl; set box_limactl
+          to that path.
+        quiet: true
+
+- name: Linux | Read the lima version
+  ansible.builtin.command:
+    argv: ['{{ box_limactl }}', '--version']
+  become: true
+  become_user: '{{ box_runtime_user }}'
+  environment:
+    LIMA_HOME: '{{ box_lima_home }}'
+  register: box_lima_version_raw
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: box_limactl_stat.stat.exists
+
+- name: Linux | Require a new enough lima
+  ansible.builtin.assert:
+    that:
+      - box_limactl_stat.stat.exists
+      - box_lima_version_raw.stdout | default('') is search('[0-9]+\.[0-9]+(\.[0-9]+)?')
+      - (box_lima_version_raw.stdout | default('') | regex_search('([0-9]+)\.([0-9]+)', '\\1') | first | int) > (box_min_lima.split('.')[0] | int)
+        or ((box_lima_version_raw.stdout | default('') | regex_search('([0-9]+)\.([0-9]+)', '\\1') | first | int) == (box_min_lima.split('.')[0] | int)
+        and (box_lima_version_raw.stdout | default('') | regex_search('([0-9]+)\.([0-9]+)', '\\2') | first | int) >= (box_min_lima.split('.')[1] | int))
+    fail_msg: >-
+      {{ box_limactl }} is missing or older than lima {{ box_min_lima }} (it
+      answered "{{ box_lima_version_raw.stdout | default('not found') | trim | truncate(80) }}").
+      Install lima {{ box_min_lima }} from the upstream release, or set box_limactl
+      to the binary the node has.
+    quiet: true
+
+- name: Linux | Remember the lima version
+  ansible.builtin.set_fact:
+    box_lima_semver: >-
+      {{ (box_lima_version_raw.stdout | default('') | regex_search('[0-9]+\.[0-9]+(\.[0-9]+)?')) | default('unknown') }}
+
+- name: Linux | Report the memory-scope prerequisites
+  ansible.builtin.debug:
+    msg: >-
+      The memory cap of a box is a transient *user* systemd scope
+      (memory.max = guest + {{ box_memory_overhead_mib }} MiB, memory.swap.max = 0).
+      It needs a user manager for {{ box_runtime_user }} (uid {{ box_runtime_uid }})
+      and /run/user/{{ box_runtime_uid }}; the install stage sets that up when
+      box_cgroup_enabled is true.

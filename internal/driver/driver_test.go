@@ -2,382 +2,583 @@ package driver
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	log "github.com/hashicorp/go-hclog"
-	ns "github.com/hashicorp/nomad/nomad/structs"
-	"github.com/hashicorp/nomad/plugins/drivers"
-	"nomad-driver-lima/internal/lima"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
+
+	hclog "github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/nomad/plugins/base"
+	"github.com/hashicorp/nomad/plugins/drivers"
+	"github.com/hashicorp/nomad/plugins/shared/hclspec"
+	"github.com/stretchr/testify/require"
+
+	"github.com/shady2k/nomad-driver-lima/internal/box"
+	"github.com/shady2k/nomad-driver-lima/internal/fakelima"
 )
 
-type fakeCLI struct {
-	mu                                        sync.Mutex
-	home                                      string
-	infos                                     map[string]lima.Info
-	creates, starts, launches, stops, deletes int
-	vaultSyncs, vaultClears                   int
-	phase                                     string
-	code                                      int
-	fault                                     string
-	command                                   []string
-}
-
-func (f *fakeCLI) Run(ctx context.Context, in []byte, args ...string) ([]byte, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	switch args[0] {
-	case "validate":
-		if f.fault == "template-preflight" {
-			return nil, fmt.Errorf("runtime cannot read template")
-		}
-		return nil, nil
-	case "--version":
-		return []byte("limactl version 2.2.1"), nil
-	case "list":
-		var b strings.Builder
-		for _, v := range f.infos {
-			x, _ := json.Marshal(v)
-			b.Write(x)
-			b.WriteByte('\n')
-		}
-		return []byte(b.String()), nil
-	case "create":
-		f.creates++
-		var name, owner, key string
-		cpu, mem, disk := 0, 0, 0
-		for _, a := range args {
-			if strings.HasPrefix(a, "--name=") {
-				name = strings.TrimPrefix(a, "--name=")
-			}
-			if strings.HasPrefix(a, "--cpus=") {
-				cpu, _ = strconv.Atoi(strings.TrimPrefix(a, "--cpus="))
-			}
-			if strings.HasPrefix(a, "--memory=") {
-				v, _ := strconv.ParseFloat(strings.TrimPrefix(a, "--memory="), 64)
-				mem = int(v * 1024)
-			}
-			if strings.HasPrefix(a, "--disk=") {
-				disk, _ = strconv.Atoi(strings.TrimPrefix(a, "--disk="))
-			}
-			if strings.HasPrefix(a, "--set=.param") {
-				m := regexp.MustCompile(`"([a-f0-9]+)"`).FindAllStringSubmatch(a, -1)
-				owner = m[0][1]
-				key = m[1][1]
-			}
-		}
-		if f.fault == "create-before" {
-			return nil, fmt.Errorf("fake uncertain create")
-		}
-		dir := filepath.Join(f.home, name)
-		os.MkdirAll(dir, 0700)
-		os.WriteFile(filepath.Join(dir, "lima.yaml"), []byte("fixture config"), 0600)
-		os.WriteFile(filepath.Join(dir, "disk"), []byte("synthetic-disk"), 0600)
-		f.infos[name] = lima.Info{Name: name, Status: "Stopped", Dir: dir, CPUs: cpu, Memory: int64(mem) * 1048576, Disk: int64(disk) * 1073741824, Param: map[string]string{"nomad_driver_id": owner, "nomad_task_key": key}}
-		if f.fault == "create-after" {
-			return nil, fmt.Errorf("fake lost create acknowledgement")
-		}
-		return nil, nil
-	case "start":
-		name := args[len(args)-1]
-		v := f.infos[name]
-		v.Status = "Running"
-		f.infos[name] = v
-		f.starts++
-		return nil, nil
-	case "stop":
-		if f.fault == "stop-no-change" {
-			f.stops++
-			return nil, nil
-		}
-		name := args[len(args)-1]
-		v := f.infos[name]
-		v.Status = "Stopped"
-		f.infos[name] = v
-		f.stops++
-		return nil, nil
-	case "delete":
-		f.deletes++
-		return nil, fmt.Errorf("delete must never be called")
-	case "shell":
-		if len(in) == 0 {
-			return []byte("exec-ok"), nil
-		}
-		var p map[string]any
-		json.Unmarshal(in, &p)
-		action := p["action"].(string)
-		if action == "sync" {
-			f.vaultSyncs++
-			return []byte(`{"ok":true}`), nil
-		}
-		if action == "revoke" {
-			if f.fault == "revoke-uncertain" {
-				return []byte(`{"ok":false}`), nil
-			}
-			return []byte(`{"ok":true}`), nil
-		}
-		if action == "clear" {
-			f.vaultClears++
-			return []byte(`{"ok":true}`), nil
-		}
-		if action == "identity" {
-			return json.Marshal(map[string]string{"machine_id": "machine", "boot_id": fmt.Sprint("boot-", f.starts)})
-		}
-		if action == "launch" {
-			f.launches++
-			if c, ok := p["command"].([]any); ok {
-				for _, x := range c {
-					f.command = append(f.command, x.(string))
-				}
-			}
-			if f.fault == "launch-after" {
-				return nil, fmt.Errorf("fake launch response lost")
-			}
-		}
-		if action == "signal" {
-			f.phase = "exited"
-			f.code = 143
-		}
-		if f.fault == "transport" {
-			return nil, fmt.Errorf("SSH EOF")
-		}
-		var result any
-		if f.phase == "exited" {
-			result = map[string]any{"code": f.code, "signal": 0, "error": ""}
-		}
-		off := int64(p["stdout_offset"].(float64))
-		chunk := []byte{}
-		if off == 0 {
-			chunk = []byte("guest-output\n")
-		}
-		v := map[string]any{"phase": f.phase, "result": result, "machine_id": "machine", "boot_id": fmt.Sprint("boot-", f.starts), "stdout": base64.StdEncoding.EncodeToString(chunk), "stderr": "", "stdout_eof": true, "stderr_eof": true, "stdout_offset": off + int64(len(chunk)), "stderr_offset": 0}
-		b, _ := json.Marshal(v)
-		return b, nil
-	}
-	return nil, fmt.Errorf("unknown fake CLI")
-}
-func setup(t *testing.T, f *fakeCLI, root string) *Driver {
+// newTestDriver returns a configured driver bound to a fake limactl.
+func newTestDriver(t *testing.T, f *fakelima.Fake) *Driver {
 	t.Helper()
-	if root == "" {
-		root = t.TempDir()
+	d := NewDriver(context.Background(), hclog.NewNullLogger())
+	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+
+	cfg := Config{
+		LimactlPath:       f.Bin,
+		LimaHome:          f.Home,
+		ImageCacheDir:     filepath.Join(f.Home, "_images"),
+		MemoryOverheadMiB: 150,
+		VMType:            "qemu",
 	}
-	template := filepath.Join(root, "template.yaml")
-	os.WriteFile(template, []byte("images: []"), 0600)
-	home := filepath.Join("/tmp", "nl-"+lima.Hash([]byte(root))[:8])
-	os.MkdirAll(home, 0700)
-	t.Cleanup(func() { os.RemoveAll(home) })
-	d := New(t.Context(), log.NewNullLogger())
-	e := d.configure(Config{LimaBinary: "/usr/bin/true", LimaHome: home, StateDir: filepath.Join(root, "state"), TemplateFile: template, TemplateSHA256: lima.Hash([]byte("images: []")), ExpectedVersion: "2.2.1", MemoryOverheadMiB: 128, DiskFreeFloorMiB: 0})
-	if e != nil {
-		t.Fatal(e)
-	}
-	f.home = d.config.LimaHome
-	d.client.Runner = f
-	d.mhzPerCore = 1000
-	d.interval = 5 * time.Millisecond
-	t.Cleanup(func() { ctx, c := context.WithTimeout(context.Background(), time.Second); defer c(); d.Shutdown(ctx) })
+	var encoded []byte
+	require.NoError(t, base.MsgPackEncode(&encoded, cfg))
+	require.NoError(t, d.SetConfig(&base.Config{PluginConfig: encoded}))
 	return d
 }
-func fixture(t *testing.T) *drivers.TaskConfig {
+
+// taskConfig returns a task that mounts a volume named "disk".
+func taskConfig(t *testing.T, volumeDir string, mutate ...func(*drivers.TaskConfig)) *drivers.TaskConfig {
 	t.Helper()
-	root := t.TempDir()
-	out := filepath.Join(root, "stdout")
-	err := filepath.Join(root, "stderr")
-	os.WriteFile(out, nil, 0600)
-	os.WriteFile(err, nil, 0600)
-	cfg := &drivers.TaskConfig{ID: "allocation/task/attempt", AllocID: "00000000-0000-4000-8000-000000000001", Name: "work", StdoutPath: out, StderrPath: err, Resources: &drivers.Resources{NomadResources: &ns.AllocatedTaskResources{Cpu: ns.AllocatedCpuResources{CpuShares: 1000}, Memory: ns.AllocatedMemoryResources{MemoryMB: 640}}}}
-	if e := cfg.EncodeConcreteDriverConfig(TaskConfig{Command: []string{"/bin/sh", "-c", "exit 7"}, CPUs: 1, MemoryMiB: 512, DiskGiB: 1, Architecture: runtime.GOARCH, GuestOS: "linux"}); e != nil {
-		t.Fatal(e)
+	allocDir := t.TempDir()
+	logDir := filepath.Join(allocDir, "alloc", "logs")
+	require.NoError(t, os.MkdirAll(logDir, 0o755))
+	tc := &drivers.TaskConfig{
+		ID:         "task1",
+		Name:       "box",
+		AllocID:    "alloc1",
+		AllocDir:   allocDir,
+		StdoutPath: filepath.Join(logDir, "stdout"),
+		StderrPath: filepath.Join(logDir, "stderr"),
+		Mounts: []*drivers.MountConfig{
+			{RequestName: "disk", TaskPath: "/disk", HostPath: volumeDir},
+		},
 	}
-	return cfg
+	for _, m := range mutate {
+		m(tc)
+	}
+	return tc
 }
-func newFake() *fakeCLI { return &fakeCLI{infos: map[string]lima.Info{}, phase: "running", code: 7} }
-func TestRealGuestExitLogsAndRetainedDestroy(t *testing.T) {
-	f := newFake()
-	f.phase = "exited"
-	d := setup(t, f, "")
-	cfg := fixture(t)
-	h, _, e := d.StartTask(cfg)
-	if e != nil || h == nil {
-		t.Fatal(e)
+
+func startConfig(t *testing.T, url, sha string) TaskConfig {
+	t.Helper()
+	return TaskConfig{
+		BoxID:           "box1",
+		Image:           ImageConfig{URL: url, SHA256: sha},
+		CPUs:            2,
+		MemoryMiB:       1024,
+		DiskGiB:         8,
+		GuestLogCommand: []string{"true"},
+		FilesDirInGuest: "/etc/box",
 	}
-	ctx, c := context.WithTimeout(t.Context(), time.Second)
-	defer c()
-	ch, e := d.WaitTask(ctx, cfg.ID)
-	if e != nil {
-		t.Fatal(e)
+}
+
+func TestConfigValidate(t *testing.T) {
+	c := Config{}
+	require.NoError(t, c.validate())
+	require.Equal(t, "limactl", c.LimactlPath)
+	require.NotEmpty(t, c.LimaHome)
+	require.Equal(t, box.DefaultVMType(), c.VMType)
+	require.Equal(t, 150, c.MemoryOverheadMiB)
+
+	require.Equal(t, box.DefaultMemoryLimit(), c.MemoryLimit)
+
+	bad := Config{VMType: "vmware"}
+	require.Error(t, bad.validate())
+
+	// The memory limit is an operator decision with two values; anything else is
+	// a typo that would otherwise silently disable the cap.
+	require.NoError(t, (&Config{MemoryLimit: box.MemoryLimitOff}).validate())
+	require.Error(t, (&Config{MemoryLimit: "disabled"}).validate())
+
+	// memory_limit = "enforce" needs cgroup v2, which only Linux has.
+	enforce := Config{MemoryLimit: box.MemoryLimitEnforce}
+	if runtime.GOOS == "linux" {
+		require.NoError(t, enforce.validate())
+	} else {
+		require.Error(t, enforce.validate())
 	}
-	select {
-	case r := <-ch:
-		if r == nil || r.ExitCode != 7 || r.Successful() {
-			t.Fatal(r)
+}
+
+func TestTaskConfigApplyDefaults(t *testing.T) {
+	c := TaskConfig{BoxID: "box1", Image: ImageConfig{URL: "http://x/y", SHA256: strings.Repeat("a", 64)}}
+	require.NoError(t, c.applyDefaults())
+	require.Equal(t, defaultCPUs, c.CPUs)
+	require.Equal(t, defaultMemoryMiB, c.MemoryMiB)
+	require.Equal(t, defaultDiskGiB, c.DiskGiB)
+	require.Equal(t, defaultGuestLogCommand, c.GuestLogCommand)
+	require.Equal(t, defaultFilesDir, c.FilesDirInGuest)
+
+	cases := map[string]TaskConfig{
+		"no box id": {Image: ImageConfig{URL: "u", SHA256: "s"}},
+		"no image":  {BoxID: "box1"},
+		"no url":    {BoxID: "box1", Image: ImageConfig{SHA256: "s"}},
+		"no sha":    {BoxID: "box1", Image: ImageConfig{URL: "u"}},
+		"bad sizes": {BoxID: "box1", Image: ImageConfig{URL: "u", SHA256: "s"}, CPUs: -1},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			require.Error(t, c.applyDefaults())
+		})
+	}
+}
+
+func TestDiskVolumePath(t *testing.T) {
+	path, err := diskVolumePath(taskConfig(t, "/vol"))
+	require.NoError(t, err)
+	require.Equal(t, "/vol", path)
+
+	// Nomad names a host volume mount after the volume, so a single mount is
+	// used whatever its name.
+	path, err = diskVolumePath(taskConfig(t, "/vol", func(tc *drivers.TaskConfig) {
+		tc.Mounts = []*drivers.MountConfig{{RequestName: "boxdisk", HostPath: "/vol"}}
+	}))
+	require.NoError(t, err)
+	require.Equal(t, "/vol", path)
+
+	// A mount explicitly named "disk" wins when there are several.
+	path, err = diskVolumePath(taskConfig(t, "/vol", func(tc *drivers.TaskConfig) {
+		tc.Mounts = []*drivers.MountConfig{
+			{RequestName: "other", HostPath: "/other"},
+			{RequestName: "disk", HostPath: "/vol"},
 		}
-	case <-ctx.Done():
-		t.Fatal("wait timed out")
-	}
-	b, _ := os.ReadFile(cfg.StdoutPath)
-	if !strings.HasSuffix(string(b), "guest-output\n") || !strings.Contains(string(b), `"stage":"vm_boot"`) {
-		t.Fatal(string(b))
-	}
-	if e = d.DestroyTask(cfg.ID, false); e != nil {
-		t.Fatal(e)
-	}
-	if f.deletes != 0 || f.stops != 1 {
-		t.Fatal("disk purge or missing stop")
-	}
+	}))
+	require.NoError(t, err)
+	require.Equal(t, "/vol", path)
+
+	_, err = diskVolumePath(taskConfig(t, "/vol", func(tc *drivers.TaskConfig) { tc.Mounts = nil }))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no mounts")
+
+	_, err = diskVolumePath(taskConfig(t, "/vol", func(tc *drivers.TaskConfig) {
+		tc.Mounts = []*drivers.MountConfig{
+			{RequestName: "data", HostPath: "/vol"},
+			{RequestName: "logs", HostPath: "/logs"},
+		}
+	}))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "found: data (/vol), logs (/logs)")
 }
-func TestRecoverSameInstanceDoesNotReplayWorkload(t *testing.T) {
-	f := newFake()
-	root := t.TempDir()
-	d := setup(t, f, root)
-	cfg := fixture(t)
-	h, _, e := d.StartTask(cfg)
-	if e != nil {
-		t.Fatal(e)
+
+// TestStartTaskLifecycle drives create -> start -> inspect -> stop -> wait ->
+// destroy through the real command boundary of a fake limactl.
+func TestStartTaskLifecycle(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	vol := filepath.Join(t.TempDir(), "volume")
+	require.NoError(t, os.MkdirAll(vol, 0o755))
+	url := fakelima.ImageServer(t, "IMAGE")
+
+	tc := taskConfig(t, vol)
+	require.NoError(t, tc.EncodeConcreteDriverConfig(startConfig(t, url, sha256Hex("IMAGE"))))
+
+	handle, net, err := d.StartTask(tc)
+	require.NoError(t, err)
+	require.Nil(t, net)
+	require.NotNil(t, handle)
+	require.Equal(t, drivers.TaskStateRunning, handle.State)
+	require.NotEmpty(t, handle.DriverState)
+
+	inst := f.State(t)["box1"]
+	require.Equal(t, "Running", inst["status"])
+	require.True(t, f.HasCall(t, "create --name box1"))
+	linkTarget, err := os.Readlink(f.DiskPath("box1"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(vol, "box-box1.qcow2"), linkTarget)
+
+	status, err := d.InspectTask("task1")
+	require.NoError(t, err)
+	require.Equal(t, drivers.TaskStateRunning, status.State)
+	require.Equal(t, "box1", status.DriverAttributes["box_id"])
+	require.Equal(t, filepath.Join(vol, "box-box1.qcow2"), status.DriverAttributes["disk_path"])
+
+	waitCh, err := d.WaitTask(context.Background(), "task1")
+	require.NoError(t, err)
+
+	require.NoError(t, d.StopTask("task1", 5*time.Second, ""))
+	require.Equal(t, "Stopped", f.State(t)["box1"]["status"])
+
+	select {
+	case res := <-waitCh:
+		require.True(t, res.Successful(), "a clean stop is exit 0, got %+v", res)
+	case <-time.After(15 * time.Second):
+		require.Fail(t, "WaitTask did not report the stopped VM")
 	}
-	if e = d.Shutdown(t.Context()); e != nil {
-		t.Fatal(e)
-	}
-	d2 := setup(t, f, root)
-	if e = d2.RecoverTask(h); e != nil {
-		t.Fatal(e)
-	}
-	f.mu.Lock()
-	creates, launches, starts := f.creates, f.launches, f.starts
-	f.mu.Unlock()
-	if creates != 1 || launches != 1 || starts != 1 {
-		t.Fatalf("duplicates %d %d %d", creates, launches, starts)
-	}
-	if e = d2.StopTask(cfg.ID, time.Second, ""); e != nil {
-		t.Fatal(e)
-	}
+
+	// Destroy keeps the instance and the disk.
+	require.NoError(t, d.DestroyTask("task1", false))
+	_, err = d.InspectTask("task1")
+	require.Error(t, err)
+	require.Equal(t, "Stopped", f.State(t)["box1"]["status"])
+	diskInfo, err := os.Stat(filepath.Join(vol, "box-box1.qcow2"))
+	require.NoError(t, err)
+	require.True(t, diskInfo.Mode().IsRegular())
+	require.Empty(t, f.CallsWith(t, "delete"))
 }
-func TestForeignOwnerAndConfigTamperNeverStopped(t *testing.T) {
-	for _, tamper := range []string{"owner", "config"} {
-		t.Run(tamper, func(t *testing.T) {
-			f := newFake()
-			d := setup(t, f, "")
-			cfg := fixture(t)
-			_, _, e := d.StartTask(cfg)
-			if e != nil {
-				t.Fatal(e)
-			}
-			f.mu.Lock()
-			for n, v := range f.infos {
-				if tamper == "owner" {
-					v.Param["nomad_driver_id"] = "foreign"
-					f.infos[n] = v
-				} else {
-					os.WriteFile(filepath.Join(v.Dir, "lima.yaml"), []byte("changed"), 0600)
-				}
-			}
-			f.mu.Unlock()
-			if d.StopTask(cfg.ID, time.Millisecond, "") == nil {
-				t.Fatal("accepted foreign instance")
-			}
-			f.mu.Lock()
-			defer f.mu.Unlock()
-			if f.stops != 0 {
-				t.Fatal("stopped foreign VM")
-			}
-		})
-	}
+
+func TestStartTaskRequiresDiskVolume(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	tc := taskConfig(t, "/vol", func(tc *drivers.TaskConfig) { tc.Mounts = nil })
+	require.NoError(t, tc.EncodeConcreteDriverConfig(startConfig(t, "http://x/y", strings.Repeat("a", 64))))
+	_, _, err := d.StartTask(tc)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "needs a volume mount")
 }
-func TestAmbiguousCreateOrLaunchNeverBlindlyRetried(t *testing.T) {
-	for _, fault := range []string{"create-before", "launch-after"} {
-		t.Run(fault, func(t *testing.T) {
-			f := newFake()
-			f.fault = fault
-			d := setup(t, f, "")
-			cfg := fixture(t)
-			if _, _, e := d.StartTask(cfg); e == nil {
-				t.Fatal("expected injected failure")
-			}
-			f.mu.Lock()
-			f.fault = ""
-			f.mu.Unlock()
-			_, _, _ = d.StartTask(cfg)
-			f.mu.Lock()
-			defer f.mu.Unlock()
-			if f.creates != 1 || f.launches > 1 {
-				t.Fatalf("blind replay create=%d launch=%d", f.creates, f.launches)
-			}
-		})
-	}
+
+func TestStartTaskRejectsInvalidBoxID(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	vol := filepath.Join(t.TempDir(), "volume")
+	require.NoError(t, os.MkdirAll(vol, 0o755))
+	cfg := startConfig(t, "http://x/y", strings.Repeat("a", 64))
+	cfg.BoxID = "Box_1"
+	tc := taskConfig(t, vol)
+	require.NoError(t, tc.EncodeConcreteDriverConfig(cfg))
+	_, _, err := d.StartTask(tc)
+	require.Error(t, err)
+	require.False(t, f.HasCall(t, "create"))
 }
-func TestLostCreateAcknowledgementCanAdoptOnlyOwnedInstance(t *testing.T) {
-	f := newFake()
-	f.fault = "create-after"
-	d := setup(t, f, "")
-	cfg := fixture(t)
-	if _, _, e := d.StartTask(cfg); e == nil {
-		t.Fatal("expected lost acknowledgement")
-	}
-	f.mu.Lock()
-	f.fault = ""
-	f.mu.Unlock()
-	if _, _, e := d.StartTask(cfg); e != nil {
-		t.Fatal(e)
-	}
-	if f.creates != 1 || f.launches != 1 {
-		t.Fatal("duplicate create")
-	}
+
+// TestRecoverTaskRefusesStoppedBox never hands back a fake handle.
+func TestRecoverTaskRefusesStoppedBox(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	vol := filepath.Join(t.TempDir(), "volume")
+	require.NoError(t, os.MkdirAll(vol, 0o755))
+	url := fakelima.ImageServer(t, "IMAGE")
+	tc := taskConfig(t, vol)
+	require.NoError(t, tc.EncodeConcreteDriverConfig(startConfig(t, url, sha256Hex("IMAGE"))))
+	handle, _, err := d.StartTask(tc)
+	require.NoError(t, err)
+
+	// The VM went away while the client was down.
+	f.SetState(t, "box1", map[string]any{"status": "Stopped"})
+	require.Error(t, d.RecoverTask(handle))
+
+	// Broken with a dead hostagent must not be faked into a handle ...
+	f.SetState(t, "box1", map[string]any{"status": "Broken", "hostAgentPID": 1 << 22})
+	require.Error(t, d.RecoverTask(handle))
+
+	// ... while Broken with a live hostagent is re-attachable: lima reports
+	// Broken whenever its hostagent API is slow, which happens on a busy host.
+	f.SetState(t, "box1", map[string]any{"status": "Broken", "hostAgentPID": os.Getppid()})
+	require.NoError(t, d.RecoverTask(handle))
 }
-func TestTransportFailureIsNotSuccessAndUnsupportedStatsHonest(t *testing.T) {
-	f := newFake()
-	d := setup(t, f, "")
-	cfg := fixture(t)
-	_, _, e := d.StartTask(cfg)
-	if e != nil {
-		t.Fatal(e)
-	}
-	f.mu.Lock()
-	f.fault = "transport"
-	f.mu.Unlock()
-	ctx, c := context.WithTimeout(t.Context(), 30*time.Millisecond)
-	defer c()
-	ch, _ := d.WaitTask(ctx, cfg.ID)
-	if r := <-ch; r != nil {
-		t.Fatal("EOF became terminal success")
-	}
-	if ch, e := d.TaskStats(t.Context(), cfg.ID, time.Second); e == nil || ch != nil {
-		t.Fatal("fabricated statistics")
-	}
+
+// TestRecoverTaskReattachesRunningBox covers the good path: same VM, same disk.
+func TestRecoverTaskReattachesRunningBox(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	vol := filepath.Join(t.TempDir(), "volume")
+	require.NoError(t, os.MkdirAll(vol, 0o755))
+	url := fakelima.ImageServer(t, "IMAGE")
+	tc := taskConfig(t, vol)
+	require.NoError(t, tc.EncodeConcreteDriverConfig(startConfig(t, url, sha256Hex("IMAGE"))))
+	handle, _, err := d.StartTask(tc)
+	require.NoError(t, err)
+
+	// A second driver (a restarted plugin) recovers the same handle.
+	d2 := newTestDriver(t, f)
+	f.ResetCalls(t)
+	require.NoError(t, d2.RecoverTask(handle))
+	status, err := d2.InspectTask("task1")
+	require.NoError(t, err)
+	require.Equal(t, drivers.TaskStateRunning, status.State)
+	require.Empty(t, f.CallsWith(t, "start"), "recovery must not restart the VM")
+
+	// Nomad does not persist the driver config bytes, so recovery must work from
+	// the driver's own state alone.
+	stripped := &drivers.TaskHandle{Version: handle.Version, State: handle.State, DriverState: handle.DriverState, Config: &drivers.TaskConfig{
+		ID:         tc.ID,
+		Name:       tc.Name,
+		AllocID:    tc.AllocID,
+		AllocDir:   tc.AllocDir,
+		StdoutPath: tc.StdoutPath,
+		StderrPath: tc.StderrPath,
+	}}
+	d3 := newTestDriver(t, f)
+	require.NoError(t, d3.RecoverTask(stripped))
+
+	// A handle without state is refused.
+	require.Error(t, d2.RecoverTask(&drivers.TaskHandle{Config: tc}))
+	// A handle for a different box id is refused.
+	other := *handle
+	other.DriverState = []byte(`{"version":1,"box_id":"box2"}`)
+	require.Error(t, d2.RecoverTask(&other))
 }
-func TestReservationAndArchitectureValidationBeforeCreate(t *testing.T) {
-	for _, kind := range []string{"cpu", "ram", "arch", "mount"} {
-		t.Run(kind, func(t *testing.T) {
-			f := newFake()
-			d := setup(t, f, "")
-			cfg := fixture(t)
-			switch kind {
-			case "cpu":
-				cfg.Resources.NomadResources.Cpu.CpuShares = 1
-			case "ram":
-				cfg.Resources.NomadResources.Memory.MemoryMB = 512
-			case "arch":
-				var tc TaskConfig
-				cfg.DecodeDriverConfig(&tc)
-				tc.Architecture = "unsupported"
-				cfg.EncodeConcreteDriverConfig(tc)
-			case "mount":
-				cfg.User = "root"
-			}
-			if _, _, e := d.StartTask(cfg); e == nil {
-				t.Fatal("invalid reservation/host option accepted")
-			}
-			if f.creates != 0 {
-				t.Fatal("create before validation")
-			}
-		})
+
+// TestFingerprintReportsInstancesAndOrphans covers the node attributes.
+func TestFingerprintReportsInstancesAndOrphans(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	vol := filepath.Join(t.TempDir(), "volume")
+	require.NoError(t, os.MkdirAll(vol, 0o755))
+	url := fakelima.ImageServer(t, "IMAGE")
+	tc := taskConfig(t, vol)
+	require.NoError(t, tc.EncodeConcreteDriverConfig(startConfig(t, url, sha256Hex("IMAGE"))))
+	_, _, err := d.StartTask(tc)
+	require.NoError(t, err)
+
+	ch, err := d.Fingerprint(context.Background())
+	require.NoError(t, err)
+	fp := <-ch
+	require.Equal(t, drivers.HealthStateHealthy, fp.Health)
+	require.Equal(t, "2.2.0", attrValue(t, fp, "driver.box.lima_version"))
+	require.Equal(t, "1", attrValue(t, fp, "driver.box.instances"))
+	require.Equal(t, "linux", attrValue(t, fp, "driver.box.guests"))
+	require.Equal(t, "qemu", attrValue(t, fp, "driver.box.vm_type"))
+	require.NotEmpty(t, attrValue(t, fp, "driver.box.version"))
+	require.Empty(t, attrValue(t, fp, "driver.box.orphans"), "a box with a task is not an orphan")
+	require.Equal(t, box.DefaultMemoryLimit(), attrValue(t, fp, "driver.box.memory_limit"))
+
+	// Every live instance is described with its size and its owner, so capacity
+	// accounting can subtract the VMs Nomad does not cover.
+	require.Equal(t, "2", attrValue(t, fp, "driver.box.instance.box1.cpus"))
+	require.Equal(t, "1024", attrValue(t, fp, "driver.box.instance.box1.memory_mib"))
+	require.Equal(t, "8", attrValue(t, fp, "driver.box.instance.box1.disk_gib"))
+	require.Equal(t, "running", attrValue(t, fp, "driver.box.instance.box1.task"))
+
+	// Lose the volume: the box becomes an orphan and is only reported.
+	require.NoError(t, os.Remove(filepath.Join(vol, "box-box1.qcow2")))
+	ch, err = d.Fingerprint(context.Background())
+	require.NoError(t, err)
+	fp = <-ch
+	require.Equal(t, "box1", attrValue(t, fp, "driver.box.orphans"))
+}
+
+// TestFingerprintReportsMissingLimactl keeps the node unhealthy, not the process.
+func TestFingerprintReportsMissingLimactl(t *testing.T) {
+	d := NewDriver(context.Background(), hclog.NewNullLogger())
+	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+	require.NoError(t, d.SetConfig(&base.Config{}))
+	ch, err := d.Fingerprint(context.Background())
+	require.NoError(t, err)
+	fp := <-ch
+	require.Equal(t, drivers.HealthStateUnhealthy, fp.Health)
+	require.Contains(t, fp.HealthDescription, "limactl")
+}
+
+func TestCapabilitiesAndSchemas(t *testing.T) {
+	d := NewDriver(context.Background(), hclog.NewNullLogger())
+	caps, err := d.Capabilities()
+	require.NoError(t, err)
+	require.Equal(t, drivers.MountConfigSupportAll, caps.MountConfigs)
+	require.True(t, caps.Exec)
+	_, err = d.TaskConfigSchema()
+	require.NoError(t, err)
+	_, err = d.ConfigSchema()
+	require.NoError(t, err)
+	info, err := d.PluginInfo()
+	require.NoError(t, err)
+	require.Equal(t, "box", info.Name)
+	require.Equal(t, base.PluginTypeDriver, info.Type)
+	require.Equal(t, []string{drivers.ApiVersion010}, info.PluginApiVersions)
+}
+
+func TestDestroyUnknownTaskIsHarmless(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	require.NoError(t, d.DestroyTask("nope", true))
+}
+
+func TestStopUnknownTaskFails(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	require.Error(t, d.StopTask("nope", time.Second, ""))
+	_, err := d.WaitTask(context.Background(), "nope")
+	require.Error(t, err)
+}
+
+// TestStopAndDestroyLeaveASharedBoxAlone covers a stale allocation: after a node
+// was marked down and came back, Nomad restores every allocation of the job and
+// resumes their stop requests. One of them must not stop the VM that another
+// allocation is still using.
+func TestStopAndDestroyLeaveASharedBoxAlone(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	vol := filepath.Join(t.TempDir(), "volume")
+	require.NoError(t, os.MkdirAll(vol, 0o755))
+	url := fakelima.ImageServer(t, "IMAGE")
+
+	start := func(id string) *drivers.TaskConfig {
+		tc := taskConfig(t, vol, func(tc *drivers.TaskConfig) { tc.ID = id; tc.Name = "box" })
+		require.NoError(t, tc.EncodeConcreteDriverConfig(startConfig(t, url, sha256Hex("IMAGE"))))
+		_, _, err := d.StartTask(tc)
+		require.NoError(t, err)
+		return tc
+	}
+	first := start("task1")
+	f.ResetCalls(t)
+
+	// A second allocation for the same box (the replacement after a reconnect).
+	second := start("task2")
+	require.Equal(t, "Running", f.State(t)["box1"]["status"])
+
+	// The stale allocation is stopped: the VM must stay up for the live one.
+	f.ResetCalls(t)
+	require.NoError(t, d.StopTask("task1", 5*time.Second, ""))
+	require.Empty(t, f.CallsWith(t, "stop"), "a superseded allocation must not stop the shared box")
+	require.Equal(t, "Running", f.State(t)["box1"]["status"])
+
+	// Same for a destroy.
+	require.NoError(t, d.DestroyTask("task1", true))
+	require.Empty(t, f.CallsWith(t, "stop"))
+	require.Equal(t, "Running", f.State(t)["box1"]["status"])
+	_, err := d.InspectTask("task1")
+	require.Error(t, err)
+
+	// The last allocation still stops the box.
+	require.NoError(t, d.StopTask("task2", 5*time.Second, ""))
+	require.NotEmpty(t, f.CallsWith(t, "stop"))
+	require.Equal(t, "Stopped", f.State(t)["box1"]["status"])
+	_ = first
+	_ = second
+}
+
+// TestConfigResolvesRuntimeUser checks that the plugin block's runtime_user is
+// resolved into the identity every Lima child runs as.
+func TestConfigResolvesRuntimeUser(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the test process runs as root; the empty runtime_user is an error there")
+	}
+	c := Config{}
+	require.NoError(t, c.validate())
+	require.NoError(t, c.identityErr)
+	require.NotNil(t, c.identity)
+	require.Equal(t, os.Geteuid(), c.identity.UID)
+	require.False(t, c.identity.Drop)
+
+	// A user other than the driver's own is only possible for a root driver.
+	c = Config{RuntimeUser: "root"}
+	require.NoError(t, c.validate())
+	require.Error(t, c.identityErr)
+	require.Contains(t, c.identityErr.Error(), "root")
+	require.Nil(t, c.identity)
+
+	c = Config{RuntimeUser: "box-no-such-user-1c4a"}
+	require.NoError(t, c.validate())
+	require.Error(t, c.identityErr)
+}
+
+// TestConfigSpecOffersRuntimeUser keeps the HCL schema in step with the struct:
+// a setting Nomad cannot decode would silently stay empty.
+func TestConfigSpecOffersRuntimeUser(t *testing.T) {
+	obj, ok := configSpec.Block.(*hclspec.Spec_Object)
+	require.True(t, ok, "the plugin config is an object spec")
+	require.Contains(t, obj.Object.Attributes, "runtime_user")
+	// memory_limit is the operator switch B5 asks for: a setting Nomad cannot
+	// decode would silently leave the cap enforced.
+	require.Contains(t, obj.Object.Attributes, "memory_limit")
+}
+
+// TestFingerprintReportsMissingRuntimeUser checks the root case: the plugin
+// loads, and the fingerprint says in plain words what has to be set.
+func TestFingerprintReportsMissingRuntimeUser(t *testing.T) {
+	d := NewDriver(context.Background(), hclog.NewNullLogger())
+	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
+
+	cfg := Config{
+		LimactlPath:   "/nonexistent/limactl",
+		LimaHome:      filepath.Join(t.TempDir(), "lima"),
+		ImageCacheDir: filepath.Join(t.TempDir(), "images"),
+		VMType:        "qemu",
+		RuntimeUser:   "root", // refused: Lima does not run as root
+	}
+	var encoded []byte
+	require.NoError(t, base.MsgPackEncode(&encoded, cfg))
+	require.NoError(t, d.SetConfig(&base.Config{PluginConfig: encoded}),
+		"an unusable runtime_user is reported by the fingerprint, not by a plugin that fails to load")
+	require.Nil(t, d.boxm)
+
+	fp := d.buildFingerprint(context.Background())
+	require.Equal(t, drivers.HealthStateUnhealthy, fp.Health)
+	require.Contains(t, fp.HealthDescription, "runtime_user")
+
+	// A start fails with the same message instead of a nil dereference.
+	_, _, err := d.StartTask(taskConfig(t, t.TempDir()))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "runtime_user")
+}
+
+// TestSetConfigOwnsTheDriverDirectories checks that the Lima home and the image
+// cache are prepared for the runtime user, and that a start works afterwards.
+func TestSetConfigOwnsTheDriverDirectories(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("as root the directories are chowned, which needs a second user")
+	}
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	require.NotNil(t, d.boxm)
+	require.Equal(t, os.Geteuid(), d.boxm.Identity().UID)
+	st, err := os.Stat(d.config.LimaHome)
+	require.NoError(t, err)
+	require.True(t, st.IsDir())
+	st, err = os.Stat(d.config.ImageCacheDir)
+	require.NoError(t, err)
+	require.True(t, st.IsDir())
+
+	fp := d.buildFingerprint(context.Background())
+	require.Equal(t, d.boxm.Identity().Name, attrValue(t, fp, "driver.box.runtime_user"))
+}
+
+// TestRefreshTaskFilesOnRerender is the rotation path: Nomad re-renders a
+// template without restarting the VM, the driver notices, copies the files into
+// the guest's tmpfs again and asks boxd to reload its credentials.
+func TestRefreshTaskFilesOnRerender(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	vol := filepath.Join(t.TempDir(), "volume")
+	require.NoError(t, os.MkdirAll(vol, 0o755))
+	url := fakelima.ImageServer(t, "IMAGE")
+
+	tc := taskConfig(t, vol)
+	require.NoError(t, tc.EncodeConcreteDriverConfig(startConfig(t, url, sha256Hex("IMAGE"))))
+	secrets := tc.TaskDir().SecretsDir
+	require.NoError(t, os.MkdirAll(filepath.Join(secrets, "prime"), 0o700))
+	authPath := filepath.Join(secrets, "prime", "auth.json")
+	require.NoError(t, os.WriteFile(authPath, []byte(`{"gateway":{"access":"one"}}`), 0o600))
+
+	_, _, err := d.StartTask(tc)
+	require.NoError(t, err)
+	h := d.tasks.Get("task1")
+	require.NotNil(t, h)
+	b, err := d.boxFor(h, h.volumeDir, nil)
+	require.NoError(t, err)
+
+	// Nothing changed: no copy, no reload.
+	f.ResetCalls(t)
+	d.refreshTaskFiles(h, b)
+	require.Empty(t, f.Copies(t), "an unchanged task directory is not copied again")
+
+	// The Variable changed and Nomad re-rendered the template.
+	require.NoError(t, os.WriteFile(authPath, []byte(`{"gateway":{"access":"two"}}`), 0o600))
+	f.ResetCalls(t)
+	d.refreshTaskFiles(h, b)
+
+	copies := f.Copies(t)
+	require.Len(t, copies, 1, "the new secret must reach the guest again: %v", copies)
+	require.Contains(t, copies[0], "prime/auth.json")
+	reloads := f.CallsWith(t, "shell box1 -- boxctl reload")
+	require.Len(t, reloads, 1, "boxd must be told to reload: %v", f.Calls(t))
+}
+
+// TestTaskConfigCannotSetNodeSettings keeps the boundary B4 draws: the task
+// config is written by the coordinator, so it must not be able to point the
+// driver at another limactl, Lima home, image cache or user. Those come from the
+// plugin block only.
+func TestTaskConfigCannotSetNodeSettings(t *testing.T) {
+	obj, ok := taskConfigSpec.Block.(*hclspec.Spec_Object)
+	require.True(t, ok, "the task config is an object spec")
+	for _, forbidden := range []string{"limactl", "lima_home", "image_cache_dir", "runtime_user", "memory_limit"} {
+		require.NotContains(t, obj.Object.Attributes, forbidden,
+			"%q is a setting of the node, not of the task", forbidden)
+	}
+	// And the plugin block does carry them.
+	plugin, ok := configSpec.Block.(*hclspec.Spec_Object)
+	require.True(t, ok)
+	for _, key := range []string{"limactl", "lima_home", "image_cache_dir", "runtime_user", "memory_limit"} {
+		require.Contains(t, plugin.Object.Attributes, key)
 	}
 }

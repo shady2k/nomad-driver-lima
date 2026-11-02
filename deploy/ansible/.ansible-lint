@@ -1,0 +1,10 @@
+---
+# ansible-lint settings for the deploy kit.
+#
+# The role variables keep the product's `box_` prefix (box_version, box_plugin_dir,
+# box_lima_home, ...) instead of a `box_node_` / `box_coordinator_` role prefix:
+# an operator sets the same names in both roles and in deploy/README.md, and the
+# driver, the volume plugin and the CLI use them too. That is the only rule this
+# kit turns off; everything else is fixed rather than skipped.
+skip_list:
+  - var-naming[no-role-prefix]

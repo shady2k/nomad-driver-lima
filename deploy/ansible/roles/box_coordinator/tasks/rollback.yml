@@ -1,0 +1,89 @@
+---
+# Roll the box CLI of this host back (or forward) to a release that is already
+# installed. The skill and the environment file are not part of a release: they do
+# not change between versions of the CLI.
+
+# The home directory of the coordinator user comes from the local user database:
+# the role's own task file reads it, and so must a play that only runs this file.
+- name: Coordinator | Read the local user database for the coordinator user
+  ansible.builtin.getent:
+    database: passwd
+    key: '{{ box_coordinator_user }}'
+  check_mode: false
+
+- name: Rollback | Require a release to switch to
+  ansible.builtin.assert:
+    that:
+      - box_version | length > 0
+      - box_releases_dir is match('^/')
+    fail_msg: >-
+      The rollback needs box_version: the release to go back to. List what is on
+      the host with `ls {{ box_releases_dir }}` and pass one of those (for example
+      -e box_version=0.1.0).
+    quiet: true
+
+- name: Rollback | List the releases on this host
+  ansible.builtin.find:
+    paths: '{{ box_releases_dir }}'
+    file_type: directory
+    recurse: false
+  register: box_installed_releases
+  check_mode: false
+
+- name: Rollback | Require the release to be on the host
+  ansible.builtin.assert:
+    that:
+      - box_release_dir in (box_installed_releases.files | map(attribute='path') | list)
+    fail_msg: >-
+      {{ box_release_dir }} is not on this host. A rollback switches between
+      releases that are already installed; the ones here are
+      {{ box_installed_releases.files | map(attribute='path') | map('basename') | list | join(', ') if box_installed_releases.files | length > 0 else 'none' }}.
+      To install {{ box_version }} first, run site.yml with box_version={{ box_version }}.
+    quiet: true
+
+- name: Rollback | Require the CLI of that release
+  ansible.builtin.stat:
+    path: '{{ box_release_dir }}/bin/box'
+  register: box_rollback_cli
+
+- name: Rollback | Refuse an incomplete release directory
+  ansible.builtin.assert:
+    that:
+      - box_rollback_cli.stat.exists
+      - box_rollback_cli.stat.executable | default(false)
+    fail_msg: >-
+      {{ box_release_dir }}/bin/box is missing or not executable. Nothing was
+      changed.
+    quiet: true
+
+- name: Rollback | Point the live path at the release
+  ansible.builtin.file:
+    src: '{{ box_release_dir }}'
+    dest: '{{ box_current_link }}'
+    state: link
+    force: true
+    follow: false
+  register: box_rollback_link
+
+- name: Rollback | Create the directory the CLI is linked into
+  ansible.builtin.file:
+    path: '{{ box_cli_path | dirname }}'
+    state: directory
+    owner: '{{ box_coordinator_user }}'
+    group: '{{ box_coordinator_group }}'
+    mode: '0755'
+
+- name: Rollback | Put the CLI on PATH through the live release
+  ansible.builtin.file:
+    src: '{{ box_current_link }}/bin/box'
+    dest: '{{ box_cli_path }}'
+    state: link
+    force: true
+    follow: false
+
+- name: Rollback | Report the switch
+  ansible.builtin.debug:
+    msg:
+      - '{{ box_current_link }} now points at {{ box_release_dir }} ({{ "changed" if box_rollback_link.changed else "already there" }})'
+      - '{{ box_cli_path }} -> {{ box_current_link }}/bin/box; no restart is needed, the CLI is a single process'
+      - 'untouched: {{ box_env_file }}, the skill directories {{ box_skill_dirs | join(", ") }}, and the box skill Claude Code has'

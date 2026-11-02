@@ -1,0 +1,43 @@
+---
+# uninstall.yml: remove the box platform from a host, and keep everything that
+# belongs to the node rather than to the plugin.
+#
+#   cd deploy/ansible
+#   ansible-playbook -i inventory uninstall.yml --check
+#   ansible-playbook -i inventory uninstall.yml -e box_uninstall_confirm=true
+#
+# A node loses: the client service (systemd unit or launchd daemon) and the
+# configuration this kit wrote, /opt/box (every release and the `current`
+# symlink), /etc/box/volume.json and the image cache.
+#
+# A node keeps, on purpose: the Lima home with its boxes, every volume directory
+# and the disk in it, the client's data_dir and host_volumes_dir, and the runtime
+# user. `box rm <id> --yes` is what deletes a box and its disk.
+#
+# A coordinator loses: the CLI, /opt/box and the skill. It keeps ~/.config/box/env
+# (the cluster address and token of the host) and the cluster itself.
+- name: Remove the box client from every node
+  hosts: box_nodes:box_nodes_mac
+  become: true
+  gather_facts: true
+  serial: 1
+  tasks:
+    - name: Stop and remove the Nomad client service
+      ansible.builtin.import_role:
+        name: nomad_client
+        tasks_from: uninstall
+
+    - name: Remove the release, the plugins and the volume settings
+      ansible.builtin.import_role:
+        name: box_node
+        tasks_from: uninstall
+
+- name: Remove the box CLI from every coordinator
+  hosts: box_coordinators
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Remove the CLI and the skill
+      ansible.builtin.import_role:
+        name: box_coordinator
+        tasks_from: uninstall

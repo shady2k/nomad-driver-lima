@@ -1,0 +1,210 @@
+---
+# Install the box CLI and the box skill, and the environment file they read.
+#
+# There is no service and no daemon: the CLI is a binary on PATH that talks to the
+# Nomad API.
+
+- name: Coordinator | Read the local user database for the coordinator user
+  ansible.builtin.getent:
+    database: passwd
+    key: '{{ box_coordinator_user }}'
+  check_mode: false
+
+- name: Coordinator | Require the role inputs
+  ansible.builtin.assert:
+    that:
+      - box_version | length > 0
+      - box_release_root is match('^/')
+      - box_cli_path is match('^/')
+      - box_skill_dir is match('^/')
+      - box_env_file is match('^/')
+      - box_coordinator_user in ansible_facts.getent_passwd
+    fail_msg: >-
+      The role needs box_version (the dist/<version> directory that
+      deploy/build.sh wrote) and the local user that runs the agent
+      (box_coordinator_user, currently "{{ box_coordinator_user }}").
+    quiet: true
+
+- name: Coordinator | Look for the release that deploy/build.sh wrote
+  ansible.builtin.stat:
+    path: '{{ box_dist_dir }}/SHA256SUMS'
+  delegate_to: localhost
+  become: false
+  register: box_sums_file
+  check_mode: false
+
+- name: Coordinator | Read the release checksums
+  ansible.builtin.slurp:
+    src: '{{ box_dist_dir }}/SHA256SUMS'
+  delegate_to: localhost
+  become: false
+  register: box_sums_raw
+  check_mode: false
+  when: box_sums_file.stat.exists
+
+- name: Coordinator | Read the checksum of the CLI artifact
+  ansible.builtin.set_fact:
+    box_cli_sha256: >-
+      {{ (box_sums_raw.content | default('') | b64decode | default('', true))
+         | regex_findall('(?m)^([0-9a-f]{64})[ ]+' ~ (box_cli_artifact | regex_escape) ~ '$')
+         | first | default('') }}
+
+- name: Coordinator | Require a complete release for this host
+  ansible.builtin.assert:
+    that:
+      - box_sums_file.stat.exists
+      - box_cli_sha256 | length == 64
+    fail_msg: >-
+      {{ box_dist_dir }} does not hold {{ box_cli_artifact }}: run
+      deploy/build.sh --version {{ box_version }} on this machine, or point
+      box_dist_dir at the directory it wrote.
+    quiet: true
+
+# ------------------------------------------------------------------- the release
+- name: Coordinator | Create the release directories
+  ansible.builtin.file:
+    path: '{{ item.path }}'
+    state: directory
+    owner: '{{ box_coordinator_user }}'
+    group: '{{ box_coordinator_group }}'
+    mode: '{{ item.mode }}'
+  loop:
+    - path: '{{ box_release_root }}'
+      mode: '0755'
+    - path: '{{ box_releases_dir }}'
+      mode: '0755'
+    - path: '{{ box_release_dir }}/bin'
+      mode: '0755'
+  loop_control:
+    label: '{{ item.path }}'
+
+- name: Coordinator | Install the box CLI into the release
+  ansible.builtin.copy:
+    src: '{{ box_dist_dir }}/{{ box_cli_artifact }}'
+    dest: '{{ box_release_dir }}/bin/box'
+    owner: '{{ box_coordinator_user }}'
+    group: '{{ box_coordinator_group }}'
+    mode: '0755'
+
+- name: Coordinator | Point the live path at this release
+  ansible.builtin.file:
+    src: '{{ box_release_dir }}'
+    dest: '{{ box_current_link }}'
+    state: link
+    force: true
+    follow: false
+    owner: '{{ box_coordinator_user }}'
+    group: '{{ box_coordinator_group }}'
+
+# The directory of the CLI is not part of a release (/usr/local/bin on a host);
+# creating it here keeps a rehearsal into a prefix working, where it does not
+# exist yet.
+- name: Coordinator | Create the directory the CLI is linked into
+  ansible.builtin.file:
+    path: '{{ box_cli_path | dirname }}'
+    state: directory
+    owner: '{{ box_coordinator_user }}'
+    group: '{{ box_coordinator_group }}'
+    mode: '0755'
+
+- name: Coordinator | Put the CLI on PATH through the live release
+  ansible.builtin.file:
+    src: '{{ box_current_link }}/bin/box'
+    dest: '{{ box_cli_path }}'
+    state: link
+    force: true
+    follow: false
+
+- name: Coordinator | Read back the checksum of the live CLI
+  ansible.builtin.stat:
+    path: '{{ box_cli_path }}'
+    checksum_algorithm: sha256
+    follow: true
+  register: box_cli_installed
+  when: not ansible_check_mode
+
+- name: Coordinator | Require the live CLI to be the built artifact
+  ansible.builtin.assert:
+    that:
+      - box_cli_installed.stat.checksum | default('') == box_cli_sha256
+    fail_msg: >-
+      {{ box_cli_path }} does not hold the CLI from release {{ box_version }} (it
+      has {{ box_cli_installed.stat.checksum | default('nothing') }}, expected
+      {{ box_cli_sha256 }}). Copy the release again or rebuild it with
+      deploy/build.sh.
+    quiet: true
+  when: not ansible_check_mode
+
+# --------------------------------------------------------------------- the skill
+# One file, claude-plugin/skills/box/SKILL.md, installed for every agent: the Prime
+# Agent gets a copy in its per-user skills directory, Claude Code gets the Claude
+# Code plugin of this repository (or a copy of the file, see
+# box_claude_skill_mode). claude_skill.yml does the Claude Code half, and the
+# uninstall takes it off the same way.
+- name: Coordinator | Create the skills directory of the Prime Agent
+  ansible.builtin.file:
+    path: '{{ item }}/box'
+    state: directory
+    owner: '{{ box_coordinator_user }}'
+    group: '{{ box_coordinator_group }}'
+    mode: '0755'
+  loop: '{{ box_skill_dirs }}'
+
+- name: Coordinator | Install the box skill for the Prime Agent
+  ansible.builtin.copy:
+    src: '{{ box_skill_src }}/SKILL.md'
+    dest: '{{ item }}/box/SKILL.md'
+    owner: '{{ box_coordinator_user }}'
+    group: '{{ box_coordinator_group }}'
+    mode: '0644'
+  loop: '{{ box_skill_dirs }}'
+
+- name: Coordinator | Give Claude Code the same skill
+  ansible.builtin.include_tasks: claude_skill.yml
+  vars:
+    box_claude_skill_state: present
+
+# --------------------------------------------------------------- the environment
+- name: Coordinator | Create the directory of the environment file
+  ansible.builtin.file:
+    path: '{{ box_env_file | dirname }}'
+    state: directory
+    owner: '{{ box_coordinator_user }}'
+    group: '{{ box_coordinator_group }}'
+    mode: '0700'
+
+- name: Coordinator | Remember the environment the CLI reads
+  ansible.builtin.set_fact:
+    box_env_lines: >-
+      {{ (['NOMAD_ADDR=' ~ box_nomad_addr] if box_nomad_addr | length > 0 else [])
+         + (['NOMAD_TOKEN=' ~ box_nomad_token] if box_nomad_token | length > 0 else [])
+         + (['NOMAD_CACERT=' ~ box_nomad_cacert] if box_nomad_cacert | length > 0 else [])
+         + (['NOMAD_CLIENT_CERT=' ~ box_nomad_client_cert] if box_nomad_client_cert | length > 0 else [])
+         + (['NOMAD_CLIENT_KEY=' ~ box_nomad_client_key] if box_nomad_client_key | length > 0 else [])
+         + (['BOX_IMAGE_INDEX=' ~ box_image_index] if box_image_index | length > 0 else []) }}
+  no_log: '{{ box_nomad_token | length > 0 }}'
+
+- name: Coordinator | Write the environment file the CLI reads
+  ansible.builtin.template:
+    src: box.env.j2
+    dest: '{{ box_env_file }}'
+    owner: '{{ box_coordinator_user }}'
+    group: '{{ box_coordinator_group }}'
+    mode: '0600'
+  no_log: '{{ box_nomad_token | length > 0 }}'
+
+- name: Coordinator | Report what was installed
+  ansible.builtin.debug:
+    msg:
+      - 'release {{ box_version }} at {{ box_release_dir }}; {{ box_current_link }} now points at it'
+      - 'box CLI: {{ box_cli_path }} -> {{ box_current_link }}/bin/box'
+      - 'skill at {{ box_skill_dirs | map("regex_replace", "$", "/box/SKILL.md") | join(", ") }}'
+      - >-
+        Claude Code: {{ 'the plugin ' ~ box_claude_plugin_id ~ ' from ' ~ box_claude_marketplace_dir
+        if box_claude_skill_mode == 'plugin'
+        else box_claude_skill_dir ~ '/box/SKILL.md' }}
+      - >-
+        environment {{ box_env_file }} (NOMAD_ADDR
+        {{ box_nomad_addr if box_nomad_addr | length > 0 else "NOT SET - the CLI cannot reach the cluster until it is" }})
+      - 'next: set -a; . {{ box_env_file }}; set +a; then box capacity'
+      - 'to go back to another installed release: deploy/ansible/rollback.yml -e box_version=<version>'

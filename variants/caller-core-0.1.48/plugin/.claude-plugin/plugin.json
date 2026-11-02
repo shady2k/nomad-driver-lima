@@ -1,5 +1,0 @@
-{
-  "name": "nomad-workers",
-  "version": "0.1.48",
-  "description": "Owned native VM work sessions through Nomad and approved prepared templates."
-}

@@ -1,0 +1,51 @@
+---
+# site.yml: the box platform on client nodes and the coordinator, from nothing.
+#
+#   cd deploy/ansible
+#   cp -r inventory.example inventory      # then fill in the values
+#   ansible-playbook -i inventory site.yml --check        # look first, change nothing
+#   ansible-playbook -i inventory site.yml                # do it
+#
+# Two plays, in the only order that works:
+#
+#   1. box_nodes and box_nodes_mac (the Linux nodes and the Mac):
+#      a) box_node      - one release directory with the box driver and the volume
+#                         plugin, the `current` symlink, the box-volume settings of
+#                         the node, lima, qemu, /dev/kvm access, the runtime user,
+#                         and the cgroup prerequisites of the memory cap
+#      b) nomad_client  - the pinned Nomad binary, the WHOLE client configuration
+#                         in /etc/nomad.d (including the box driver's plugin
+#                         block, rendered from box_node's variables), the service
+#                         (a systemd unit or a launchd daemon), `nomad config
+#                         validate`, and the one restart
+#      box_node installs the plugin binaries and tells nomad_client that they
+#      changed, so the client restart happens once, after everything is in place.
+#
+#   2. box_coordinators: the box CLI (through the same release layout) and the box
+#      skill.
+#
+# serial: 1 restarts one client at a time. It does not drain: a drain moves
+# allocations, and the box driver's whole point is that a client restart leaves
+# them running.
+#
+# Nomad SERVERS are not part of this kit: the nodes join servers you already have
+# (nomad_servers). A one-host lab renders a server block with
+# nomad_server_block - see deploy/README.md, "The Nomad servers".
+#
+# A cluster with ACLs needs the policies of deploy/acl once, with a management
+# token: deploy/ansible/acl.yml.
+- name: The Nomad client and the box driver on every node
+  hosts: box_nodes:box_nodes_mac
+  become: true
+  gather_facts: true
+  serial: 1
+  roles:
+    - role: box_node
+    - role: nomad_client
+
+- name: The box CLI and the box skill on the coordinator
+  hosts: box_coordinators
+  become: true
+  gather_facts: true
+  roles:
+    - role: box_coordinator

@@ -1,0 +1,149 @@
+# What every push and pull request must keep true: the Go code is formatted,
+# vets and passes the race detector, the shell scripts and the Ansible kit pass
+# their linters, and the release artifacts still build for every target.
+#
+# The integration suite (real VMs) is separate: integration.yml.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go (gofmt, vet, lint, race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt has nothing to say
+        run: |
+          unformatted=$(gofmt -l .)
+          if [[ -n $unformatted ]]; then
+            printf 'gofmt wants these files formatted:\n%s\n' "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # The config is .golangci.yml: the standard set plus errcheck and
+      # staticcheck, and nothing else.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+
+      - name: go test -race
+        run: go test -race ./...
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SHELLCHECK_VERSION: "0.11.0"
+      SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The version is pinned rather than taken from the runner image: a
+      # new shellcheck finds new things, and this gate is not the place to
+      # learn that.
+      - name: Install shellcheck ${{ env.SHELLCHECK_VERSION }}
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/shellcheck.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/shellcheck"
+          tar -C "$RUNNER_TEMP/shellcheck" --strip-components=1 -xJf "$RUNNER_TEMP/shellcheck.tar.xz"
+          echo "$RUNNER_TEMP/shellcheck" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/shellcheck/shellcheck" --version
+
+      # Warnings and errors fail the job; the notes and style findings
+      # ("quote this", "use find instead of ls") are advice, not gates.
+      - name: shellcheck the scripts, the image recipe and the deploy kit
+        run: |
+          shellcheck --version
+          mapfile -t files < <(git ls-files '*.sh')
+          printf '%s\n' "${files[@]}"
+          shellcheck --severity=warning --format=gcc -x "${files[@]}"
+
+  ansible:
+    name: Ansible (ansible-lint, syntax-check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ANSIBLE_LINT_VERSION: 26.10.1
+      ANSIBLE_CORE_VERSION: 2.22.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install ansible-lint
+        run: |
+          python -m pip install --disable-pip-version-check \
+            "ansible-core==$ANSIBLE_CORE_VERSION" "ansible-lint==$ANSIBLE_LINT_VERSION"
+          ansible --version
+          ansible-lint --version
+
+      # deploy/ansible/.ansible-lint holds the one rule this kit turns off
+      # (var-naming[no-role-prefix]) and says why; the rest is at the default
+      # profile, which is production.
+      - name: ansible-lint
+        working-directory: deploy/ansible
+        run: ansible-lint
+
+      - name: every playbook parses
+        working-directory: deploy/ansible
+        run: |
+          for playbook in site.yml acl.yml rollback.yml uninstall.yml; do
+            echo "== $playbook"
+            ansible-playbook -i tests/inventory.test.ini "$playbook" --syntax-check
+          done
+
+  build:
+    name: Release artifacts (cross-build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The same script the deploy kit installs from. A CI checkout has no
+      # tags, so the version is given instead of read from git describe.
+      - name: deploy/build.sh
+        run: ./deploy/build.sh --version 0.0.0-ci --out dist
+
+      - name: the checksums cover the artifacts
+        run: |
+          ls -l dist
+          (cd dist && sha256sum --check SHA256SUMS)
+
+      # deploy/build.sh builds the targets the deploy kit installs; this also
+      # proves that every command compiles for linux/arm64, which no node of
+      # the kit runs yet.
+      - name: every target compiles
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/arm64; do
+            echo "== $target"
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 \
+              go build -trimpath -o "$RUNNER_TEMP/bin/$target/" ./cmd/...
+          done

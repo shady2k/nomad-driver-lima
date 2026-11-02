@@ -1,0 +1,26 @@
+---
+# Take the launchd daemon down and load it again, so launchd reads the plist this
+# run wrote. launchd caches a job definition: without this the new
+# EnvironmentVariables or arguments would only take effect at the next boot.
+#
+# The boxes are not affected: AbandonProcessGroup=true means launchd does not
+# signal the rest of the process group, so the limactl hostagents and the VMs they
+# hold keep running and Nomad re-attaches to them.
+
+- name: Reload | Take the daemon down
+  ansible.builtin.command:
+    argv: ['launchctl', 'bootout', 'system/{{ nomad_launchd_label }}']
+  register: nomad_launchd_bootout
+  failed_when: false
+  changed_when: nomad_launchd_bootout.rc | default(1) == 0
+
+- name: Reload | Load it again
+  ansible.builtin.command:
+    argv: ['launchctl', 'bootstrap', 'system', '{{ nomad_launchd_plist }}']
+  changed_when: true
+
+- name: Reload | Report the reload
+  ansible.builtin.debug:
+    msg: >-
+      launchd: {{ nomad_launchd_plist }} booted out and bootstrapped again
+      ({{ nomad_launchd_label }}); launchctl re-read the plist.

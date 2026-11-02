@@ -1,0 +1,40 @@
+---
+# Restart the Nomad client of this node, keeping the boxes running.
+#
+# Linux: `daemon_reload: true` loads a changed or newly written unit first, and
+# the unit carries KillMode=process, so systemd signals only the nomad process:
+# the driver plugin, the lima hostagents and the qemu processes of running boxes
+# survive (measured on Nomad 2.0.7).
+#
+# macOS: `launchctl kickstart -k` signals the job, and AbandonProcessGroup=true
+# keeps launchd from signalling the rest of the process group, so the limactl
+# hostagents - and the vz VMs they hold, which are threads of that process - keep
+# running; Nomad re-attaches to them when it starts again.
+#
+# The nomad_client role's handler includes this file; deploy/ansible/rollback.yml
+# runs it directly (tasks_from: restart) after it switched the live release.
+
+- name: Restart | Restart the systemd unit
+  ansible.builtin.systemd_service:
+    name: '{{ nomad_service_name }}'
+    state: restarted
+    daemon_reload: true
+  when:
+    - nomad_system_changes | bool
+    - ansible_facts.system == 'Linux'
+
+- name: Restart | Kick the launchd daemon
+  ansible.builtin.command:
+    argv: ['launchctl', 'kickstart', '-k', 'system/{{ nomad_launchd_label }}']
+  when:
+    - nomad_system_changes | bool
+    - ansible_facts.system == 'Darwin'
+  changed_when: true
+
+- name: Restart | Report the restart
+  ansible.builtin.debug:
+    msg: >-
+      {{ nomad_service_name }} restarted on {{ inventory_hostname }}
+      ({{ 'systemd, KillMode=' ~ nomad_kill_mode if ansible_facts.system == 'Linux'
+         else 'launchd, AbandonProcessGroup=' ~ nomad_launchd_abandon_process_group }}):
+      the boxes of this node keep running.

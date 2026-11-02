@@ -1,6 +1,20 @@
 /bin/
-/.local/
+/dist/
 *.test
 
 __pycache__/
 *.pyc
+
+# local integration runs
+/.integration/
+/.integration-root/
+
+# the deploy kit's own checks (deploy/ansible/tests/run-tests.sh)
+/.test/
+
+# ansible-lint's cache
+/.ansible/
+
+# image builds (images/build.sh)
+/out/
+/.images/

@@ -2,123 +2,124 @@ package driver
 
 import (
 	"context"
-	"fmt"
-	"math"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/hashicorp/nomad/client/lib/cpustats"
 	cstructs "github.com/hashicorp/nomad/client/structs"
-	"github.com/shirou/gopsutil/v3/process"
+	"github.com/hashicorp/nomad/plugins/drivers"
 )
 
-// Process RSS/CPU are not guest utilization or complete VM physical memory.
-// VZ includes its in-process hostagent but may account guest RAM elsewhere.
-func cpuPercent(previous, current float64, elapsed time.Duration) (float64, error) {
-	if elapsed <= 0 || current < previous || math.IsNaN(current) || math.IsInf(current, 0) {
-		return 0, fmt.Errorf("invalid CPU sample")
-	}
-	return (current - previous) / elapsed.Seconds() * 100, nil
+// taskStats turns the resource usage of the VM processes into a Nomad sample.
+type taskStats struct {
+	mu      sync.Mutex
+	tracker *cpustats.Tracker
 }
 
-func (d *Driver) TaskStats(ctx context.Context, id string, interval time.Duration) (<-chan *cstructs.TaskResourceUsage, error) {
-	perCore, _ := d.admissionCompute()
-	if perCore < 1 {
-		return nil, fmt.Errorf("Nomad compute topology pending; no synthetic CPU ticks")
+func newTaskStats() *taskStats { return &taskStats{} }
+
+// sample reads the qemu (driver) and hostagent processes of the box and returns
+// one aggregated usage sample.
+func (t *taskStats) sample(compute cpustats.Compute, pids []int) (*drivers.TaskResourceUsage, error) {
+	var (
+		cpuNs   float64
+		rss     uint64
+		found   int
+		lastErr error
+	)
+	for _, pid := range pids {
+		usage, err := processUsage(pid)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		found++
+		cpuNs += usage.cpuNs
+		rss += usage.rssBytes
 	}
-	t, err := d.get(id)
-	if err != nil {
-		return nil, err
+	if found == 0 {
+		return nil, lastErr
 	}
+
 	t.mu.Lock()
-	s := *t.state
+	if t.tracker == nil {
+		t.tracker = cpustats.New(compute)
+	}
+	percent := t.tracker.Percent(cpuNs)
+	ticks := t.tracker.TicksConsumed(percent)
 	t.mu.Unlock()
-	v, err := d.owned(ctx, &s)
-	if err != nil {
-		return nil, err
+
+	return &drivers.TaskResourceUsage{
+		Timestamp: time.Now().UTC().UnixNano(),
+		ResourceUsage: &cstructs.ResourceUsage{
+			MemoryStats: &cstructs.MemoryStats{
+				RSS:      rss,
+				Measured: []string{"RSS"},
+			},
+			CpuStats: &cstructs.CpuStats{
+				SystemMode: 0,
+				UserMode:   cpuNs,
+				TotalTicks: ticks,
+				Percent:    percent,
+				Measured:   []string{"Percent", "TotalTicks", "UserMode"},
+			},
+		},
+	}, nil
+}
+
+// vmPIDs returns the pids of the processes that make up the box: the qemu (or
+// vz) driver process and the lima hostagent. Lima writes both pid files into the
+// instance directory, so this needs no limactl call.
+func vmPIDs(instanceDir string) []int {
+	var pids []int
+	for _, name := range []string{"qemu.pid", "ha.pid"} {
+		data, err := os.ReadFile(filepath.Join(instanceDir, name))
+		if err != nil {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil || pid <= 0 {
+			continue
+		}
+		pids = append(pids, pid)
 	}
-	if v.DriverPID <= 0 || v.Status != "Running" {
-		return nil, fmt.Errorf("running Lima VM process identity unavailable")
-	}
-	p, err := process.NewProcess(int32(v.DriverPID))
-	if err != nil {
-		return nil, err
-	}
-	command, err := p.CmdlineWithContext(ctx)
-	if err != nil || !strings.Contains(command, s.Instance) {
-		return nil, fmt.Errorf("VM process command identity unavailable or mismatched")
-	}
-	birth, err := p.CreateTimeWithContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	first, err := p.TimesWithContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	lastCPU, lastTime := first.Total(), time.Now()
-	if interval < time.Second {
+	return pids
+}
+
+// streamStats sends a usage sample every interval until ctx ends.
+func (d *Driver) streamStats(ctx context.Context, h *taskHandle, interval time.Duration, out chan *drivers.TaskResourceUsage) {
+	if interval <= 0 {
 		interval = time.Second
 	}
-	ch := make(chan *cstructs.TaskResourceUsage, 1)
-	d.wg.Add(1)
-	go func() {
-		defer d.wg.Done()
-		defer close(ch)
-		timer := time.NewTicker(interval)
-		defer timer.Stop()
-		for {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-h.done:
+			return
+		case <-ticker.C:
+			inst := h.currentInstanceDir()
+			if inst == "" {
+				continue
+			}
+			usage, err := h.stats.sample(d.compute, vmPIDs(inst))
+			if err != nil {
+				d.logger.Debug("collect box stats", "task", h.tc.ID, "error", err)
+				continue
+			}
 			select {
+			case out <- usage:
 			case <-ctx.Done():
 				return
-			case <-d.ctx.Done():
-				return
-			case <-t.done:
-				return
-			case <-timer.C:
-			}
-			owned, e := d.owned(ctx, &s)
-			if e != nil || owned.DriverPID != v.DriverPID || owned.Status != "Running" {
-				return
-			}
-			fresh, e := process.NewProcess(int32(v.DriverPID))
-			if e != nil {
-				return
-			}
-			created, e := fresh.CreateTimeWithContext(ctx)
-			if e != nil || created != birth {
-				return
-			}
-			cpu, e := p.TimesWithContext(ctx)
-			if e != nil {
-				return
-			}
-			mem, e := p.MemoryInfoWithContext(ctx)
-			if e != nil {
-				return
-			}
-			now := time.Now()
-			percent, e := cpuPercent(lastCPU, cpu.Total(), now.Sub(lastTime))
-			if e != nil {
-				return
-			}
-			lastCPU, lastTime = cpu.Total(), now
-			resource := &cstructs.ResourceUsage{
-				MemoryStats: &cstructs.MemoryStats{RSS: mem.RSS, Measured: []string{"RSS"}},
-				CpuStats:    &cstructs.CpuStats{Percent: percent, TotalTicks: percent / 100 * float64(perCore), Measured: []string{"Percent", "TotalTicks"}},
-			}
-			usage := &cstructs.TaskResourceUsage{Timestamp: now.UnixNano(), ResourceUsage: resource, Pids: map[string]*cstructs.ResourceUsage{strconv.Itoa(v.DriverPID): resource}}
-
-			select {
-			case ch <- usage:
-			case <-ctx.Done():
-				return
-			case <-d.ctx.Done():
-				return
-			case <-t.done:
+			case <-h.done:
 				return
 			}
 		}
-	}()
-	return ch, nil
+	}
 }

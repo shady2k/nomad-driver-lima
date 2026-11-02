@@ -1,0 +1,299 @@
+---
+# Install one release of the box driver and the volume plugin, point `current` at
+# it, write the box-volume settings of the node and prepare the prerequisites of
+# the memory scope.
+#
+# This role writes no Nomad configuration and no service: the nomad_client role of
+# the same play renders /etc/nomad.d (the driver's plugin block included) and
+# writes the unit or the launchd plist, validates the whole configuration and
+# restarts the client once. This role only says that the plugin binaries changed
+# (box_plugins_changed), so that restart happens.
+
+- name: Install | Create the release directories
+  ansible.builtin.file:
+    path: '{{ item.path }}'
+    state: directory
+    owner: '{{ item.owner }}'
+    group: '{{ item.group }}'
+    mode: '{{ item.mode }}'
+  loop:
+    - path: '{{ box_release_root }}'
+      owner: '{{ box_plugin_owner }}'
+      group: '{{ box_plugin_group }}'
+      mode: '0755'
+    - path: '{{ box_releases_dir }}'
+      owner: '{{ box_plugin_owner }}'
+      group: '{{ box_plugin_group }}'
+      mode: '0755'
+    - path: '{{ box_release_dir }}'
+      owner: '{{ box_plugin_owner }}'
+      group: '{{ box_plugin_group }}'
+      mode: '0755'
+    - path: '{{ box_release_dir }}/plugins'
+      owner: '{{ box_plugin_owner }}'
+      group: '{{ box_plugin_group }}'
+      mode: '0755'
+    - path: '{{ box_release_dir }}/host_volume_plugins'
+      owner: '{{ box_plugin_owner }}'
+      group: '{{ box_plugin_group }}'
+      mode: '0755'
+    - path: '{{ box_volume_config_file | dirname }}'
+      owner: '{{ box_plugin_owner }}'
+      group: '{{ box_plugin_group }}'
+      mode: '0755'
+    - path: '{{ box_lima_home }}'
+      owner: '{{ box_runtime_user }}'
+      group: '{{ box_runtime_group }}'
+      mode: '0700'
+    - path: '{{ box_image_cache_dir }}'
+      owner: '{{ box_runtime_user }}'
+      group: '{{ box_runtime_group }}'
+      mode: '0755'
+  loop_control:
+    label: '{{ item.path }}'
+
+# ------------------------------------------------------------ the runtime user
+# Lima refuses to run as root, and the driver starts every limactl, qemu and
+# systemd-run child as box_runtime_user. That user needs the kvm group (a dropped
+# uid keeps its groups, and /dev/kvm is usually 0660 root:kvm), and the driver
+# reads the groups when the plugin starts, so the client is restarted when this
+# changes (box_plugins_changed below).
+- name: Runtime user | Put the runtime user in the kvm group
+  ansible.builtin.user:
+    name: '{{ box_runtime_user }}'
+    groups: kvm
+    append: true
+  register: box_kvm_membership
+  when:
+    - box_os == 'linux'
+    - box_system_changes | bool
+    - box_kvm_group_exists | default(false) | bool
+
+# ------------------------------------------------------- the memory scope (Linux)
+# The driver starts every VM in a transient *user* scope, so systemd enforces
+# memory.max = guest + overhead and memory.swap.max = 0 (spike S3.d: a memory cap
+# without swap disabled is soft, because the host swaps). That needs:
+#   * a user manager for the runtime user that outlives a login session (linger),
+#   * XDG_RUNTIME_DIR in the Nomad service environment, which a system service
+#     does not inherit from anywhere (the nomad_client role writes it).
+- name: Scope | Read the linger setting of the runtime user
+  ansible.builtin.command:
+    argv: ['loginctl', 'show-user', '{{ box_runtime_user }}', '-p', 'Linger', '--value']
+  register: box_linger
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - box_os == 'linux'
+    - box_cgroup_enabled | bool
+    - box_system_changes | bool
+
+- name: Scope | Enable linger so the user manager runs without a login session
+  ansible.builtin.command:
+    argv: ['loginctl', 'enable-linger', '{{ box_runtime_user }}']
+  when:
+    - box_os == 'linux'
+    - box_cgroup_enabled | bool
+    - box_system_changes | bool
+    - box_linger.stdout | default('no') | trim != 'yes'
+  changed_when: true
+
+- name: Scope | Start the user manager of the runtime user
+  ansible.builtin.systemd_service:
+    name: 'user@{{ box_runtime_uid }}.service'
+    state: started
+    enabled: true
+  when:
+    - box_os == 'linux'
+    - box_cgroup_enabled | bool
+    - box_system_changes | bool
+
+- name: Scope | Prove that the user manager answers a transient scope
+  ansible.builtin.command:
+    argv:
+      - systemd-run
+      - --user
+      - --scope
+      - --collect
+      - -q
+      - --unit
+      - box-install-probe.scope
+      - --
+      - 'true'
+  become: true
+  become_user: '{{ box_runtime_user }}'
+  environment:
+    XDG_RUNTIME_DIR: '/run/user/{{ box_runtime_uid }}'
+  register: box_scope_probe
+  changed_when: false
+  failed_when: false
+  when:
+    - box_os == 'linux'
+    - box_cgroup_enabled | bool
+    - box_system_changes | bool
+
+- name: Scope | Require the memory scope to work
+  ansible.builtin.assert:
+    that:
+      - box_scope_probe.rc | default(1) == 0
+    fail_msg: >-
+      systemd-run --user cannot start a scope for {{ box_runtime_user }}
+      (uid {{ box_runtime_uid }}): {{ box_scope_probe.stderr | default('no answer') | trim | truncate(300) }}.
+      Without it every box starts *without* a memory cap (the driver reports that as
+      a task event). Fix the user manager first: loginctl enable-linger
+      {{ box_runtime_user }}, then restart the Nomad client, then run the play again.
+      Set box_cgroup_enabled: false to install anyway and accept uncapped memory.
+    quiet: true
+  when:
+    - box_os == 'linux'
+    - box_cgroup_enabled | bool
+    - box_system_changes | bool
+
+# The two settings this needs on the client side - XDG_RUNTIME_DIR and
+# DBUS_SESSION_BUS_ADDRESS in the service environment - are part of the unit the
+# nomad_client role writes (see roles/nomad_client/templates/nomad.service.j2).
+# This role writes no drop-in: a drop-in is invisible to `nomad config validate`,
+# and a second place that edits the service is a second place to keep in step.
+
+- name: Scope | Report when the memory controller is not delegated to the user manager
+  ansible.builtin.command:
+    argv: ['grep', '-qw', 'memory', '/sys/fs/cgroup/user.slice/user-{{ box_runtime_uid }}.slice/user@{{ box_runtime_uid }}.service/cgroup.controllers']
+  register: box_controllers
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - box_os == 'linux'
+    - box_cgroup_enabled | bool
+    - box_system_changes | bool
+
+- name: Scope | Warn when the memory controller is missing
+  ansible.builtin.debug:
+    msg: >-
+      The memory controller is not delegated to user@{{ box_runtime_uid }}.service,
+      so a box scope gets no memory.max. systemd delegates controllers to user@.service
+      by default (Delegate=yes); check the drop-ins of user@.service or the
+      cgroup v2 setup on this node. The driver still starts the boxes and reports
+      the missing cap as a task event.
+  when:
+    - box_os == 'linux'
+    - box_cgroup_enabled | bool
+    - box_system_changes | bool
+    - box_controllers.rc | default(1) != 0
+
+# ------------------------------------------------------------------ the release
+# Nomad matches an external task driver to its `plugin` block by the executable
+# name, so the driver is installed as "box"; the volume plugin keeps its own name
+# and its own directory (Nomad runs every executable there as a volume plugin).
+# Both go into the release directory of this version, and `current` is what the
+# client configuration points at.
+- name: Install | Install the two plugins into the release
+  ansible.builtin.copy:
+    src: '{{ item.src }}'
+    dest: '{{ item.dest }}'
+    owner: '{{ box_plugin_owner }}'
+    group: '{{ box_plugin_group }}'
+    mode: '0755'
+  loop: '{{ box_plugin_artifacts }}'
+  loop_control:
+    label: '{{ item.name }}'
+  register: box_plugin_copy
+
+- name: Install | Point the live path at this release
+  ansible.builtin.file:
+    src: '{{ box_release_dir }}'
+    dest: '{{ box_current_link }}'
+    state: link
+    force: true
+    follow: false
+    owner: '{{ box_plugin_owner }}'
+    group: '{{ box_plugin_group }}'
+  register: box_current_flag
+
+- name: Install | Remember that the plugins changed
+  ansible.builtin.set_fact:
+    # Read by the nomad_client role: a new binary only takes effect when the
+    # client starts the plugin again, so it restarts the client even when no
+    # configuration file changed. Flipping `current` counts too: the path stays
+    # the same while the binary behind it changes (a rollback).
+    box_plugins_changed: >-
+      {{ (box_plugin_copy.changed | default(false))
+         or (box_current_flag.changed | default(false))
+         or (box_kvm_membership.changed | default(false)) }}
+
+- name: Install | Read back the checksum of the plugins through the live path
+  ansible.builtin.stat:
+    path: '{{ item.live }}'
+    checksum_algorithm: sha256
+    follow: true
+  loop: '{{ box_plugin_artifacts }}'
+  loop_control:
+    label: '{{ item.live }}'
+  register: box_installed_plugins
+  when: not ansible_check_mode
+
+- name: Install | Require the live plugins to be the built artifacts
+  ansible.builtin.assert:
+    that:
+      - item.stat.checksum | default('') == item.item.sha256
+    fail_msg: >-
+      {{ item.item.live }} does not hold {{ item.item.name }} from release
+      {{ box_version }} (it has {{ item.stat.checksum | default('nothing') }},
+      expected {{ item.item.sha256 }}), so {{ box_current_link }} does not point
+      at a complete release. Copy the release again or rebuild it with
+      deploy/build.sh.
+    quiet: true
+  loop: '{{ box_installed_plugins.results | default([]) }}'
+  loop_control:
+    label: '{{ item.item.live }}'
+  when: not ansible_check_mode
+
+# ------------------------------------------------------- the volume plugin settings
+# A dynamic host volume request may carry none of this (internal/volume rejects
+# every parameter), because who creates the volume must not decide which binary
+# runs on the node, which Lima home it uses or which user owns the volume
+# directories. Those three are settings of the node, and this is where they are
+# written: /etc/box/volume.json, read by the box-volume plugin on every request.
+- name: Install | Remember the settings the volume plugin reads
+  ansible.builtin.set_fact:
+    box_volume_settings:
+      limactl: '{{ box_limactl }}'
+      lima_home: '{{ box_lima_home }}'
+      runtime_user: '{{ box_runtime_user }}'
+
+- name: Install | Write the box-volume settings of this node
+  ansible.builtin.copy:
+    content: "{{ box_volume_settings | to_nice_json }}\n"
+    dest: '{{ box_volume_config_file }}'
+    owner: '{{ box_plugin_owner }}'
+    group: '{{ box_plugin_group }}'
+    mode: '0644'
+
+# -------------------------------------------------------------- the client side
+# The whole client configuration - the plugin block, the driver allowlist, the
+# plugin directories - belongs to the nomad_client role, which renders it from
+# these variables (box_plugin_dir, box_volume_plugin_dir, box_driver_allowlist,
+# box_limactl, box_lima_home, box_image_cache_dir, box_memory_overhead_mib,
+# box_runtime_user) and validates the result with `nomad config validate`.
+# Nothing here writes into the configuration directory.
+
+# --------------------------------------------------------------------- what next
+- name: Install | Report what was installed
+  ansible.builtin.debug:
+    msg:
+      - 'release {{ box_version }} at {{ box_release_dir }}; {{ box_current_link }} now points at it'
+      - 'driver {{ box_plugin_dir }}/box, volume plugin {{ box_volume_plugin_dir }}/box-volume'
+      - 'volume settings {{ box_volume_config_file }}: limactl {{ box_limactl }}, lima_home {{ box_lima_home }}, runtime_user {{ box_runtime_user }}'
+      - >-
+        the nomad_client role of this play renders the plugin block: limactl {{ box_limactl }},
+        lima_home {{ box_lima_home }}, image_cache_dir {{ box_image_cache_dir }},
+        memory_overhead_mib {{ box_memory_overhead_mib }}, runtime_user {{ box_runtime_user }}
+        (uid {{ box_runtime_uid }}, group {{ box_runtime_group }}, kvm group
+        {{ "present" if box_kvm_group_exists | default(false) | bool else "absent" }})
+      - >-
+        memory scope {{ "prepared (systemd user scope for " ~ box_runtime_user ~ ")" if box_cgroup_enabled | bool else "disabled by box_cgroup_enabled" }};
+        the client is restarted by the nomad_client role
+        {{ "because a plugin, the live release or the group membership changed"
+           if box_plugins_changed | default(false) | bool else "when its configuration changed" }}
+      - 'to go back to another installed release: deploy/ansible/rollback.yml -e box_version=<version>'
+      - 'next: deploy/accept.sh --node {{ nomad_node_name | default(inventory_hostname) }} against this node, once site.yml has finished'

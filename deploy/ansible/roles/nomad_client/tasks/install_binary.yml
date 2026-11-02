@@ -1,0 +1,97 @@
+---
+# Install the pinned Nomad release.
+#
+# The zip is verified against the pinned SHA256 before it is unpacked, and the
+# installed binary is asked for its version afterwards: the file that matters is
+# the one in place, not the one that was downloaded.
+#
+# The zip is unpacked with the node's own python3 (`python3 -m zipfile`), not with
+# `unzip`: Ansible needs a python3 on every node anyway, and unzip is not
+# installed everywhere.
+
+- name: Binary | Create the parent directory of the binary
+  ansible.builtin.file:
+    path: '{{ nomad_binary | dirname }}'
+    state: directory
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ nomad_file_group }}'
+    mode: '0755'
+
+- name: Binary | Create the staging directory
+  ansible.builtin.file:
+    path: '{{ nomad_stage_dir }}'
+    state: directory
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ nomad_file_group }}'
+    mode: '0700'
+
+- name: Binary | Fetch the pinned release
+  ansible.builtin.get_url:
+    url: '{{ nomad_release_url }}'
+    dest: '{{ nomad_stage_dir }}/nomad.zip'
+    checksum: 'sha256:{{ nomad_release_sha256_pinned }}'
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ nomad_file_group }}'
+    mode: '0600'
+    timeout: 120
+
+- name: Binary | Unpack the release
+  ansible.builtin.command:
+    argv: ['{{ nomad_python }}', '-m', 'zipfile', '-e',
+           '{{ nomad_stage_dir }}/nomad.zip', '{{ nomad_stage_dir }}/unpacked']
+    creates: '{{ nomad_stage_dir }}/unpacked/nomad'
+  changed_when: true
+
+- name: Binary | Look for the unpacked binary
+  ansible.builtin.stat:
+    path: '{{ nomad_stage_dir }}/unpacked/nomad'
+  register: nomad_unpacked
+  when: not ansible_check_mode
+
+- name: Binary | Require the unpacked binary
+  ansible.builtin.assert:
+    that:
+      - nomad_unpacked.stat.exists
+    fail_msg: >-
+      {{ nomad_stage_dir }}/nomad.zip did not unpack to a nomad binary. The
+      release zip of {{ nomad_version }} holds one file, `nomad`; check
+      nomad_release_url ({{ nomad_release_url }}).
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Binary | Install the binary
+  ansible.builtin.copy:
+    src: '{{ nomad_stage_dir }}/unpacked/nomad'
+    dest: '{{ nomad_binary }}'
+    remote_src: true
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ nomad_file_group }}'
+    mode: '0755'
+    backup: true
+  notify: Restart the Nomad client
+
+- name: Binary | Read the version of the installed binary
+  ansible.builtin.command:
+    argv: ['{{ nomad_binary }}', 'version']
+  register: nomad_installed_raw
+  changed_when: false
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Binary | Require the pinned version in place
+  ansible.builtin.assert:
+    that:
+      - nomad_installed_raw.stdout | default('') is search('v' ~ (nomad_version | regex_escape))
+    fail_msg: >-
+      {{ nomad_binary }} answers
+      "{{ nomad_installed_raw.stdout | default('nothing') | trim | truncate(120) }}"
+      instead of Nomad v{{ nomad_version }}. Copy the release again, or set
+      nomad_version to the version you mean to run.
+    quiet: true
+  when: not ansible_check_mode
+
+- name: Binary | Remove the staging directory
+  ansible.builtin.file:
+    path: '{{ nomad_stage_dir }}'
+    state: absent
+  when: not ansible_check_mode

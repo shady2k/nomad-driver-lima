@@ -1,0 +1,40 @@
+---
+# Values every host of the rollout shares.
+#
+# No address, mirror or registry of a particular site is in this repository: the
+# images and the Nomad release have public upstream defaults, and everything else
+# is a variable you set here. Secrets are not here either: they are the vault_*
+# names at the bottom of this file (see vault.example.yml).
+
+# The box release to install: one directory name under dist/, built by
+# deploy/build.sh on the machine that runs Ansible. It must be semver
+# (0.1.0, 0.1.0-rc1): Nomad refuses to load a plugin whose version is not.
+box_version: '0.1.0'
+
+# The Nomad release the nodes get, and where it comes from. The default is the
+# public release with its official checksum; point nomad_release_url at a mirror
+# and keep the checksum as it is - the checksum is what makes a mirror safe.
+nomad_version: '2.0.7'
+# nomad_release_url: 'https://mirror.example/nomad/nomad_{{ nomad_version }}_{{ nomad_os }}_{{ nomad_arch }}.zip'
+
+# The Nomad servers the clients join: RPC addresses (port 4647). Required unless
+# the node is a server itself (nomad_server_block).
+nomad_servers:
+  - 192.0.2.5:4647
+
+nomad_region: global
+nomad_datacenter: dc1
+
+# ACLs. The tokens are secrets: vault_nomad_acl_token is the token the CLI on the
+# node uses, vault_nomad_client_intro_token is the token a client introduces itself
+# with (Nomad reads NOMAD_CLIENT_INTRO_TOKEN from its environment). Both are written
+# to /etc/nomad.d/nomad.env, mode 0600, never into a JSON file.
+nomad_acl_enabled: false
+# nomad_acl_token: '{{ vault_nomad_acl_token }}'
+# nomad_client_intro_token: '{{ vault_nomad_client_intro_token }}'
+
+# mTLS, when the cluster uses it. Every Nomad port then speaks TLS.
+nomad_tls_enabled: false
+# nomad_tls_ca_file: /etc/nomad.d/tls/ca.pem
+# nomad_tls_cert_file: /etc/nomad.d/tls/client.pem
+# nomad_tls_key_file: /etc/nomad.d/tls/client-key.pem

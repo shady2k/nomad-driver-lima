@@ -1,0 +1,142 @@
+---
+# Defaults for the box_node role (deploy/ansible/roles/box_node).
+#
+# Everything here can be overridden from an inventory group_vars file or on the
+# command line. The defaults follow the conventional layout of a fresh node (the
+# Nomad client of the nomad_client role, a Debian/Ubuntu or macOS host for the
+# drivers); a node that puts things elsewhere only has to override the paths.
+#
+# Run `deploy/ansible/site.yml --check` first: every step that changes the node is
+# listed, and nothing is changed.
+
+# ---------------------------------------------------------------- what to install
+# The release to install: one directory name under dist/ built by deploy/build.sh.
+# Required; the role refuses to run without it.
+box_version: ''
+
+# Where deploy/build.sh put the release on the machine that runs Ansible. The
+# path is worked out from the role, not from playbook_dir, so a playbook in any
+# directory (site.yml, tests/play-node.yml, rollback.yml) finds the same release.
+box_dist_dir: '{{ role_path }}/../../../../dist/{{ box_version }}'
+
+# The role installs the plugins for the node's own architecture.
+box_os: "{{ 'darwin' if ansible_facts.system == 'Darwin' else 'linux' }}"
+box_arch: "{{ 'arm64' if ansible_facts.architecture in ['aarch64', 'arm64'] else 'amd64' }}"
+box_driver_artifact: 'box-driver_{{ box_os }}_{{ box_arch }}'
+box_volume_artifact: 'box-volume_{{ box_os }}_{{ box_arch }}'
+# The two artifacts this node installs, their installed names and the release
+# checksums (filled in by the preflight stage).
+box_plugin_artifacts:
+  - src: '{{ box_dist_dir }}/{{ box_driver_artifact }}'
+    dest: '{{ box_release_dir }}/plugins/box'
+    live: '{{ box_plugin_dir }}/box'
+    sha256: '{{ box_driver_sha256 | default("") }}'
+    name: box driver
+  - src: '{{ box_dist_dir }}/{{ box_volume_artifact }}'
+    dest: '{{ box_release_dir }}/host_volume_plugins/box-volume'
+    live: '{{ box_volume_plugin_dir }}/box-volume'
+    sha256: '{{ box_volume_sha256 | default("") }}'
+    name: box volume plugin'
+
+# Ownership of the files this role installs. The Nomad client runs as root on a
+# fresh node; a node that runs it as another user sets these to that user.
+box_plugin_owner: root
+box_plugin_group: '{{ "wheel" if ansible_facts.system == "Darwin" else "root" }}'
+
+# ------------------------------------------------------------------- the release
+# Every release this role installs lives in its own directory, and one symlink
+# says which release is live:
+#
+#   /opt/box/releases/<version>/plugins/box                    the box driver
+#   /opt/box/releases/<version>/host_volume_plugins/box-volume the volume plugin
+#   /opt/box/releases/<version>/bin/box                        the CLI (coordinator)
+#   /opt/box/current -> /opt/box/releases/<version>
+#
+# The Nomad client configuration names the paths through `current`, so a rollback
+# (deploy/ansible/rollback.yml -e box_version=<previous>) is one symlink and one
+# restart: the configuration, the Lima home, the volumes and the client's data
+# directory are not touched. An old release directory is removed with
+# `rm -rf /opt/box/releases/<version>` once it is of no use.
+box_release_root: /opt/box
+box_releases_dir: '{{ box_release_root }}/releases'
+box_release_dir: '{{ box_releases_dir }}/{{ box_version }}'
+box_current_link: '{{ box_release_root }}/current'
+
+# plugin_dir and client.host_volume_plugin_dir of the Nomad client, through the
+# `current` symlink. The driver binary is installed as "box": Nomad matches an
+# external plugin to its `plugin` block by the executable name. The volume plugin
+# keeps its own directory, because Nomad runs every executable in
+# host_volume_plugin_dir as a volume plugin.
+box_plugin_dir: '{{ box_current_link }}/plugins'
+box_volume_plugin_dir: '{{ box_current_link }}/host_volume_plugins'
+
+# The box-volume operator settings file. A dynamic host volume request may not
+# carry any of it: limactl, the Lima home and the runtime user belong to the node,
+# so this role writes them here and the plugin reads them on every request.
+box_volume_config_file: /etc/box/volume.json
+
+# ----------------------------------------------------------------- driver paths
+# LIMA_HOME of the boxes. The driver owns this directory: every box is one Lima
+# instance below it, and the disk of a box lives on its Nomad volume and is
+# symlinked from here.
+box_lima_home: /var/lib/box/lima
+box_image_cache_dir: /var/lib/box/images
+
+# Added to the guest memory for the Linux memory cap (the qemu process holds more
+# than the guest sees).
+box_memory_overhead_mib: 150
+
+# qemu on Linux, vz on macOS; empty means the driver's default for the OS.
+box_vm_type: ''
+
+# The unprivileged user the boxes belong to. Lima refuses to run as root, and the
+# Nomad client on a Linux node runs as root, so the driver starts every limactl,
+# qemu and systemd-run child as this user (its uid, its groups including kvm, and
+# its own HOME). It owns the Lima home, the image cache and every volume
+# directory; the role adds it to the kvm group and enables linger for it on Linux.
+#
+# Required: there is no default, because the right answer is the node's own
+# unprivileged account, and guessing root would make every box fail. The role
+# never creates the user.
+box_runtime_user: ''
+
+# The group of the files the role creates for that user. The default is the
+# user's own primary group, looked up in preflight (a user whose primary group is
+# not named after the user is normal: dev/users).
+box_runtime_group: '{{ box_runtime_user }}'
+
+# ------------------------------------------------------------------ prerequisites
+box_limactl: /usr/local/bin/limactl
+box_qemu_binary: qemu-system-x86_64
+box_min_lima: '2.2'
+box_disk_free_floor_mib: 2048
+box_disk_free_warn_mib: 10240
+
+# Install the missing prerequisites? Off by default: lima and qemu are
+# provisioned outside this role, or supplied by the node's package manager. With
+# box_install_deps the role installs qemu from the distribution packages
+# (Debian/Ubuntu) and lima from a pinned upstream tarball that you must name.
+box_install_deps: false
+box_qemu_packages:
+  - qemu-system-x86
+  - qemu-utils
+box_lima_tarball_url: ''
+box_lima_tarball_sha256: ''
+box_lima_prefix: /opt/lima
+
+# ------------------------------------------------------------------- system part
+# The cgroup prerequisites of the memory scope on Linux: the driver starts every
+# VM in a transient *user* scope (memory.max, memory.swap.max=0), which needs a
+# reachable systemd user manager for the runtime user and the two environment
+# variables that point the Nomad service at it. macOS has no systemd user scope:
+# there the VM gets its memory from the Lima configuration and this is ignored.
+box_cgroup_enabled: true
+
+# False makes the role install files into the configured paths without touching
+# systemd or a service. It exists so the kit can be rehearsed against a throwaway
+# prefix; a real node keeps it true.
+box_system_changes: true
+
+# The allowlist the box driver needs in the client configuration. The nomad_client
+# role renders it into 50-box.json; this role only installs the binaries.
+box_driver_allowlist: box

@@ -1,0 +1,23 @@
+# golangci-lint, pinned by .github/workflows/ci.yml (v2.15.0).
+#
+# Small on purpose: the standard linter set (errcheck, govet, ineffassign,
+# staticcheck, unused) plus the two the code needed named explicitly -- errcheck
+# and staticcheck. The exclusion presets are the classes of finding the linters
+# themselves say are noise (an unchecked error on a fmt print to a buffer or to
+# stdout, a comment that does not start with the name it documents), so what
+# fails this job is what the code should really change. gofmt is a separate step
+# in ci.yml.
+version: "2"
+
+run:
+  timeout: 10m
+
+linters:
+  default: standard
+  enable:
+    - errcheck
+    - staticcheck
+  exclusions:
+    presets:
+      - comments
+      - std-error-handling

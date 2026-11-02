@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Managed by deploy/ansible/roles/nomad_client (Ansible). Do not edit on the
+     node: change the role variables and run the play again.
+
+     The Nomad client of a box node on macOS: a system LaunchDaemon, so it starts
+     at boot, needs no login session, and runs as root (it writes the plugin
+     directory, the host volumes directory and the allocation directories under
+     {{ nomad_data_dir }}). The VMs are not root: the box driver starts limactl,
+     and with it the vz VM, as the runtime user {{ nomad_box_runtime_user }}.
+
+     Load it with: sudo launchctl bootstrap system {{ nomad_launchd_plist }}
+     Restart it, keeping the boxes: sudo launchctl kickstart -k system/{{ nomad_launchd_label }} -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{{ nomad_launchd_label }}</string>
+  <key>ProgramArguments</key>
+  <array>
+{% for arg in nomad_agent_argv %}
+    <string>{{ arg }}</string>
+{% endfor %}
+  </array>
+  <key>UserName</key>
+  <string>{{ nomad_file_owner }}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <!-- A restart of the client must not kill the boxes it runs. launchd signals
+       the whole process group of a job by default; AbandonProcessGroup keeps it
+       from doing that, so the limactl hostagents (and the vz VMs inside them)
+       keep running and Nomad re-attaches to them. This is the macOS form of
+       KillMode=process in the systemd unit. -->
+  <key>AbandonProcessGroup</key>
+  <{{ nomad_launchd_abandon_process_group | bool | lower }}/>
+  <key>ThrottleInterval</key>
+  <integer>{{ nomad_launchd_throttle_interval }}</integer>
+  <key>ExitTimeOut</key>
+  <integer>{{ nomad_stop_timeout }}</integer>
+  <key>StandardOutPath</key>
+  <string>{{ nomad_launchd_stdout }}</string>
+  <key>StandardErrorPath</key>
+  <string>{{ nomad_launchd_stderr }}</string>
+  <!-- macOS has no EnvironmentFile: the tokens travel in the plist, which is
+       written 0600 root only. Nomad reads NOMAD_CLIENT_INTRO_TOKEN itself;
+       NOMAD_TOKEN is for the CLI in a shell on this host. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+{% if nomad_client_intro_token | length > 0 %}
+    <key>NOMAD_CLIENT_INTRO_TOKEN</key>
+    <string>{{ nomad_client_intro_token }}</string>
+{% endif %}
+{% if nomad_acl_token | length > 0 %}
+    <key>NOMAD_TOKEN</key>
+    <string>{{ nomad_acl_token }}</string>
+{% endif %}
+  </dict>
+</dict>
+</plist>

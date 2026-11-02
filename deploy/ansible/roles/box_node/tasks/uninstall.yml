@@ -1,0 +1,51 @@
+---
+# Remove the box driver and the volume plugin from this node.
+#
+#   deploy/ansible/uninstall.yml -e box_uninstall_confirm=true
+#
+# Removed: the release directory of this version, the `current` symlink, the
+# box-volume settings file, the image cache, and (through the nomad_client role,
+# which runs first in the play) the service and the client configuration.
+#
+# Kept on purpose, because they are not the plugin's:
+#   * the Lima home {{ box_lima_home }} - the instances of the boxes,
+#   * every volume directory and the disks in them,
+#   * the client's data_dir and host_volumes_dir,
+#   * the runtime user and its group memberships.
+# `box rm <id> --yes` is what deletes a box and its disk; this play never does.
+
+- name: Uninstall | Require an explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - box_uninstall_confirm | default(false) | bool
+    fail_msg: >-
+      This play removes the box driver from this node. Pass
+      -e box_uninstall_confirm=true to do it. The Lima home, the volumes and the
+      client data directory are kept either way.
+    quiet: true
+
+- name: Uninstall | Remove the live path and the releases
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop:
+    - '{{ box_current_link }}'
+    - '{{ box_release_root }}'
+
+- name: Uninstall | Remove the box-volume settings of this node
+  ansible.builtin.file:
+    path: '{{ box_volume_config_file }}'
+    state: absent
+
+- name: Uninstall | Remove the image cache
+  ansible.builtin.file:
+    path: '{{ box_image_cache_dir }}'
+    state: absent
+
+- name: Uninstall | Report what was kept
+  ansible.builtin.debug:
+    msg:
+      - 'removed: {{ box_release_root }} (every release and {{ box_current_link }}), {{ box_volume_config_file }}, {{ box_image_cache_dir }}'
+      - 'kept: the Lima home {{ box_lima_home }} with the boxes, every volume directory and its disk, the client data_dir and host_volumes_dir'
+      - 'the runtime user {{ box_runtime_user }} and its groups are left as they are'
+      - 'to delete a box and its disk: box rm <id> --yes'

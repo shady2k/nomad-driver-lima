@@ -1,0 +1,24 @@
+---
+# The Mac (arm64, Apple Virtualization). The same two roles as a Linux node: the
+# difference is the service - a launchd LaunchDaemon instead of a systemd unit -
+# and the hypervisor (vz instead of qemu).
+
+box_runtime_user: dev
+box_limactl: /opt/homebrew/bin/limactl
+# Apple Virtualization: no qemu on this node.
+box_vm_type: vz
+
+nomad_node_name: '{{ inventory_hostname }}'
+nomad_data_dir: /opt/nomad/data
+nomad_bind_addr: '0.0.0.0'
+nomad_advertise_addr: '{{ ansible_facts.default_ipv4.address }}'
+nomad_meta:
+  box: 'true'
+  vm_type: vz
+
+# The launchd daemon: written to /Library/LaunchDaemons/com.hashicorp.nomad.plist
+# and loaded by the play. Set nomad_launchd_load: false to stage the plist and load
+# it yourself - that is what the kit's own checks do on a Linux host.
+# nomad_launchd_load: true
+# A restart that keeps the boxes (AbandonProcessGroup=true):
+#   sudo launchctl kickstart -k system/com.hashicorp.nomad

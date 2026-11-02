@@ -1,0 +1,60 @@
+---
+# The Linux amd64 nodes that run boxes.
+#
+# This file is the whole of what a node needs beyond roles/*/defaults/main.yml.
+
+# ---------------------------------------------------------------- the box driver
+# The unprivileged user the boxes belong to. Lima refuses to run as root, and the
+# Nomad client runs as root, so the driver starts every limactl, qemu and
+# systemd-run child as this user. Required; the role does not create the user.
+box_runtime_user: dev
+
+# lima and qemu. The role checks both and installs qemu from the distribution
+# packages when box_install_deps is true.
+box_limactl: /usr/local/bin/limactl
+box_qemu_binary: qemu-system-x86_64
+box_install_deps: false
+# box_lima_tarball_url: 'https://mirror.example/lima/lima-2.2.0-Linux-x86_64.tar.gz'
+# box_lima_tarball_sha256: '<the sha256 of that tarball>'
+
+# Where the driver keeps its Lima instances and the image cache (the runtime user
+# owns both), and where the Nomad client finds the plugins. The default release
+# layout is /opt/box/releases/<version> with /opt/box/current as the live symlink:
+# box_release_root: /opt/box
+# box_lima_home: /var/lib/box/lima
+# box_image_cache_dir: /var/lib/box/images
+# box_volume_config_file: /etc/box/volume.json
+
+# The memory cap of a box is a transient systemd user scope. The role enables linger
+# for the runtime user, starts its user manager, proves that a scope works, and
+# puts XDG_RUNTIME_DIR into the client's service environment. Set this to false to
+# install without a memory cap (the role says so, and the driver reports it).
+# box_cgroup_enabled: true
+
+# ---------------------------------------------------------------- the Nomad client
+# The node name in the cluster. The node ID is not this: the ID comes from
+# nomad_data_dir, so a node keeps its ID as long as it keeps its data directory.
+nomad_node_name: '{{ inventory_hostname }}'
+
+# The client's state directory. Give a node that already runs Nomad the directory
+# it uses: the data directory is the node ID.
+nomad_data_dir: /opt/nomad/data
+
+nomad_bind_addr: '0.0.0.0'
+nomad_advertise_addr: '{{ ansible_facts.default_ipv4.address }}'
+
+# Resources the node keeps for itself, and free-form metadata that `nomad node
+# status -verbose` shows.
+nomad_reserved:
+  cpu: 500
+  memory: 1024
+nomad_meta:
+  box: 'true'
+
+# Where Nomad keeps the directories of dynamic host volumes (the box disks).
+# nomad_host_volumes_dir: /opt/nomad/volumes
+
+# Telemetry, for a Prometheus scrape of the node.
+nomad_telemetry:
+  prometheus_metrics: true
+  disable_hostname: true

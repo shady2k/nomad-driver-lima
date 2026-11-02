@@ -1,0 +1,206 @@
+---
+# acl.yml: put the box ACL policies on a cluster that runs with ACLs.
+#
+#   cd deploy/ansible
+#   ansible-playbook -i inventory acl.yml --check      # shows the policies, changes nothing
+#   ansible-playbook -i inventory acl.yml              # applies them
+#
+# This is a separate play on purpose: it is once per cluster, not once per node,
+# and it needs a MANAGEMENT token, which no node and no coordinator gets.
+#
+#   deploy/acl/box-operator.policy.hcl   the coordinator CLI (jobs, volumes,
+#                                        alloc exec, the executors variable)
+#   deploy/acl/box-workload.policy.hcl   one box job's own workloads: read
+#                                        nomad/jobs/box-executors
+#
+# The token comes from the vault, never from this file:
+#
+#   # inventory/group_vars/all/vault.yml  (ansible-vault create ...)
+#   vault_nomad_management_token: '...'
+#
+#   # or from the environment
+#   -e box_acl_management_token="$NOMAD_MANAGEMENT_TOKEN"
+#
+# Variables (all optional except the token and the address):
+#   box_acl_addr                the Nomad API (default: nomad_acl_addr)
+#   box_acl_management_token    a management token (default: vault_nomad_management_token)
+#   box_acl_namespace           the namespace the policies are written for (default: default)
+#   box_acl_workload_jobs       the box ids that get their own job-attached
+#                               workload policy (box-workload-<id>), as a list or
+#                               as dev1,dev2; empty applies only the operator
+#                               policy
+#   box_acl_validate_certs      verify the HTTPS certificate of box_acl_addr (default: true)
+#   box_acl_cacert              the CA of a cluster with mTLS
+#
+# Nothing here creates a token: a management token can mint one
+# (`nomad acl token create -policy box-operator`), and that token belongs in the
+# coordinator's environment file, not in git. deploy/acl/apply.sh does both.
+- name: The box ACL policies
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: ACL | Remember the cluster and the token
+      ansible.builtin.set_fact:
+        box_acl_addr: '{{ box_acl_addr | default(nomad_acl_addr | default("")) }}'
+        box_acl_management_token: '{{ box_acl_management_token | default(vault_nomad_management_token | default("")) }}'
+        box_acl_namespace: '{{ box_acl_namespace | default("default") }}'
+        box_acl_workload_jobs: '{{ box_acl_workload_jobs | default([]) }}'
+        box_acl_validate_certs: '{{ box_acl_validate_certs | default(true) }}'
+        box_acl_policy_dir: '{{ playbook_dir }}/../acl'
+      no_log: true
+
+    # The box ids may come as a list or as a comma-separated string (-e
+    # box_acl_workload_jobs=dev1,dev2 is what most operators type).
+    - name: ACL | Remember the box ids that get a workload policy
+      ansible.builtin.set_fact:
+        box_acl_jobs: >-
+          {{ (box_acl_workload_jobs if box_acl_workload_jobs is not string
+              else (box_acl_workload_jobs | regex_findall('[A-Za-z0-9_.-]+') | list))
+             | reject('equalto', '') | list }}
+
+    - name: ACL | Require an address and a management token
+      ansible.builtin.assert:
+        that:
+          - box_acl_addr | length > 0
+          - box_acl_management_token | length > 0
+        fail_msg: >-
+          This play needs a Nomad address (box_acl_addr or nomad_acl_addr) and a
+          management token (box_acl_management_token or vault_nomad_management_token).
+          The token is a secret: keep it in the vault, or pass it with -e from the
+          environment. Nothing was changed.
+        quiet: true
+      no_log: true
+
+    - name: ACL | Look for the policy files of deploy/acl
+      ansible.builtin.stat:
+        path: '{{ box_acl_policy_dir }}/{{ item }}'
+      loop:
+        - box-operator.policy.hcl
+        - box-workload.policy.hcl
+      register: box_acl_files
+
+    - name: ACL | Require both policy files
+      ansible.builtin.assert:
+        that:
+          - box_acl_files.results | rejectattr('stat.exists') | list | length == 0
+        fail_msg: >-
+          {{ box_acl_policy_dir }} does not hold box-operator.policy.hcl and
+          box-workload.policy.hcl. This playbook applies the policies of
+          deploy/acl, which is part of the same repository.
+        quiet: true
+
+    # The policy files carry `namespace "default"`. A cluster that puts the boxes
+    # in another namespace says so with box_acl_namespace, and the rules are
+    # rendered with that namespace - the file stays namespace-agnostic.
+    - name: ACL | Read the rules of the two policies
+      ansible.builtin.set_fact:
+        box_acl_operator_rules: >-
+          {{ (lookup('file', box_acl_policy_dir ~ '/box-operator.policy.hcl')
+              | replace('namespace "default"', 'namespace "' ~ box_acl_namespace ~ '"')) | trim }}
+        box_acl_workload_rules: >-
+          {{ (lookup('file', box_acl_policy_dir ~ '/box-workload.policy.hcl')
+              | replace('namespace "default"', 'namespace "' ~ box_acl_namespace ~ '"')) | trim }}
+
+    # Applying a policy is one PUT. Reading it first makes the play idempotent:
+    # an unchanged rules block is left alone and the run reports changed=0.
+    - name: ACL | Read the operator policy the cluster has
+      ansible.builtin.uri:
+        url: '{{ box_acl_addr }}/v1/acl/policy/box-operator'
+        method: GET
+        headers:
+          X-Nomad-Token: '{{ box_acl_management_token }}'
+        validate_certs: '{{ box_acl_validate_certs }}'
+        ca_path: '{{ box_acl_cacert | default(omit) }}'
+        status_code: [200, 403, 404]
+        timeout: 20
+      register: box_acl_operator_current
+
+    - name: ACL | Require a management token that may write policies
+      ansible.builtin.assert:
+        that:
+          - box_acl_operator_current.status | int != 403
+        fail_msg: >-
+          The token was refused (HTTP 403) reading the ACL policies: it is not a
+          management token. Nothing was changed.
+        quiet: true
+
+    - name: ACL | Apply the operator policy
+      ansible.builtin.uri:
+        url: '{{ box_acl_addr }}/v1/acl/policy/box-operator'
+        method: PUT
+        headers:
+          X-Nomad-Token: '{{ box_acl_management_token }}'
+        body_format: json
+        body:
+          Name: box-operator
+          Description: 'box: the coordinator CLI'
+          Rules: '{{ box_acl_operator_rules }}'
+        validate_certs: '{{ box_acl_validate_certs }}'
+        ca_path: '{{ box_acl_cacert | default(omit) }}'
+        status_code: [200]
+        timeout: 20
+      when: >-
+        box_acl_operator_current.status | int != 200
+        or (box_acl_operator_current.json.Rules | default('') | trim) != box_acl_operator_rules
+      no_log: true
+
+    # One policy per box job: `nomad/jobs/box-executors` is the sibling of
+    # nomad/jobs/<job>, not below it, so the default workload identity scoping
+    # does not cover it (deploy/acl/README.md explains the grant). A box created
+    # after this run needs its own: `box create` does not touch ACLs on purpose.
+    - name: ACL | Read the workload policy the cluster has
+      ansible.builtin.uri:
+        url: '{{ box_acl_addr }}/v1/acl/policy/box-workload-{{ item }}'
+        method: GET
+        headers:
+          X-Nomad-Token: '{{ box_acl_management_token }}'
+        validate_certs: '{{ box_acl_validate_certs }}'
+        ca_path: '{{ box_acl_cacert | default(omit) }}'
+        status_code: [200, 404]
+        timeout: 20
+      loop: '{{ box_acl_jobs }}'
+      register: box_acl_workload_current
+
+    - name: ACL | Attach the workload policy to each box job
+      ansible.builtin.uri:
+        url: '{{ box_acl_addr }}/v1/acl/policy/box-workload-{{ item.item }}'
+        method: PUT
+        headers:
+          X-Nomad-Token: '{{ box_acl_management_token }}'
+        body_format: json
+        body:
+          Name: 'box-workload-{{ item.item }}'
+          Description: 'box {{ item.item }}: read the executors variable'
+          Rules: '{{ box_acl_workload_rules }}'
+          # JobACL is what attaches a policy to one job: Nomad's own CLI sets it
+          # from `-job` / `-group` / `-task`, and the API takes the same object.
+          JobACL:
+            Namespace: '{{ box_acl_namespace }}'
+            JobID: 'box-{{ item.item }}'
+            Group: ''
+            Task: ''
+        validate_certs: '{{ box_acl_validate_certs }}'
+        ca_path: '{{ box_acl_cacert | default(omit) }}'
+        status_code: [200]
+        timeout: 20
+      loop: '{{ box_acl_workload_current.results | default([]) }}'
+      loop_control:
+        label: 'box-workload-{{ item.item }}'
+      when: >-
+        item.status | int != 200
+        or (item.json.Rules | default('') | trim) != box_acl_workload_rules
+        or (item.json.JobACL.JobID | default('')) != 'box-' ~ item.item
+      no_log: true
+
+    - name: ACL | Report what the cluster has
+      ansible.builtin.debug:
+        msg:
+          - '{{ box_acl_addr }}: policy box-operator applies to namespace {{ box_acl_namespace }} (the coordinator CLI)'
+          - >-
+            box jobs with a job-attached workload policy:
+            {{ box_acl_jobs | join(", ") if box_acl_jobs | length > 0
+               else "none - pass box_acl_workload_jobs=<box id>,... after `box create`" }}
+          - 'the coordinator token is a separate step: nomad acl token create -name box-operator -policy box-operator, then put it in ~/.config/box/env'
+          - 'deploy/acl/README.md has every capability each policy grants, and deploy/acl/apply.sh does the same from a shell'

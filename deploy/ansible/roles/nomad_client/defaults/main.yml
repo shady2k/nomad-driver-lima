@@ -1,0 +1,213 @@
+---
+# Defaults for the nomad_client role (deploy/ansible/roles/nomad_client).
+#
+# This role owns the WHOLE Nomad client configuration of a node: the binary, the
+# configuration files under /etc/nomad.d, the secrets file next to them, and the
+# service that loads them - a systemd unit on Linux, a launchd daemon on macOS.
+# The box driver's own plugin block is rendered here too (50-box.json), from the
+# box_node role's variables.
+#
+# Everything below can be overridden from an inventory group_vars file or on the
+# command line. `deploy/ansible/inventory.example/` documents every variable in
+# the place an operator sets it.
+#
+# Nothing here is secret. The two tokens come from the operator's vault (see
+# nomad_acl_token / nomad_client_intro_token below) and are written to
+# /etc/nomad.d/nomad.env on Linux and into the launchd plist on macOS, never into
+# a JSON file.
+#
+# Run the play with --check first: it prints the configuration this role writes,
+# where it comes from, and nothing is changed.
+
+# ------------------------------------------------------------- the Nomad binary
+# The pinned release. The role installs exactly this version, and a node that
+# already has it is left alone.
+nomad_version: '2.0.7'
+
+# Where the release zip comes from and which file it must be. Point
+# nomad_release_url at a mirror (an internal raw proxy, for example) and keep
+# nomad_release_sha256 as it is: the checksum is what makes the mirror safe.
+nomad_os: "{{ 'darwin' if ansible_facts.system == 'Darwin' else 'linux' }}"
+nomad_arch: "{{ 'arm64' if ansible_facts.architecture in ['aarch64', 'arm64'] else 'amd64' }}"
+nomad_release_url: >-
+  https://releases.hashicorp.com/nomad/{{ nomad_version }}/nomad_{{ nomad_version }}_{{ nomad_os }}_{{ nomad_arch }}.zip
+# The official SHA256SUMS of Nomad {{ nomad_version }} (releases.hashicorp.com).
+nomad_release_sha256:
+  linux_amd64: '4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1'
+  linux_arm64: '19708097585efe0d60234f300b62892fa776ff93ca6ba5fb918360cbd118b71e'
+  darwin_arm64: '4ada34db43f8b75c80c4e09ce50f4753e661bcb4a3745f415dd4aa7d01483e58'
+nomad_release_sha256_pinned: '{{ nomad_release_sha256[nomad_os ~ "_" ~ nomad_arch] | default("") }}'
+
+# Install the binary? A node that gets Nomad from its distribution packages
+# (nixpkgs, Homebrew) sets this to false and points nomad_binary at that
+# package's binary; the role then only installs it.
+nomad_install_binary: true
+nomad_binary: /usr/local/bin/nomad
+# The interpreter that unpacks the release zip. Ansible needs a python3 on the
+# node anyway, and `unzip` is not installed everywhere, so the zip is unpacked
+# with the interpreter instead of a system tool.
+nomad_python: python3
+# Where the downloaded zip and its unpacked files are staged.
+nomad_stage_dir: /var/tmp/nomad-release-{{ nomad_version }}
+
+# ------------------------------------------------------------------ the config
+# The directory the service loads with -config. Nomad merges every file in it in
+# name order, so the role numbers its files: 10-base.json is the client, 50-box.json
+# is the box driver.
+nomad_config_dir: /etc/nomad.d
+nomad_base_config_file: '{{ nomad_config_dir }}/10-base.json'
+nomad_box_config_file: '{{ nomad_config_dir }}/50-box.json'
+# The service environment on Linux: the tokens that must not be in a JSON file.
+nomad_env_file: '{{ nomad_config_dir }}/nomad.env'
+
+nomad_region: global
+nomad_datacenter: dc1
+# The node name in the cluster. It is not the node ID: the ID comes from
+# data_dir, and a node keeps its ID as long as it keeps its data directory.
+nomad_node_name: '{{ ansible_facts.hostname }}'
+
+# The client's state directory. THE SAME DIRECTORY MEANS THE SAME NODE ID: this
+# role never writes another one over an existing client - a node that already
+# runs Nomad keeps the data_dir it has (set it in the inventory).
+nomad_data_dir: /opt/nomad/data
+# Where Nomad keeps the directories of dynamic host volumes (the box disks).
+nomad_host_volumes_dir: /opt/nomad/volumes
+
+nomad_bind_addr: '0.0.0.0'
+# The address the node advertises to the cluster for http, rpc and serf.
+nomad_advertise_addr: '{{ ansible_facts.default_ipv4.address | default(ansible_facts.hostname) }}'
+nomad_ports:
+  http: 4646
+  rpc: 4647
+  serf: 4648
+# Where the role waits for the node to come back (and where it reads the driver
+# state from). 127.0.0.1 is right for every node that binds a wildcard address.
+nomad_wait_addr: 'http://127.0.0.1:{{ nomad_ports.http }}'
+
+# The Nomad servers this client joins: RPC addresses, host:4647. Required (or a
+# server block): a client with nowhere to register is not a node of a cluster.
+nomad_servers: []
+# A server block for a node that is also a server (a one-node lab). Empty means
+# no server block at all: this is a client. Nomad servers as a real installation
+# are out of scope of this kit.
+nomad_server_block: {}
+
+nomad_client_enabled: true
+# The node pool the client registers in; empty means Nomad's default pool.
+nomad_node_pool: ''
+# Free-form node metadata (nomad node status -verbose shows it).
+nomad_meta: {}
+# Resources the node keeps for itself: {cpu: 200, memory: 512, disk: 1024}.
+nomad_reserved: {}
+# Anything else the client block needs, merged as it is, for example
+# {min_dynamic_port: 20000, max_dynamic_port: 32000}.
+nomad_client_extra: {}
+# Anything else the top-level configuration needs (see the Nomad agent
+# configuration reference); merged as it is.
+nomad_extra: {}
+# Telemetry, for example {prometheus_metrics: true, disable_hostname: true}.
+nomad_telemetry: {}
+nomad_log_level: INFO
+
+# mTLS. With nomad_tls_enabled the three files below are required and every
+# Nomad port speaks TLS.
+nomad_tls_enabled: false
+nomad_tls_ca_file: ''
+nomad_tls_cert_file: ''
+nomad_tls_key_file: ''
+nomad_tls_verify_https_client: true
+nomad_tls_verify_server_hostname: true
+
+# ACLs. The tokens are the only secrets this role handles and they come from the
+# operator's vault: `ansible-vault` (vault_nomad_acl_token in a vaulted file) or
+# an environment lookup, as the inventory example shows. Both end up in
+# nomad.env (mode 0600) on Linux and in the launchd plist (mode 0600) on macOS,
+# never in a JSON file.
+nomad_acl_enabled: false
+nomad_acl_token: '{{ vault_nomad_acl_token | default("") }}'
+# The token a client uses to introduce itself to the servers. Nomad reads it
+# from the NOMAD_CLIENT_INTRO_TOKEN environment variable (the -client-intro-token
+# flag does the same thing).
+nomad_client_intro_token: '{{ vault_nomad_client_intro_token | default("") }}'
+
+# ---------------------------------------------------------------- the box plugin
+# The box driver's plugin block, rendered into 50-box.json. The values come from
+# the box_node role, which installs the binaries they point at; both roles run on
+# the same node, box_node first. A node without the box driver sets
+# nomad_box_enabled: false and gets no 50-box.json at all.
+nomad_box_enabled: true
+nomad_box_plugin_dir: '{{ box_plugin_dir | default("/opt/box/current/plugins") }}'
+nomad_box_volume_plugin_dir: '{{ box_volume_plugin_dir | default("/opt/box/current/host_volume_plugins") }}'
+nomad_box_driver_allowlist: '{{ box_driver_allowlist | default("box") }}'
+nomad_box_limactl: '{{ box_limactl | default("/usr/local/bin/limactl") }}'
+nomad_box_lima_home: '{{ box_lima_home | default("/var/lib/box/lima") }}'
+nomad_box_image_cache_dir: '{{ box_image_cache_dir | default("/var/lib/box/images") }}'
+nomad_box_memory_overhead_mib: '{{ box_memory_overhead_mib | default(150) }}'
+nomad_box_vm_type: '{{ box_vm_type | default("") }}'
+# The user the driver starts limactl, qemu and the memory scope as. Empty is the
+# driver's own default (the user the client runs as).
+nomad_box_runtime_user: '{{ box_runtime_user | default("") }}'
+# The memory cap of a box is a transient *user* scope, so the service needs the
+# runtime user's runtime directory in its environment. Both come from box_node.
+nomad_box_cgroup_enabled: '{{ box_cgroup_enabled | default(true) }}'
+
+# The owner of every file this role installs. The Nomad client runs as root on a
+# fresh node (systemd system unit, launchd LaunchDaemon); a node that runs it as
+# another user sets these to that user.
+nomad_file_owner: root
+nomad_file_group: '{{ "wheel" if ansible_facts.system == "Darwin" else "root" }}'
+
+# ------------------------------------------------------------------ the service
+nomad_service_name: nomad
+# Linux: the systemd unit.
+nomad_unit_dir: /etc/systemd/system
+nomad_unit_path: '{{ nomad_unit_dir }}/{{ nomad_service_name }}.service'
+# KillMode=process: a restart signals only the nomad process, so the plugin, the
+# lima hostagents and the qemu processes of running boxes survive it.
+nomad_kill_mode: process
+nomad_stop_timeout: 90
+
+# macOS: a LaunchDaemon, running as root like the systemd unit. Lima needs no
+# root (vz runs the VM inside the limactl hostagent), so the VMs run as the
+# runtime user; what needs root is the client itself (the plugin directory, the
+# host volumes directory and the allocation directories under data_dir).
+nomad_launchd_label: com.hashicorp.nomad
+nomad_launchd_plist: /Library/LaunchDaemons/{{ nomad_launchd_label }}.plist
+# Render the plist? On a Mac, yes; a Linux run renders nothing unless a check
+# forces it (the kit's own checks validate the plist that way).
+nomad_launchd_enabled: "{{ ansible_facts.system == 'Darwin' }}"
+# Load it (and restart it) with launchctl? `nomad_system_changes: false` stages
+# the plist and leaves launchd alone.
+nomad_launchd_load: '{{ nomad_system_changes }}'
+# AbandonProcessGroup=true is the macOS form of KillMode=process: launchd does
+# not signal the job's process group when the job restarts, so the limactl
+# hostagents and the VMs they hold keep running.
+nomad_launchd_abandon_process_group: true
+nomad_launchd_throttle_interval: 10
+nomad_launchd_stdout: /var/log/{{ nomad_service_name }}.log
+nomad_launchd_stderr: /var/log/{{ nomad_service_name }}.err.log
+
+# Extra arguments of `nomad agent`, appended to `-config <config dir>`.
+nomad_agent_args: []
+
+# Validate the whole configuration with `nomad config validate` before anything
+# is restarted.
+nomad_validate_config: true
+# Restart the service when the configuration, the unit or the plugin binaries
+# changed. Handlers do it, so an unchanged node is never restarted.
+nomad_restart_enabled: true
+# Wait for the cluster to report the node as ready after the restart.
+nomad_wait_ready: true
+nomad_wait_retries: 30
+nomad_wait_delay: 4
+
+# False writes the files into the configured paths without touching systemd,
+# launchd or the service. It exists so the role can be rehearsed into a throwaway
+# prefix; a real node keeps it true.
+nomad_system_changes: true
+
+# A NixOS node keeps /etc in its Nix configuration: a file this role writes there
+# is lost at the next nixos-rebuild switch. The role therefore refuses a NixOS node
+# whose configuration or unit path is under /etc. Set this to true only when those
+# paths are managed outside Nix on purpose (or for a rehearsal into a prefix).
+nomad_allow_nixos: false

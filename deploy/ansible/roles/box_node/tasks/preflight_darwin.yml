@@ -1,0 +1,72 @@
+---
+# macOS prerequisites. The Mac is a Nomad client with the same role: box_node
+# installs the arm64 plugins, the settings file and the runtime user's
+# directories; nomad_client writes the configuration and the launchd plist.
+#
+# Apple Virtualization (vz) needs no /dev/kvm and no qemu: a Mac needs lima and
+# nothing else. `vz` also means the VM is a child of the limactl hostagent, which
+# is why a client restart keeps it (see deploy/README.md, "macOS").
+
+- name: Darwin | Look for limactl
+  ansible.builtin.stat:
+    path: '{{ box_limactl }}'
+  register: box_limactl_stat
+
+- name: Darwin | Read the lima version
+  ansible.builtin.command:
+    argv: ['{{ box_limactl }}', '--version']
+  become: true
+  become_user: '{{ box_runtime_user }}'
+  environment:
+    LIMA_HOME: '{{ box_lima_home }}'
+  register: box_lima_version_raw
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: box_limactl_stat.stat.exists
+
+- name: Darwin | Require a new enough lima
+  ansible.builtin.assert:
+    that:
+      - box_limactl_stat.stat.exists
+      - box_lima_version_raw.stdout | default('') is search('[0-9]+\.[0-9]+')
+      - (box_lima_version_raw.stdout | default('') | regex_search('([0-9]+)\.([0-9]+)', '\\1') | first | int) > (box_min_lima.split('.')[0] | int)
+        or ((box_lima_version_raw.stdout | default('') | regex_search('([0-9]+)\.([0-9]+)', '\\1') | first | int) == (box_min_lima.split('.')[0] | int)
+        and (box_lima_version_raw.stdout | default('') | regex_search('([0-9]+)\.([0-9]+)', '\\2') | first | int) >= (box_min_lima.split('.')[1] | int))
+    fail_msg: >-
+      {{ box_limactl }} is missing or older than lima {{ box_min_lima }} (it
+      answered "{{ box_lima_version_raw.stdout | default('not found') | trim | truncate(80) }}").
+      On macOS lima comes from `brew install lima`; set box_limactl to
+      /opt/homebrew/bin/limactl (Apple Silicon) or /usr/local/bin/limactl.
+    quiet: true
+
+- name: Darwin | Remember the lima version
+  ansible.builtin.set_fact:
+    box_lima_semver: >-
+      {{ (box_lima_version_raw.stdout | default('') | regex_search('[0-9]+\.[0-9]+(\.[0-9]+)?')) | default('unknown') }}
+
+- name: Darwin | Read the macOS version
+  ansible.builtin.command:
+    argv: ['sw_vers', '-productVersion']
+  register: box_macos_version
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Darwin | Warn when Apple Virtualization is too old for the boxes
+  ansible.builtin.debug:
+    msg: >-
+      macOS {{ box_macos_version.stdout | default('?') | trim }}: Apple
+      Virtualization (vz, the default vm_type on this platform) needs macOS 13 or
+      newer. On an older Mac set box_vm_type: qemu and install qemu from Homebrew.
+  when:
+    - box_macos_version.stdout | default('') | trim is search('^[0-9]+')
+    - (box_macos_version.stdout | default('') | trim | split('.') | first | int) < 13
+
+- name: Darwin | Report the memory cap on this platform
+  ansible.builtin.debug:
+    msg: >-
+      macOS has no systemd user scope, so box_cgroup_enabled does not apply here
+      (it is {{ box_cgroup_enabled }} in the variables): the guest memory comes
+      from the Lima configuration of the box, and the host's own memory pressure
+      is what limits it.

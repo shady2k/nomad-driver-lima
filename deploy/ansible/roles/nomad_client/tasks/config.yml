@@ -1,0 +1,103 @@
+---
+# Build the two configuration mappings from the variables.
+#
+# Everything that renders the configuration reads these facts, so there is
+# exactly one place that decides which keys this role sets: 10-base.json (the
+# client) and 50-box.json (the driver's plugin block).
+
+- name: Configuration | The TLS block
+  ansible.builtin.set_fact:
+    nomad_tls_config: >-
+      {{ {'tls': {'http': true,
+                  'rpc': true,
+                  'ca_file': nomad_tls_ca_file,
+                  'cert_file': nomad_tls_cert_file,
+                  'key_file': nomad_tls_key_file,
+                  'verify_https_client': nomad_tls_verify_https_client | bool,
+                  'verify_server_hostname': nomad_tls_verify_server_hostname | bool}} }}
+
+- name: Configuration | The client block
+  ansible.builtin.set_fact:
+    nomad_client_block: >-
+      {{ {'enabled': nomad_client_enabled | bool,
+          'servers': nomad_servers,
+          'host_volumes_dir': nomad_host_volumes_dir}
+         | combine({'node_pool': nomad_node_pool} if nomad_node_pool | length > 0 else {})
+         | combine({'meta': nomad_meta} if nomad_meta | length > 0 else {})
+         | combine({'reserved': nomad_reserved} if nomad_reserved | length > 0 else {})
+         | combine(nomad_client_extra | default({})) }}
+
+- name: Configuration | The base configuration (10-base.json)
+  ansible.builtin.set_fact:
+    nomad_base_config: >-
+      {{ {'region': nomad_region,
+          'datacenter': nomad_datacenter,
+          'name': nomad_node_name,
+          'data_dir': nomad_data_dir,
+          'bind_addr': nomad_bind_addr,
+          'advertise': {'http': nomad_advertise_addr,
+                        'rpc': nomad_advertise_addr,
+                        'serf': nomad_advertise_addr},
+          'ports': nomad_ports,
+          'log_level': nomad_log_level,
+          'client': nomad_client_block}
+         | combine({'server': nomad_server_block} if nomad_server_block | length > 0 else {})
+         | combine({'acl': {'enabled': true}} if nomad_acl_enabled | bool else {})
+         | combine({'telemetry': nomad_telemetry} if nomad_telemetry | length > 0 else {})
+         | combine(nomad_tls_config if nomad_tls_enabled | bool else {})
+         | combine(nomad_extra | default({})) }}
+
+- name: Configuration | The box driver's plugin block
+  ansible.builtin.set_fact:
+    nomad_box_plugin_config: >-
+      {{ {'limactl': nomad_box_limactl,
+          'lima_home': nomad_box_lima_home,
+          'image_cache_dir': nomad_box_image_cache_dir,
+          'memory_overhead_mib': nomad_box_memory_overhead_mib | int}
+         | combine({'runtime_user': nomad_box_runtime_user}
+                   if nomad_box_runtime_user | length > 0 else {})
+         | combine({'vm_type': nomad_box_vm_type}
+                   if nomad_box_vm_type | length > 0 else {}) }}
+
+- name: Configuration | The box driver's part of the client block
+  ansible.builtin.set_fact:
+    nomad_box_client_block: >-
+      {{ {'host_volume_plugin_dir': nomad_box_volume_plugin_dir}
+         | combine({'options': {'driver.allowlist': nomad_box_driver_allowlist}}
+                   if nomad_box_driver_allowlist | length > 0 else {}) }}
+
+- name: Configuration | The box configuration (50-box.json)
+  ansible.builtin.set_fact:
+    nomad_box_config: >-
+      {{ {'plugin_dir': nomad_box_plugin_dir,
+          'client': nomad_box_client_block,
+          'plugin': {'box': {'config': nomad_box_plugin_config}}}
+         if nomad_box_enabled | bool else {} }}
+
+# One place builds the command line of the agent: the systemd unit's ExecStart
+# and the launchd plist's ProgramArguments are both this list. (A Jinja block at
+# the end of a line eats the newline - trim_blocks - which glues the next unit
+# directive to ExecStart; a fact has no such trap.)
+- name: Configuration | The command line of the agent
+  ansible.builtin.set_fact:
+    nomad_agent_argv: '{{ [nomad_binary, "agent", "-config", nomad_config_dir] + nomad_agent_args }}'
+
+- name: Configuration | Work out whether this node keeps its configuration in Nix
+  ansible.builtin.set_fact:
+    nomad_is_nixos: >-
+      {{ (ansible_facts.os_family | default('') == 'NixOS')
+         or (ansible_facts.distribution | default('') == 'NixOS') }}
+    nomad_writes_etc: >-
+      {{ (nomad_config_dir is match('^/etc/')) or (nomad_unit_dir is match('^/etc/'))
+         or (nomad_env_file is match('^/etc/')) }}
+
+- name: Configuration | The headers the role uses to read the cluster
+  ansible.builtin.set_fact:
+    nomad_api_headers: >-
+      {{ ({'X-Nomad-Token': nomad_acl_token} if nomad_acl_token | length > 0 else {}) }}
+
+- name: Configuration | Remember the driver allowlist as a list
+  ansible.builtin.set_fact:
+    nomad_box_allowlist_entries: >-
+      {{ nomad_box_driver_allowlist.split(',') | map('trim')
+         | reject('equalto', '') | list if nomad_box_driver_allowlist | length > 0 else [] }}

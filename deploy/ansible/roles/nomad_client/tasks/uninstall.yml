@@ -1,0 +1,68 @@
+---
+# Remove the Nomad client service and the files this role wrote, and keep the
+# node's state.
+#
+#   deploy/ansible/uninstall.yml -e box_uninstall_confirm=true
+#
+# The service is stopped and removed only when nomad_system_changes is true; a
+# rehearsal into a prefix (nomad_system_changes: false) removes the files and
+# leaves every service alone.
+#
+# Kept on purpose: {{ nomad_data_dir }} (the node ID and its allocations),
+# {{ nomad_host_volumes_dir }} (the box disks) and any TLS material you put in
+# {{ nomad_config_dir }} yourself.
+
+- name: Uninstall | Require an explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - box_uninstall_confirm | default(false) | bool
+    fail_msg: >-
+      This play removes the Nomad client from this host. Pass
+      -e box_uninstall_confirm=true to do it. The data directory and the host
+      volumes directory are kept either way.
+    quiet: true
+
+- name: Uninstall | Stop and disable the systemd unit
+  ansible.builtin.systemd_service:
+    name: '{{ nomad_service_name }}'
+    state: stopped
+    enabled: false
+  failed_when: false
+  when:
+    - nomad_system_changes | bool
+    - ansible_facts.system == 'Linux'
+
+- name: Uninstall | Take the launchd daemon down
+  ansible.builtin.command:
+    argv: ['launchctl', 'bootout', 'system/{{ nomad_launchd_label }}']
+  failed_when: false
+  changed_when: true
+  when:
+    - nomad_system_changes | bool
+    - ansible_facts.system == 'Darwin'
+
+- name: Uninstall | Remove the service and the configuration this role wrote
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop:
+    - '{{ nomad_unit_path }}'
+    - '{{ nomad_launchd_plist }}'
+    - '{{ nomad_base_config_file }}'
+    - '{{ nomad_box_config_file }}'
+    - '{{ nomad_env_file }}'
+
+- name: Uninstall | Reload systemd without the unit
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  failed_when: false
+  when:
+    - nomad_system_changes | bool
+    - ansible_facts.system == 'Linux'
+
+- name: Uninstall | Report what was kept
+  ansible.builtin.debug:
+    msg:
+      - 'removed: the {{ nomad_service_name }} service ({{ nomad_unit_path if ansible_facts.system == "Linux" else nomad_launchd_plist }})'
+      - 'removed: {{ nomad_base_config_file }}, {{ nomad_box_config_file }}, {{ nomad_env_file }}'
+      - 'kept: {{ nomad_data_dir }} (the node ID and its state), {{ nomad_host_volumes_dir }} (the box disks), and the binary at {{ nomad_binary }}'

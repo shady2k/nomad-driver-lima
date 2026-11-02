@@ -1,0 +1,23 @@
+---
+# Linux prerequisites: systemd, because the role writes a systemd unit. Nothing
+# here changes the node.
+
+- name: Linux | Look for the systemd runtime directory
+  ansible.builtin.stat:
+    path: /run/systemd/system
+  register: nomad_systemd_runtime
+  check_mode: false
+  when: nomad_system_changes | bool
+
+- name: Linux | Require a systemd node
+  ansible.builtin.assert:
+    that:
+      - nomad_systemd_runtime.stat.exists
+    fail_msg: >-
+      /run/systemd/system does not exist, so this node does not run systemd as
+      its service manager. The role starts the Nomad client with a systemd unit.
+      On such a node write the configuration only (nomad_system_changes: false)
+      and start the client yourself with
+      `nomad agent -config {{ nomad_config_dir }}`.
+    quiet: true
+  when: nomad_system_changes | bool

@@ -1,0 +1,19 @@
+---
+# One handler, one restart - a systemd restart on Linux, a launchd kickstart on
+# macOS. It runs when the configuration, the unit, the plist or the plugin
+# binaries changed, and only when the role is allowed to touch the service.
+#
+# A *changed plist* is not a restart: launchd reads a plist when the job is
+# loaded, so the second handler takes the daemon down and loads it again (the
+# boxes are not affected: AbandonProcessGroup).
+- name: Restart the Nomad client
+  ansible.builtin.include_tasks: restart.yml
+  when:
+    - nomad_system_changes | bool
+    - nomad_restart_enabled | bool
+
+- name: Reload the launchd daemon
+  ansible.builtin.include_tasks: reload_launchd.yml
+  when:
+    - nomad_system_changes | bool
+    - nomad_launchd_load | bool

@@ -1,0 +1,45 @@
+---
+# nomad_client: the whole Nomad client configuration of a node.
+#
+# The role installs the pinned binary, renders /etc/nomad.d from variables (JSON,
+# merged by Nomad in file-name order), writes the service that loads it - a
+# systemd unit on Linux, a LaunchDaemon on macOS - validates the result with
+# `nomad config validate`, and restarts the client once, only when something
+# changed.
+#
+# Stages, tagged, so they can be run apart:
+#
+#   --tags preflight   read-only: the binary, the version, the paths, what the
+#                      configuration will contain. Nothing is written.
+#   --tags install     the binary, the configuration, the secrets, the service,
+#                      validate, restart
+#
+# Both run by default, in that order. --check lists every change without making
+# any.
+#
+# The box driver's plugin block (50-box.json) is rendered from the box_node
+# role's variables: both roles run on the same node, box_node first. See
+# deploy/README.md, "The two roles on a node".
+
+- name: Build the configuration from the variables
+  ansible.builtin.import_tasks: config.yml
+  tags: [config, preflight, install]
+
+- name: Preflight
+  ansible.builtin.import_tasks: preflight.yml
+  tags: [preflight, install]
+
+# Check mode does not download anything: get_url would have to write into the
+# staging directory that --check does not create. The preflight report says what
+# would be installed and from where.
+- name: Install the pinned Nomad binary
+  ansible.builtin.import_tasks: install_binary.yml
+  tags: [install]
+  when:
+    - nomad_install_binary | bool
+    - nomad_install_needed | default(true) | bool
+    - not ansible_check_mode
+
+- name: Install the configuration and the service
+  ansible.builtin.import_tasks: install.yml
+  tags: [install]

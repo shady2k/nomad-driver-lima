@@ -1,0 +1,23 @@
+---
+# The coordinator: the box CLI, the box skill, and the environment they read.
+
+# The user that runs the agent and the CLI. The role does not create the user.
+box_coordinator_user: root
+
+# The Nomad API of the cluster. The CLI reads NOMAD_ADDR (and NOMAD_TOKEN,
+# NOMAD_CACERT when the cluster uses ACLs or mTLS) from the environment file the
+# role writes at ~/.config/box/env, mode 0600.
+box_nomad_addr: https://nomad.example:4646
+# box_nomad_token: '{{ vault_nomad_acl_token }}'
+# box_nomad_cacert: /etc/nomad.d/tls/ca.pem
+
+# The base image index the CLI reads (JSON: the versions published for boxes).
+# There is no default: without this, `box create` and `box images` say the index is
+# not configured. Point it at the store you publish images to (images/README.md) or
+# at one you trust.
+box_image_index: 'https://images.example.com/box-base/index.json'
+
+# The CLI lives in the same release layout as the node plugins: the live release
+# through /opt/box/current, and /usr/local/bin/box is a symlink into it.
+# box_release_root: /opt/box
+# box_cli_path: /usr/local/bin/box

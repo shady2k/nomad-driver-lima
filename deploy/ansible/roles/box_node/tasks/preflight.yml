@@ -1,0 +1,157 @@
+---
+# Preflight: read-only. Every probe runs in check mode too (check_mode: false on
+# the commands), so `--check` reports what would be done and why a node cannot
+# take the box driver, without writing anything.
+
+- name: Preflight | Require the role inputs
+  ansible.builtin.assert:
+    that:
+      - box_version | length > 0
+      - box_release_root is match('^/')
+      - box_plugin_dir is match('^/')
+      - box_volume_plugin_dir is match('^/')
+      - box_plugin_dir != box_volume_plugin_dir
+      - box_lima_home is match('^/')
+      - box_image_cache_dir is match('^/')
+      - box_lima_home != box_image_cache_dir
+      - box_memory_overhead_mib | int > 0
+      - box_runtime_user | length > 0
+    fail_msg: >-
+      The role needs box_version (the dist/<version> directory that
+      deploy/build.sh wrote), absolute paths, and box_runtime_user. box_plugin_dir
+      and box_volume_plugin_dir must differ: Nomad runs every executable in
+      host_volume_plugin_dir as a volume plugin. box_runtime_user is the
+      unprivileged user the boxes run as: Lima refuses to run as root, so it has
+      no default.
+    quiet: true
+
+- name: Preflight | Look for the release that deploy/build.sh wrote
+  ansible.builtin.stat:
+    path: '{{ box_dist_dir }}/SHA256SUMS'
+  delegate_to: localhost
+  become: false
+  register: box_sums_file
+  check_mode: false
+
+- name: Preflight | Read the release checksums
+  ansible.builtin.slurp:
+    src: '{{ box_dist_dir }}/SHA256SUMS'
+  delegate_to: localhost
+  become: false
+  register: box_sums_raw
+  check_mode: false
+  when: box_sums_file.stat.exists
+
+- name: Preflight | Read the checksum of the artifacts this node needs
+  ansible.builtin.set_fact:
+    box_driver_sha256: >-
+      {{ (box_sums_raw.content | default('') | b64decode | default('', true))
+         | regex_findall('(?m)^([0-9a-f]{64})[ ]+' ~ (box_driver_artifact | regex_escape) ~ '$')
+         | first | default('') }}
+    box_volume_sha256: >-
+      {{ (box_sums_raw.content | default('') | b64decode | default('', true))
+         | regex_findall('(?m)^([0-9a-f]{64})[ ]+' ~ (box_volume_artifact | regex_escape) ~ '$')
+         | first | default('') }}
+
+- name: Preflight | Require a complete release for this node
+  ansible.builtin.assert:
+    that:
+      - box_sums_file.stat.exists
+      - box_driver_sha256 | length == 64
+      - box_volume_sha256 | length == 64
+    fail_msg: >-
+      {{ box_dist_dir }} does not hold a complete release for {{ box_os }}/{{ box_arch }}:
+      run deploy/build.sh --version {{ box_version }} on this machine, or point
+      box_dist_dir at the directory it wrote (it must contain SHA256SUMS and the
+      {{ box_driver_artifact }} and {{ box_volume_artifact }} artifacts).
+    quiet: true
+
+- name: Preflight | Read the local user database for the runtime user
+  ansible.builtin.getent:
+    database: passwd
+    key: '{{ box_runtime_user }}'
+  check_mode: false
+
+- name: Preflight | Require a runtime user that exists and is not root
+  ansible.builtin.assert:
+    that:
+      - box_runtime_user in ansible_facts.getent_passwd
+      - ansible_facts.getent_passwd[box_runtime_user][1] | int > 0
+    fail_msg: >-
+      box_runtime_user is "{{ box_runtime_user }}", which is not an existing
+      unprivileged local user. Lima refuses to run as root, so the boxes run as an
+      existing unprivileged account: set box_runtime_user to that user (for
+      example "dev"). The role does not create users.
+    quiet: true
+
+- name: Preflight | Read the local group database
+  ansible.builtin.getent:
+    database: group
+    split: ':'
+  check_mode: false
+
+- name: Preflight | Remember the runtime user's uid, home and group
+  ansible.builtin.set_fact:
+    # getent_passwd is [password, uid, gid, gecos, home, shell]: the home is 4.
+    box_runtime_uid: '{{ ansible_facts.getent_passwd[box_runtime_user][1] }}'
+    box_runtime_gid: '{{ ansible_facts.getent_passwd[box_runtime_user][2] }}'
+    box_runtime_home: '{{ ansible_facts.getent_passwd[box_runtime_user][4] }}'
+    box_runtime_group: >-
+      {{ (ansible_facts.getent_group | default({}) | dict2items
+          | selectattr('value.1', 'equalto', ansible_facts.getent_passwd[box_runtime_user][2])
+          | map(attribute='key') | list | first) | default(box_runtime_user, true) }}
+
+- name: Preflight | Check the prerequisites of this operating system
+  ansible.builtin.include_tasks: 'preflight_{{ box_os }}.yml'
+
+- name: Preflight | Measure the free space under the paths the boxes use
+  ansible.builtin.command:
+    argv: ['df', '-m', '--output=avail', '{{ item }}']
+  loop: >-
+    {{ ([box_lima_home, box_lima_home | dirname, box_image_cache_dir,
+         box_image_cache_dir | dirname, box_release_root | dirname, '/'])
+        | unique }}
+  register: box_df
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: box_os == 'linux'
+
+- name: Preflight | Remember the smallest free space of those filesystems
+  ansible.builtin.set_fact:
+    box_free_mib: >-
+      {{ (box_df.results | default([]) | selectattr('rc', 'defined')
+          | selectattr('rc', 'equalto', 0)
+          | map(attribute='stdout_lines') | map('last') | map('int') | list
+          | default([-1], true) | min) if box_os == 'linux' else -1 }}
+
+- name: Preflight | Require room for the boxes on this node
+  ansible.builtin.assert:
+    that:
+      - box_free_mib | int < 0 or box_free_mib | int >= box_disk_free_floor_mib | int
+    fail_msg: >-
+      {{ box_free_mib }} MiB are free on the filesystem that holds
+      {{ box_lima_home }}, below box_disk_free_floor_mib ({{ box_disk_free_floor_mib }}).
+      Every box disk lives on a Nomad volume of this node; free space first.
+    quiet: true
+
+- name: Preflight | Warn when free space is low
+  ansible.builtin.debug:
+    msg: >-
+      Only {{ box_free_mib }} MiB are free under {{ box_lima_home }}; keep at least
+      {{ box_disk_free_warn_mib }} MiB free for box disks and the image cache.
+  when:
+    - box_free_mib | int >= 0
+    - box_free_mib | int < box_disk_free_warn_mib | int
+
+- name: Preflight | Report what was checked
+  ansible.builtin.debug:
+    msg:
+      - 'node {{ inventory_hostname }} ({{ ansible_facts.system }} {{ ansible_facts.architecture }}): release {{ box_version }} from {{ box_dist_dir }}'
+      - 'release {{ box_release_dir }}, live through {{ box_current_link }}'
+      - 'plugin_dir {{ box_plugin_dir }}, host_volume_plugin_dir {{ box_volume_plugin_dir }}'
+      - 'lima {{ box_lima_semver | default("n/a") }} at {{ box_limactl }}{{ (", qemu " ~ box_qemu_path) if box_qemu_path | default("") | length > 0 else "" }}'
+      - 'lima_home {{ box_lima_home }}, image cache {{ box_image_cache_dir }}, {{ box_free_mib }} MiB free'
+      - 'boxes run as {{ box_runtime_user }} (uid {{ box_runtime_uid }}, group {{ box_runtime_group }}, home {{ box_runtime_home }})'
+      - 'the driver gets runtime_user = {{ box_runtime_user }}, and so does {{ box_volume_config_file }}'
+      - 'client configuration and service: written by the nomad_client role of this play'

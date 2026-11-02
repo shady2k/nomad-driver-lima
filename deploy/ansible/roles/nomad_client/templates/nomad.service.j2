@@ -1,0 +1,45 @@
+# Managed by deploy/ansible/roles/nomad_client (Ansible). Do not edit on the node:
+# change the role variables and run the play again.
+#
+# The Nomad client of a box node. It loads {{ nomad_config_dir }}, which the role
+# renders from its variables: {{ nomad_base_config_file }}
+{% if nomad_box_enabled | bool %}(the client) and {{ nomad_box_config_file }} (the box driver){% endif %}.
+[Unit]
+Description=Nomad client ({{ nomad_node_name }})
+Documentation=https://developer.hashicorp.com/nomad/docs/configuration
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+ExecStart={{ nomad_agent_argv | join(' ') }}
+ExecReload=/bin/kill -HUP $MAINPID
+
+# The secrets: the tokens of this node, mode 0600, root only. The leading '-' makes
+# the file optional, so a node without tokens still starts.
+EnvironmentFile=-{{ nomad_env_file }}
+
+# A restart of the client must not kill the boxes it runs. KillMode=process signals
+# only the nomad process: the driver plugin, the lima hostagents and the qemu
+# processes stay alive, and Nomad re-attaches to them when it starts again.
+KillMode={{ nomad_kill_mode }}
+KillSignal=SIGINT
+TimeoutStopSec={{ nomad_stop_timeout }}
+{% if nomad_box_enabled | bool and nomad_box_cgroup_enabled | bool and nomad_box_runtime_uid | default('') | length > 0 %}
+# The memory cap of a box is a transient *user* systemd scope (memory.max = guest
+# memory + {{ nomad_box_memory_overhead_mib }} MiB, memory.swap.max = 0). A system
+# service has no login session, so it has to be told where the user manager of
+# {{ nomad_box_runtime_user }} (uid {{ nomad_box_runtime_uid }}) lives.
+Environment=XDG_RUNTIME_DIR=/run/user/{{ nomad_box_runtime_uid }}
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{{ nomad_box_runtime_uid }}/bus
+{% endif %}
+# Nomad manages the cgroups of its allocations itself.
+Delegate=yes
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+TasksMax=infinity
+OOMScoreAdjust=-1000
+
+[Install]
+WantedBy=multi-user.target

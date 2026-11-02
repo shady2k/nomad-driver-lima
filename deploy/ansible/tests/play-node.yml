@@ -1,0 +1,19 @@
+---
+# The node roles against the machine that runs Ansible, into a throwaway prefix.
+#
+# This is the check `tests/run-tests.sh` runs: the same two roles site.yml uses, on
+# one local host, with nomad_system_changes: false so no service is touched. It
+# proves the rendered configuration is valid JSON that `nomad config validate`
+# accepts, that the release and the `current` symlink are in place, that the unit,
+# the secrets file, the volume settings file and the launchd plist are written the
+# way they should be, and that a second run changes nothing.
+#
+#   NOMAD_TEST_PREFIX=/tmp/x ansible-playbook -i tests/inventory.test.ini \
+#     tests/play-node.yml -e @tests/vars-test.yml
+- name: The node roles, into a throwaway prefix
+  hosts: box_nodes
+  become: false
+  gather_facts: true
+  roles:
+    - role: box_node
+    - role: nomad_client

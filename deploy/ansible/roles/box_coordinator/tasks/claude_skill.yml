@@ -1,0 +1,243 @@
+---
+# Give the box skill to Claude Code, or take it back off the host.
+#
+#   - name: Install the skill for Claude Code
+#     ansible.builtin.include_tasks: claude_skill.yml
+#     vars:
+#       box_claude_skill_state: present        # or absent
+#
+# The skill is one file, claude-plugin/skills/box/SKILL.md, and Claude Code gets it
+# one of two ways (box_claude_skill_mode):
+#
+#   plugin - the Claude Code plugin of this repository (the default): add the
+#            marketplace of the repository, install box@<marketplace>, and let
+#            Claude Code own the copy, its version and its removal. Every step is
+#            skipped when Claude Code already has it, so a second run changes
+#            nothing.
+#   copy   - copy SKILL.md into box_claude_skill_dir, for a Claude Code that
+#            cannot add a marketplace.
+#
+# The two modes are exclusive: switching the variable takes the other one off, so
+# the skill never exists twice on the host.
+
+- name: Claude | Require a known way to install the skill
+  ansible.builtin.assert:
+    that:
+      - box_claude_skill_mode in ['plugin', 'copy']
+      - box_claude_skill_state in ['present', 'absent']
+    fail_msg: >-
+      box_claude_skill_mode is "{{ box_claude_skill_mode }}" and
+      box_claude_skill_state is "{{ box_claude_skill_state }}". Use plugin (the
+      default: the Claude Code plugin of this repository) or copy (SKILL.md in
+      {{ box_claude_skill_dir }}), and present or absent.
+    quiet: true
+
+- name: Claude | Remember the environment the Claude Code CLI reads
+  ansible.builtin.set_fact:
+    box_claude_env: >-
+      {{ ({'HOME': box_coordinator_home}
+          | combine({'CLAUDE_CONFIG_DIR': box_claude_config_dir}
+                    if box_claude_config_dir | length > 0 else {}))
+         | to_json | from_json }}
+
+# ------------------------------------------------------------------ the copy mode
+- name: Claude | Create the skills directory of Claude Code
+  ansible.builtin.file:
+    path: '{{ box_claude_skill_dir }}/box'
+    state: directory
+    owner: '{{ box_coordinator_user }}'
+    group: '{{ box_coordinator_group }}'
+    mode: '0755'
+  when:
+    - box_claude_skill_mode == 'copy'
+    - box_claude_skill_state == 'present'
+
+- name: Claude | Copy the skill for Claude Code
+  ansible.builtin.copy:
+    src: '{{ box_skill_src }}/SKILL.md'
+    dest: '{{ box_claude_skill_dir }}/box/SKILL.md'
+    owner: '{{ box_coordinator_user }}'
+    group: '{{ box_coordinator_group }}'
+    mode: '0644'
+  when:
+    - box_claude_skill_mode == 'copy'
+    - box_claude_skill_state == 'present'
+
+# ---------------------------------------------------------------- the plugin mode
+# Everything below asks the CLI first and acts on the answer: Claude Code keeps
+# its own state, and this role never writes it.
+- name: Claude | Look for the plugin of this repository
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  register: box_claude_files
+  loop:
+    - '{{ box_claude_plugin_dir }}/.claude-plugin/plugin.json'
+    - '{{ box_claude_marketplace_dir }}/.claude-plugin/marketplace.json'
+  loop_control:
+    label: '{{ item }}'
+  when:
+    - box_claude_skill_mode == 'plugin'
+    - box_claude_skill_state == 'present'
+
+- name: Claude | Require the plugin and the marketplace of this repository
+  ansible.builtin.assert:
+    that:
+      - box_claude_files.results | default([]) | selectattr('stat.exists') | list | length == 2
+    fail_msg: >-
+      The Claude Code plugin of this repository is not where this role expects it:
+      {{ box_claude_plugin_dir }}/.claude-plugin/plugin.json and
+      {{ box_claude_marketplace_dir }}/.claude-plugin/marketplace.json. Run the
+      role from a checkout of the repository, or set box_claude_skill_mode=copy to
+      install SKILL.md as a file.
+    quiet: true
+  when:
+    - box_claude_skill_mode == 'plugin'
+    - box_claude_skill_state == 'present'
+
+- name: Claude | Look for the Claude Code CLI
+  ansible.builtin.command: '{{ box_claude_cli }} --version'
+  register: box_claude_version
+  changed_when: false
+  failed_when: false
+  environment: '{{ box_claude_env }}'
+  become: '{{ box_coordinator_user != (ansible_facts.user_id | default("")) }}'
+  become_user: '{{ box_coordinator_user }}'
+  when: not ansible_check_mode
+
+- name: Claude | Require a working Claude Code CLI for the plugin mode
+  ansible.builtin.assert:
+    that:
+      - box_claude_version.rc | default(1) == 0
+    fail_msg: >-
+      box_claude_skill_mode is plugin and {{ box_claude_cli }} is not a working
+      Claude Code CLI on this host ({{ box_claude_version.stderr | default('not found') | trim }}).
+      Install it, point box_claude_cli at it, or set box_claude_skill_mode=copy to
+      install the skill as a file.
+    quiet: true
+  when:
+    - box_claude_skill_mode == 'plugin'
+    - box_claude_skill_state == 'present'
+    - not ansible_check_mode
+
+- name: Claude | Read the marketplaces Claude Code knows
+  ansible.builtin.command: '{{ box_claude_cli }} plugin marketplace list --json'
+  register: box_claude_marketplaces
+  changed_when: false
+  failed_when: false
+  environment: '{{ box_claude_env }}'
+  become: '{{ box_coordinator_user != (ansible_facts.user_id | default("")) }}'
+  become_user: '{{ box_coordinator_user }}'
+  when:
+    - not ansible_check_mode
+    - box_claude_version.rc | default(1) == 0
+
+- name: Claude | Remember which marketplaces Claude Code has
+  ansible.builtin.set_fact:
+    box_claude_marketplace_names: >-
+      {{ ((box_claude_marketplaces.stdout | default('', true) | trim) or '[]')
+         | from_json | map(attribute='name') | list }}
+  when:
+    - box_claude_marketplaces is not skipped
+    - box_claude_marketplaces.rc | default(1) == 0
+
+- name: Claude | Read the plugins Claude Code has
+  ansible.builtin.command: '{{ box_claude_cli }} plugin list --json'
+  register: box_claude_plugins
+  changed_when: false
+  failed_when: false
+  environment: '{{ box_claude_env }}'
+  become: '{{ box_coordinator_user != (ansible_facts.user_id | default("")) }}'
+  become_user: '{{ box_coordinator_user }}'
+  when:
+    - not ansible_check_mode
+    - box_claude_version.rc | default(1) == 0
+
+- name: Claude | Remember which plugins Claude Code has
+  ansible.builtin.set_fact:
+    box_claude_plugin_ids: >-
+      {{ ((box_claude_plugins.stdout | default('', true) | trim) or '[]')
+         | from_json | map(attribute='id') | list }}
+  when:
+    - box_claude_plugins is not skipped
+    - box_claude_plugins.rc | default(1) == 0
+
+- name: Claude | Add the marketplace of this repository
+  ansible.builtin.command: >-
+    {{ box_claude_cli }} plugin marketplace add
+    {{ box_claude_marketplace_dir }} --json
+  register: box_claude_marketplace_added
+  changed_when: box_claude_marketplace_added.rc == 0
+  environment: '{{ box_claude_env }}'
+  become: '{{ box_coordinator_user != (ansible_facts.user_id | default("")) }}'
+  become_user: '{{ box_coordinator_user }}'
+  when:
+    - box_claude_skill_mode == 'plugin'
+    - box_claude_skill_state == 'present'
+    - not ansible_check_mode
+    - box_claude_marketplace_name not in box_claude_marketplace_names
+
+- name: Claude | Install the box plugin
+  ansible.builtin.command: >-
+    {{ box_claude_cli }} plugin install {{ box_claude_plugin_id }} --json -y
+  register: box_claude_plugin_installed
+  changed_when: box_claude_plugin_installed.rc == 0
+  environment: '{{ box_claude_env }}'
+  become: '{{ box_coordinator_user != (ansible_facts.user_id | default("")) }}'
+  become_user: '{{ box_coordinator_user }}'
+  when:
+    - box_claude_skill_mode == 'plugin'
+    - box_claude_skill_state == 'present'
+    - not ansible_check_mode
+    - box_claude_plugin_id not in box_claude_plugin_ids
+
+- name: Claude | Remove a copied skill once the plugin carries it
+  ansible.builtin.file:
+    path: '{{ box_claude_skill_dir }}/box'
+    state: absent
+  when:
+    - box_claude_skill_mode == 'plugin'
+    - box_claude_skill_state == 'present'
+
+# ------------------------------------------------------------------ the way back
+- name: Claude | Uninstall the box plugin
+  ansible.builtin.command: >-
+    {{ box_claude_cli }} plugin uninstall {{ box_claude_plugin_id }} --json -y
+  register: box_claude_plugin_removed
+  changed_when: box_claude_plugin_removed.rc == 0
+  environment: '{{ box_claude_env }}'
+  become: '{{ box_coordinator_user != (ansible_facts.user_id | default("")) }}'
+  become_user: '{{ box_coordinator_user }}'
+  when:
+    - box_claude_skill_state == 'absent' or box_claude_skill_mode == 'copy'
+    - not ansible_check_mode
+    - box_claude_plugin_id in box_claude_plugin_ids
+
+- name: Claude | Remove the marketplace of this repository
+  ansible.builtin.command: >-
+    {{ box_claude_cli }} plugin marketplace remove
+    {{ box_claude_marketplace_name }} --json
+  register: box_claude_marketplace_removed
+  changed_when: box_claude_marketplace_removed.rc == 0
+  environment: '{{ box_claude_env }}'
+  become: '{{ box_coordinator_user != (ansible_facts.user_id | default("")) }}'
+  become_user: '{{ box_coordinator_user }}'
+  when:
+    - box_claude_skill_state == 'absent' or box_claude_skill_mode == 'copy'
+    - not ansible_check_mode
+    - box_claude_marketplace_name in box_claude_marketplace_names
+
+- name: Claude | Remove the copied skill of Claude Code
+  ansible.builtin.file:
+    path: '{{ box_claude_skill_dir }}/box'
+    state: absent
+  when: box_claude_skill_state == 'absent'
+
+- name: Claude | Report what Claude Code has
+  ansible.builtin.debug:
+    msg: >-
+      {{ ('mode ' ~ box_claude_skill_mode ~ ', ' ~ box_claude_skill_state ~ ': '
+          ~ (box_claude_plugin_id ~ ' installed from ' ~ box_claude_marketplace_dir
+             if box_claude_skill_mode == 'plugin' and box_claude_skill_state == 'present'
+             else box_claude_skill_dir ~ '/box/SKILL.md'
+             if box_claude_skill_mode == 'copy' and box_claude_skill_state == 'present'
+             else 'the box plugin, its marketplace and the copied skill are gone')) }}

@@ -1,0 +1,85 @@
+---
+# Roll the box plugins of this node back (or forward) to a release that is already
+# on the node.
+#
+#   deploy/ansible/rollback.yml -e box_version=<the release to go back to>
+#
+# This is the whole of a rollback: the releases are directories, the client
+# configuration names them through {{ box_current_link }}, so one symlink and one
+# restart of the client is the switch. What a rollback must never touch:
+#
+#   * the Nomad client configuration (the nomad_client role does not run here),
+#   * the client's data_dir (the node ID lives in it),
+#   * the Lima home, the image cache and every volume directory (the boxes),
+#   * {{ box_volume_config_file }} (the node's settings, not the release's).
+#
+# Nothing here deletes a release: `rm -rf {{ box_releases_dir }}/<version>` once
+# that version is of no use.
+
+- name: Rollback | Require a release to switch to
+  ansible.builtin.assert:
+    that:
+      - box_version | length > 0
+      - box_releases_dir is match('^/')
+    fail_msg: >-
+      The rollback needs box_version: the release to go back to. List what is on
+      the node with `ls {{ box_releases_dir }}` and pass one of those (for example
+      -e box_version=0.1.0).
+    quiet: true
+
+- name: Rollback | List the releases on this node
+  ansible.builtin.find:
+    paths: '{{ box_releases_dir }}'
+    file_type: directory
+    recurse: false
+  register: box_installed_releases
+  check_mode: false
+
+- name: Rollback | Require the release to be on the node
+  ansible.builtin.assert:
+    that:
+      - box_release_dir in (box_installed_releases.files | map(attribute='path') | list)
+    fail_msg: >-
+      {{ box_release_dir }} is not on this node. A rollback switches between
+      releases that are already installed; the ones here are
+      {{ box_installed_releases.files | map(attribute='path') | map('basename') | list | join(', ') if box_installed_releases.files | length > 0 else 'none' }}.
+      To install {{ box_version }} first, run site.yml with box_version={{ box_version }}.
+    quiet: true
+
+- name: Rollback | Read the plugins of that release
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop:
+    - '{{ box_release_dir }}/plugins/box'
+    - '{{ box_release_dir }}/host_volume_plugins/box-volume'
+  register: box_rollback_plugins
+
+- name: Rollback | Require a complete release directory
+  ansible.builtin.assert:
+    that:
+      - box_rollback_plugins.results | selectattr('stat.executable', 'defined') | list | length == 2
+      - box_rollback_plugins.results | rejectattr('stat.exists') | list | length == 0
+    fail_msg: >-
+      {{ box_release_dir }} is incomplete: it must hold plugins/box and
+      host_volume_plugins/box-volume. Nothing was changed.
+    quiet: true
+
+# The configuration names {{ box_current_link }}/plugins and
+# {{ box_current_link }}/host_volume_plugins, so the paths the client loads do
+# not change: only the binary behind them does.
+- name: Rollback | Point the live path at the release
+  ansible.builtin.file:
+    src: '{{ box_release_dir }}'
+    dest: '{{ box_current_link }}'
+    state: link
+    force: true
+    follow: false
+  register: box_rollback_link
+
+- name: Rollback | Report what stays as it is
+  ansible.builtin.debug:
+    msg:
+      - '{{ box_current_link }} now points at {{ box_release_dir }} ({{ "changed" if box_rollback_link.changed else "already there" }})'
+      - 'the client configuration is untouched: it loads {{ box_plugin_dir }}/box and {{ box_volume_plugin_dir }}/box-volume through the symlink'
+      - 'untouched on purpose: {{ box_volume_config_file }}, the Lima home {{ box_lima_home }}, the volumes and the client data directory'
+      - 'the client needs one restart to load the plugins of {{ box_version }}: the nomad_client role of this play restarts it'

@@ -1,18 +1,19 @@
-module nomad-driver-lima
+module github.com/shady2k/nomad-driver-lima
 
 go 1.26.7
 
 require (
 	github.com/hashicorp/go-hclog v1.6.3
-	github.com/hashicorp/go-plugin v1.8.0
 	github.com/hashicorp/nomad v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec
+	github.com/hashicorp/nomad/api v0.0.0-20260814142628-f3fe893c53d2
+	github.com/stretchr/testify v1.12.1
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/term v0.46.0
 )
 
 require (
-	github.com/stretchr/testify v1.12.1 // indirect
-	go.etcd.io/bbolt v1.5.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
+	github.com/hashicorp/go-plugin v1.8.0 // indirect
 )
 
 require (
@@ -69,7 +70,7 @@ require (
 	github.com/hashicorp/golang-lru v1.0.2 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/hashicorp/hcl v1.0.1-vault-7 // indirect
-	github.com/hashicorp/hcl/v2 v2.20.2-nomad-1
+	github.com/hashicorp/hcl/v2 v2.20.2-nomad-1 // indirect
 	github.com/hashicorp/memberlist v0.7.0 // indirect
 	github.com/hashicorp/raft v1.8.0 // indirect
 	github.com/hashicorp/raft-autopilot v0.1.6 // indirect
@@ -101,7 +102,7 @@ require (
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/sean-/seed v0.0.0-20170313163322-e2103e2c3529 // indirect
-	github.com/shirou/gopsutil/v3 v3.24.5
+	github.com/shirou/gopsutil/v3 v3.24.5 // indirect
 	github.com/shoenig/go-landlock v1.3.1 // indirect
 	github.com/shoenig/go-m1cpu v0.2.2 // indirect
 	github.com/shoenig/test v1.13.2 // indirect
@@ -118,7 +119,7 @@ require (
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	golang.org/x/tools v0.50.0 // indirect

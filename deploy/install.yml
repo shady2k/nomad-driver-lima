@@ -1,8 +1,0 @@
----
-- name: Stage official Nomad Lima driver without restarting agents
-  hosts: lima_canary
-  serial: 1
-  gather_facts: false
-  become: true
-  roles:
-    - lima

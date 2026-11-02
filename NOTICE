@@ -8,5 +8,6 @@ The Apache-2.0 project license does not replace or expand the rights granted by
 those licenses. In particular, the compiled driver uses Nomad components with
 BUSL-1.1 and MPL-2.0 source scopes.
 
-See THIRD_PARTY.md and the release's third-party-notices archive for exact
-versions, original license texts, and corresponding dependency source locations.
+See the release's third-party-notices archive for exact versions, original
+license texts and corresponding dependency source locations. The versions the
+binaries are built from are pinned in go.mod and go.sum.

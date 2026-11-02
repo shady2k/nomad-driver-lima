@@ -1,0 +1,57 @@
+---
+# Remove the box CLI and the box skill from this host.
+#
+#   deploy/ansible/uninstall.yml -e box_uninstall_confirm=true
+#
+# Kept on purpose: the environment file {{ box_env_file }} (it holds the Nomad
+# token of this host, which is not the CLI's) and the Nomad cluster itself.
+
+# The home directory of the coordinator user comes from the local user database:
+# the role's own task file reads it, and so must a play that only runs this file.
+- name: Coordinator | Read the local user database for the coordinator user
+  ansible.builtin.getent:
+    database: passwd
+    key: '{{ box_coordinator_user }}'
+  check_mode: false
+
+- name: Uninstall | Require an explicit confirmation
+  ansible.builtin.assert:
+    that:
+      - box_uninstall_confirm | default(false) | bool
+    fail_msg: >-
+      This play removes the box CLI from this host. Pass
+      -e box_uninstall_confirm=true to do it. The environment file is kept either
+      way.
+    quiet: true
+
+- name: Uninstall | Remove the CLI and the releases
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: absent
+  loop:
+    - '{{ box_cli_path }}'
+    - '{{ box_current_link }}'
+    - '{{ box_release_root }}'
+
+- name: Uninstall | Remove the skill of the Prime Agent
+  ansible.builtin.file:
+    path: '{{ item }}/box'
+    state: absent
+  loop: '{{ box_skill_dirs }}'
+
+# The Claude Code half: the plugin and the marketplace this repository added, and a
+# copied skill if the host has one. claude_skill.yml asks Claude Code first, so a
+# host that never had the plugin is left alone.
+- name: Uninstall | Take the skill off Claude Code
+  ansible.builtin.include_tasks: claude_skill.yml
+  vars:
+    box_claude_skill_state: absent
+
+- name: Uninstall | Report what was removed and kept
+  ansible.builtin.debug:
+    msg:
+      - >-
+        removed: {{ box_cli_path }}, {{ box_release_root }} (every release),
+        {{ box_skill_dirs | map("regex_replace", "$", "/box") | join(", ") }}, and
+        the box skill in Claude Code
+      - 'kept: {{ box_env_file }} (the Nomad address and token of this host), the cluster and every box in it'

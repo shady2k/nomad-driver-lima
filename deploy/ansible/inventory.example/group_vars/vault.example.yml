@@ -1,0 +1,29 @@
+---
+# The secrets of the rollout. Nothing in this file is committed with a value: it is
+# the list of names the roles read, and the two ways to give them one.
+#
+# 1. ansible-vault (one encrypted file, copied to inventory/group_vars/all/vault.yml
+#    and never committed):
+#
+#      ansible-vault create inventory/group_vars/all/vault.yml
+#        vault_nomad_acl_token: '...'
+#        vault_nomad_client_intro_token: '...'
+#        vault_nomad_management_token: '...'
+#
+#      ansible-playbook -i inventory site.yml --ask-vault-pass
+#
+# 2. The environment (no file at all):
+#
+#      export NOMAD_ACL_TOKEN=...
+#
+#    and in the group_vars:
+#
+#      nomad_acl_token: '{{ lookup("env", "NOMAD_ACL_TOKEN") }}'
+#
+# The roles never print a token: nomad.env and the launchd plist are written with
+# no_log, mode 0600.
+vault_nomad_acl_token: 'REPLACE_WITH_A_NOMAD_ACL_TOKEN'
+vault_nomad_client_intro_token: 'REPLACE_WITH_A_CLIENT_INTRO_TOKEN'
+# The management token of deploy/ansible/acl.yml: a cluster-wide secret that no
+# node and no coordinator gets.
+vault_nomad_management_token: 'REPLACE_WITH_A_NOMAD_MANAGEMENT_TOKEN'

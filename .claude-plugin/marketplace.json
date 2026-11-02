@@ -1,0 +1,19 @@
+{
+  "name": "nomad-driver-lima",
+  "owner": {
+    "name": "shady2k",
+    "url": "https://github.com/shady2k"
+  },
+  "metadata": {
+    "description": "The box Nomad task driver: the box CLI and the skill an agent uses to run work in a box.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "box",
+      "source": "./claude-plugin",
+      "description": "Run work in a box: a Linux VM on a Nomad cluster, driven by the box CLI.",
+      "category": "development"
+    }
+  ]
+}

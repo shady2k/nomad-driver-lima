@@ -1,1395 +1,817 @@
+// Package driver implements the Nomad task driver "box": one Lima VM per task,
+// with the VM disk on a Nomad dynamic host volume so that the scheduler pins the
+// box to the node that holds the disk.
 package driver
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	log "github.com/hashicorp/go-hclog"
+	"os/exec"
+	"runtime"
+	"sort"
+	"strconv"
+	"sync"
+	"time"
+
+	hclog "github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/nomad/client/lib/cpustats"
+	"github.com/hashicorp/nomad/drivers/shared/eventer"
 	"github.com/hashicorp/nomad/plugins/base"
 	"github.com/hashicorp/nomad/plugins/drivers"
 	"github.com/hashicorp/nomad/plugins/drivers/fsisolation"
 	"github.com/hashicorp/nomad/plugins/shared/hclspec"
-	pstructs "github.com/hashicorp/nomad/plugins/shared/structs"
-	"io"
-	"nomad-driver-lima/internal/catalog"
-	"nomad-driver-lima/internal/lima"
-	"nomad-driver-lima/internal/repositories"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"regexp"
-	"runtime"
-	"strings"
-	"sync"
-	"time"
+	"github.com/hashicorp/nomad/plugins/shared/structs"
+
+	"github.com/shady2k/nomad-driver-lima/internal/box"
+	"github.com/shady2k/nomad-driver-lima/internal/limactl"
+	"github.com/shady2k/nomad-driver-lima/internal/version"
 )
 
-const Version = "0.1.0-prototype"
+const (
+	// pluginName is the registered name of the task driver.
+	pluginName = "box"
 
-type Config struct {
-	PrivateCopiesFile        string `codec:"private_copies_file"`
-	PrivateCopiesSHA256      string `codec:"private_copies_sha256"`
-	RepositoryProfilesFile   string `codec:"repository_profiles_file"`
-	RepositoryProfilesSHA256 string `codec:"repository_profiles_sha256"`
-	VaultAddress             string `codec:"vault_address"`
-	CatalogFile              string `codec:"catalog_file"`
-	CatalogSHA256            string `codec:"catalog_sha256"`
-	MaxVMs                   int    `codec:"max_vms"`
-	MaxTotalCPUs             int    `codec:"max_total_vcpus"`
-	MaxTotalMemoryMiB        int    `codec:"max_total_memory_mib"`
-	MaxTotalDiskGiB          int    `codec:"max_total_disk_gib"`
-	MaxGuestCPUs             int    `codec:"max_guest_vcpus"`
-	MaxGuestMemoryMiB        int    `codec:"max_guest_memory_mib"`
-	MaxGuestDiskGiB          int    `codec:"max_guest_disk_gib"`
-	LimaBinary               string `codec:"limactl"`
-	LimaHome                 string `codec:"lima_home"`
-	StateDir                 string `codec:"state_dir"`
-	TemplateFile             string `codec:"template_file"`
-	TemplateSHA256           string `codec:"template_sha256"`
-	ExpectedVersion          string `codec:"expected_version"`
-	MemoryOverheadMiB        int    `codec:"memory_overhead_mib"`
-	DiskFreeFloorMiB         int    `codec:"disk_free_floor_mib"`
-	RuntimeUser              string `codec:"runtime_user"`
-}
-type TaskConfig struct {
-	PrivateCopyID              string   `codec:"private_copy_id" json:"PrivateCopyID,omitempty"`
-	PrivateCopyOwnerGeneration string   `codec:"private_copy_owner_generation" json:"PrivateCopyOwnerGeneration,omitempty"`
-	ResumeFromKey              string   `codec:"resume_from_key" json:"ResumeFromKey,omitempty"`
-	ResumeGeneration           int      `codec:"resume_generation" json:"ResumeGeneration,omitempty"`
-	ResumeNodeID               string   `codec:"resume_node_id" json:"ResumeNodeID,omitempty"`
-	RepositoryProfileID        string   `codec:"repository_profile" json:"RepositoryProfileID,omitempty"`
-	RepositoryProfileSHA256    string   `codec:"repository_profile_sha256" json:"RepositoryProfileSHA256,omitempty"`
-	VaultRequired              bool     `codec:"vault_required"`
-	WorkerSessionID            string   `codec:"worker_session_id"`
-	TemplateID                 string   `codec:"template_id"`
-	TemplateVersion            string   `codec:"template_version"`
-	TemplateDiskSHA256         string   `codec:"template_disk_sha256"`
-	TemplateCatalogSHA256      string   `codec:"template_catalog_sha256"`
-	TemplateVariantsJSON       string   `codec:"template_variants_json"`
-	CreatorAgentID             string   `codec:"creator_agent_id"`
-	CreatorSessionID           string   `codec:"creator_session_id"`
-	Project                    string   `codec:"project"`
-	Purpose                    string   `codec:"purpose"`
-	TaskLink                   string   `codec:"task_link"`
-	Command                    []string `codec:"command"`
-	CPUs                       int      `codec:"guest_cpus"`
-	MemoryMiB                  int      `codec:"memory_mib"`
-	DiskGiB                    int      `codec:"disk_gib"`
-	Architecture               string   `codec:"architecture"`
-	GuestOS                    string   `codec:"guest_os"`
-	resolvedYAMLSHA256         string
-	resolvedVMType             string
-}
-type task struct {
-	operationCtx     context.Context
-	cancelOperations context.CancelFunc
-	vaultMu          sync.Mutex
-	vaultStopped     bool
-	vaultHash        string
-	lifecycleBuffer  []byte
-	reportSignature  string
-	mu               sync.Mutex
-	state            *State
-	cfg              *drivers.TaskConfig
-	done             chan struct{}
-	once             sync.Once
-	lock             *os.File
-	out, err         io.WriteCloser
-	lastErr          error
-}
+	// fingerprintPeriod is how often the driver reports node attributes.
+	fingerprintPeriod = 30 * time.Second
+
+	// orphanGrace is how long a Lima instance may exist without a task before
+	// the driver reports it as an orphan.
+	orphanGrace = 10 * time.Minute
+
+	// taskHandleVersion is the version of the persisted task handle.
+	taskHandleVersion = 1
+
+	// watchInterval is how often the driver checks whether the VM stopped.
+	watchInterval = 2 * time.Second
+
+	// limaVersionTTL caches `limactl --version` for the fingerprint.
+	limaVersionTTL = 5 * time.Minute
+)
+
+var (
+	// pluginInfo describes the plugin to the Nomad client.
+	pluginInfo = &base.PluginInfoResponse{
+		Type:              base.PluginTypeDriver,
+		PluginApiVersions: []string{drivers.ApiVersion010},
+		PluginVersion:     version.Version,
+		Name:              pluginName,
+	}
+
+	// driverCapabilities tells Nomad what this driver can do. MountConfigs must
+	// be supported: the box disk arrives as a mount configuration.
+	driverCapabilities = &drivers.Capabilities{
+		SendSignals: false,
+		Exec:        true,
+		FSIsolation: fsisolation.None,
+		NetIsolationModes: []drivers.NetIsolationMode{
+			drivers.NetIsolationModeHost,
+		},
+		MountConfigs: drivers.MountConfigSupportAll,
+	}
+)
+
+// Driver is the "box" task driver.
 type Driver struct {
-	runtimeIdentity *runtimeIdentity
-	reconcileOnce   sync.Once
-	configMu        sync.RWMutex
-	configInput     *Config
-	eventMu         sync.Mutex
-	eventHistory    []*drivers.TaskEvent
-	subscribers     map[chan *drivers.TaskEvent]bool
-	ctx             context.Context
-	cancel          context.CancelFunc
-	logger          log.Logger
-	mu              sync.Mutex
-	tasks           map[string]*task
-	client          *lima.Client
-	config          Config
-	store           *Store
-	mhzPerCore      int
-	wg              sync.WaitGroup
-	interval        time.Duration
+	*eventer.Eventer
+
+	config      Config
+	nomadConfig *base.ClientDriverConfig
+	compute     cpustats.Compute
+
+	tasks  *taskStore
+	ctx    context.Context
+	cancel context.CancelFunc
+	logger hclog.Logger
+	boxm   *box.Manager
+
+	mu            sync.Mutex
+	limaVersion   string
+	limaVersionAt time.Time
+	unattached    map[string]time.Time
 }
 
-var _ drivers.DriverPlugin = (*Driver)(nil)
-
-func New(ctx context.Context, l log.Logger) *Driver {
-	ctx, cancel := context.WithCancel(ctx)
-	return &Driver{ctx: ctx, cancel: cancel, logger: l, tasks: map[string]*task{}, interval: time.Second}
-}
-func (d *Driver) PluginInfo() (*base.PluginInfoResponse, error) {
-	return &base.PluginInfoResponse{Type: base.PluginTypeDriver, PluginApiVersions: []string{"0.1.0"}, PluginVersion: Version, Name: "lima"}, nil
-}
-func (d *Driver) ConfigSchema() (*hclspec.Spec, error) {
-	m := map[string]*hclspec.Spec{}
-	for _, k := range []string{"limactl", "lima_home", "state_dir", "expected_version"} {
-		m[k] = hclspec.NewAttr(k, "string", true)
+// NewDriver returns a driver bound to ctx (the plugin's lifetime).
+func NewDriver(ctx context.Context, logger hclog.Logger) *Driver {
+	d := &Driver{
+		Eventer:    eventer.NewEventer(ctx, logger),
+		tasks:      newTaskStore(),
+		logger:     logger,
+		unattached: map[string]time.Time{},
 	}
-	for _, k := range []string{"template_file", "template_sha256", "catalog_file", "catalog_sha256", "private_copies_file", "private_copies_sha256", "repository_profiles_file", "repository_profiles_sha256"} {
-		m[k] = hclspec.NewAttr(k, "string", false)
-	}
-	for _, k := range []string{"max_vms", "max_total_vcpus", "max_total_memory_mib", "max_total_disk_gib", "max_guest_vcpus", "max_guest_memory_mib", "max_guest_disk_gib"} {
-		m[k] = hclspec.NewAttr(k, "number", false)
-	}
-	m["vault_address"] = hclspec.NewAttr("vault_address", "string", false)
-	m["runtime_user"] = hclspec.NewAttr("runtime_user", "string", false)
-	for _, k := range []string{"memory_overhead_mib", "disk_free_floor_mib"} {
-		m[k] = hclspec.NewAttr(k, "number", true)
-	}
-	return hclspec.NewObject(m), nil
-}
-func (d *Driver) TaskConfigSchema() (*hclspec.Spec, error) {
-	m := map[string]*hclspec.Spec{"command": hclspec.NewAttr("command", "list(string)", true)}
-	for _, k := range []string{"guest_cpus", "memory_mib", "disk_gib"} {
-		m[k] = hclspec.NewAttr(k, "number", true)
-	}
-	for _, k := range []string{"guest_os"} {
-		m[k] = hclspec.NewAttr(k, "string", true)
-	}
-	for _, k := range []string{"private_copy_id", "private_copy_owner_generation", "resume_from_key", "resume_node_id", "repository_profile", "repository_profile_sha256", "architecture", "template_catalog_sha256", "template_variants_json", "worker_session_id", "template_id", "template_version", "template_disk_sha256", "creator_agent_id", "creator_session_id", "project", "purpose", "task_link"} {
-		m[k] = hclspec.NewAttr(k, "string", false)
-	}
-	m["resume_generation"] = hclspec.NewAttr("resume_generation", "number", false)
-	m["vault_required"] = hclspec.NewAttr("vault_required", "bool", false)
-	return hclspec.NewObject(m), nil
+	d.ctx, d.cancel = context.WithCancel(ctx)
+	return d
 }
 
-// Nomad validates plugin configuration before it has scanned CPU topology.
-// SDK serialization may turn a nil AgentConfig into a non-nil empty one.
-func (d *Driver) SetConfig(c *base.Config) error {
-	if c == nil {
-		return fmt.Errorf("nil plugin configuration")
-	}
-	var cfg Config
-	if e := base.MsgPackDecode(c.PluginConfig, &cfg); e != nil {
-		return e
-	}
-	v := c.AgentConfig.Compute()
-	perCore := 0
-	if v.TotalCompute > 0 && v.NumCores > 0 {
-		var e error
-		perCore, e = nomadComputePerCore(uint64(v.TotalCompute), uint64(v.NumCores))
-		if e != nil {
-			return e
+// PluginInfo implements base.BasePlugin.
+func (d *Driver) PluginInfo() (*base.PluginInfoResponse, error) { return pluginInfo, nil }
+
+// ConfigSchema implements base.BasePlugin.
+func (d *Driver) ConfigSchema() (*hclspec.Spec, error) { return configSpec, nil }
+
+// SetConfig implements base.BasePlugin.
+func (d *Driver) SetConfig(cfg *base.Config) error {
+	var c Config
+	if cfg != nil && len(cfg.PluginConfig) != 0 {
+		if err := base.MsgPackDecode(cfg.PluginConfig, &c); err != nil {
+			return fmt.Errorf("decode plugin config: %w", err)
 		}
 	}
-	d.configMu.Lock()
-	defer d.configMu.Unlock()
-	if d.client == nil {
-		if e := d.configure(cfg); e != nil {
-			return e
-		}
-		saved := cfg
-		d.configInput = &saved
-	} else if d.configInput == nil || cfg != *d.configInput {
-		return fmt.Errorf("runtime config change requires a new driver process")
+	if err := c.validate(); err != nil {
+		return err
 	}
-	// Zero is pending/unknown, never fabricated schedulable capacity. A later
-	// SetConfig from the driver manager supplies the real topology.
-	d.mhzPerCore = perCore
+	d.config = c
+	if cfg != nil && cfg.AgentConfig != nil {
+		d.nomadConfig = cfg.AgentConfig.Driver
+		d.compute = cfg.AgentConfig.Compute()
+	}
+	if c.identityErr != nil {
+		// A root client without a usable runtime_user must not stop the plugin
+		// from loading: the fingerprint reports it in plain words and every start
+		// fails with the same message, so the node stays visible in the cluster
+		// with the one thing that has to be fixed.
+		d.logger.Error("the box driver cannot run Lima", "error", c.identityErr)
+		return nil
+	}
+	// The Lima home and the image cache hold everything Lima touches; the
+	// runtime user owns both, so limactl (as that user) can write them.
+	if err := c.identity.EnsureDir(c.LimaHome, 0o700); err != nil {
+		return fmt.Errorf("prepare lima_home: %w", err)
+	}
+	if err := c.identity.EnsureDir(c.ImageCacheDir, 0o755); err != nil {
+		return fmt.Errorf("prepare image_cache_dir: %w", err)
+	}
+	m, err := box.New(box.Options{
+		Limactl:           c.LimactlPath,
+		LimaHome:          c.LimaHome,
+		ImageCacheDir:     c.ImageCacheDir,
+		MemoryOverheadMiB: c.MemoryOverheadMiB,
+		VMType:            c.VMType,
+		MemoryLimitOff:    c.MemoryLimit == box.MemoryLimitOff,
+		Identity:          c.identity,
+	})
+	if err != nil {
+		return err
+	}
+	d.boxm = m
+	d.logger.Info("box driver configured",
+		"limactl", c.LimactlPath, "lima_home", c.LimaHome, "image_cache_dir", c.ImageCacheDir,
+		"memory_overhead_mib", c.MemoryOverheadMiB, "memory_limit", c.MemoryLimit, "vm_type", c.VMType,
+		"runtime_user", c.identity.String(), "drops_privileges", c.identity.Drop)
 	return nil
 }
-func (d *Driver) admissionCompute() (int, int) {
-	d.configMu.RLock()
-	defer d.configMu.RUnlock()
-	return d.mhzPerCore, d.config.MemoryOverheadMiB
-}
-func (d *Driver) configure(cfg Config) error {
-	if _, e := loadPrivateCopies(cfg.PrivateCopiesFile, cfg.PrivateCopiesSHA256); e != nil {
-		return e
-	}
-	if cfg.PrivateCopiesFile != "" && filepath.Clean(filepath.Dir(cfg.PrivateCopiesFile)) == filepath.Clean(cfg.StateDir) && strings.EqualFold(filepath.Ext(cfg.PrivateCopiesFile), ".json") {
-		return fmt.Errorf("private copy config must not collide with ledger JSON")
-	}
-	if e := validateRepositoryStatePath(cfg); e != nil {
-		return e
-	}
-	if _, e := repositories.Load(cfg.RepositoryProfilesFile, cfg.RepositoryProfilesSHA256); e != nil {
-		return e
-	}
-	identity, e := resolveRuntimeUser(cfg.RuntimeUser)
-	if e != nil {
-		return e
-	}
-	if !regexp.MustCompile(`^2\.[0-9]+\.[0-9]+$`).MatchString(cfg.ExpectedVersion) {
-		return fmt.Errorf("explicit stable Lima2.x version required; pre-release/nightly unsupported")
-	}
-	if cfg.MemoryOverheadMiB < 1 || cfg.DiskFreeFloorMiB < 0 {
-		return fmt.Errorf("explicit positive memory overhead and nonnegative disk floor required")
-	}
-	for _, p := range []string{cfg.LimaBinary, cfg.LimaHome, cfg.StateDir} {
-		if !filepath.IsAbs(p) {
-			return fmt.Errorf("absolute operator paths required")
-		}
-	}
-	if cfg.CatalogFile != "" {
-		if !filepath.IsAbs(cfg.CatalogFile) {
-			return fmt.Errorf("absolute catalog path required")
-		}
-		if _, e := catalog.Read(cfg.CatalogFile, cfg.CatalogSHA256); e != nil {
-			return e
-		}
-	} else {
-		if !filepath.IsAbs(cfg.TemplateFile) {
-			return fmt.Errorf("absolute legacy template or approved catalog required")
-		}
-		b, e := os.ReadFile(cfg.TemplateFile)
-		if e != nil {
-			return e
-		}
-		if lima.Hash(b) != cfg.TemplateSHA256 {
-			return fmt.Errorf("operator template checksum mismatch")
-		}
-	}
-	for _, n := range []int{cfg.MaxVMs, cfg.MaxTotalCPUs, cfg.MaxTotalMemoryMiB, cfg.MaxTotalDiskGiB, cfg.MaxGuestCPUs, cfg.MaxGuestMemoryMiB, cfg.MaxGuestDiskGiB} {
-		if n < 0 {
-			return fmt.Errorf("negative operator budget")
-		}
-	}
-	if e = os.MkdirAll(cfg.LimaHome, 0700); e != nil {
-		return e
-	}
-	cfg.LimaHome, e = filepath.EvalSymlinks(cfg.LimaHome)
-	if e != nil {
-		return e
-	}
-	st, e := os.Stat(cfg.LimaHome)
-	if e != nil || st.Mode().Perm()&0077 != 0 {
-		return fmt.Errorf("private Lima home required")
-	}
-	if e = identity.validateHome(cfg.LimaHome); e != nil {
-		return e
-	}
-	if e = lima.ValidateHome(cfg.LimaHome); e != nil {
-		return e
-	}
-	store, e := openStore(cfg.StateDir)
-	if e != nil {
-		return e
-	}
-	d.config = cfg
-	d.runtimeIdentity = identity
-	d.store = store
-	d.client = &lima.Client{Home: cfg.LimaHome, Runner: lima.CommandRunner{Binary: cfg.LimaBinary, Home: cfg.LimaHome, UserHome: identity.home, Credential: identity.credential, Diagnostics: filepath.Join(cfg.StateDir, "diagnostics")}}
-	d.reconcileOnce.Do(func() { d.wg.Add(1); go d.reconcileUnattached() })
-	return nil
-}
-func (d *Driver) Capabilities() (*drivers.Capabilities, error) {
-	return &drivers.Capabilities{SendSignals: true, Exec: true, FSIsolation: fsisolation.Image, NetIsolationModes: []drivers.NetIsolationMode{drivers.NetIsolationModeHost}, MountConfigs: drivers.MountConfigSupportNone}, nil
-}
+
+// TaskConfigSchema implements drivers.DriverPlugin.
+func (d *Driver) TaskConfigSchema() (*hclspec.Spec, error) { return taskConfigSpec, nil }
+
+// Capabilities implements drivers.DriverPlugin.
+func (d *Driver) Capabilities() (*drivers.Capabilities, error) { return driverCapabilities, nil }
+
+// Fingerprint implements drivers.DriverPlugin.
 func (d *Driver) Fingerprint(ctx context.Context) (<-chan *drivers.Fingerprint, error) {
-	ch := make(chan *drivers.Fingerprint)
+	ch := make(chan *drivers.Fingerprint, 1)
 	go func() {
 		defer close(ch)
-		tick := time.NewTicker(30 * time.Second)
-		defer tick.Stop()
-		lastCapacityReason := ""
+		ticker := time.NewTicker(fingerprintPeriod)
+		defer ticker.Stop()
 		for {
-			fp := &drivers.Fingerprint{Health: drivers.HealthStateUnhealthy, Attributes: map[string]*pstructs.Attribute{"driver.lima.guest.os": pstructs.NewStringAttribute("linux"), "driver.lima.guest.arch": pstructs.NewStringAttribute(runtime.GOARCH), "driver.lima.network_isolated": pstructs.NewBoolAttribute(false), "driver.lima.macos_guest": pstructs.NewBoolAttribute(false)}}
-			d.configMu.RLock()
-			client, expected, perCore := d.client, d.config.ExpectedVersion, d.mhzPerCore
-			capacityConfig, capacityStore := d.config, d.store
-			policy := map[string]int{"max_vms": d.config.MaxVMs, "max_total_vcpus": d.config.MaxTotalCPUs, "max_total_memory_mib": d.config.MaxTotalMemoryMiB, "max_total_disk_gib": d.config.MaxTotalDiskGiB, "max_guest_vcpus": d.config.MaxGuestCPUs, "max_guest_memory_mib": d.config.MaxGuestMemoryMiB, "max_guest_disk_gib": d.config.MaxGuestDiskGiB, "memory_overhead_mib": d.config.MemoryOverheadMiB}
-			d.configMu.RUnlock()
-			if profiles, err := repositories.Load(capacityConfig.RepositoryProfilesFile, capacityConfig.RepositoryProfilesSHA256); err == nil {
-				fp.Attributes["driver.lima.repositories.default"] = pstructs.NewStringAttribute(profiles.Default)
-				for id, p := range profiles.Profiles {
-					if len(p.Architectures) > 0 {
-						found := false
-						for _, a := range p.Architectures {
-							if a == runtime.GOARCH {
-								found = true
-							}
-						}
-						if !found {
-							continue
-						}
-					}
-					raw, _ := repositories.Canonical(p)
-					fp.Attributes["driver.lima.repositories.profile."+id] = pstructs.NewStringAttribute(repositories.Hash(raw))
-				}
-			}
-			fp.Attributes["driver.lima.catalog.late_platform_selection"] = pstructs.NewBoolAttribute(true)
-			fp.Attributes["driver.lima.catalog.sha256"] = pstructs.NewStringAttribute(capacityConfig.CatalogSHA256)
-			for k, v := range policy {
-				fp.Attributes["driver.lima.operator_limits."+k] = pstructs.NewIntAttribute(int64(v), "")
-			}
-			for k, v := range capacityAttributesContext(ctx, capacityConfig, capacityStore, func(rows []*State) (runtimeCommitment, int64, error) {
-				probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-				defer cancel()
-				probe := &Driver{ctx: probeCtx, client: client, config: capacityConfig, store: capacityStore}
-				mem, err := probe.runtimeResourceCommitment(rows)
-				if err != nil {
-					return runtimeCommitment{}, 0, err
-				}
-				limit, err := hostMemoryMiB()
-				if capacityConfig.MaxTotalMemoryMiB > 0 && int64(capacityConfig.MaxTotalMemoryMiB) < limit {
-					limit = int64(capacityConfig.MaxTotalMemoryMiB)
-				}
-				return mem, limit, err
-			}) {
-				fp.Attributes[k] = v
-			}
-			capacityReason, _ := fp.Attributes["driver.lima.capacity.reason"].GetString()
-			scope, _ := fp.Attributes["driver.lima.capacity.scope_sha256"].GetString()
-			if capacityReason != lastCapacityReason {
-				d.logger.Info("capacity snapshot status", "reason", capacityReason, "scope_sha256", scope, "effective_uid", os.Geteuid(), "effective_gid", os.Getegid())
-				lastCapacityReason = capacityReason
-			}
-			for k, v := range metricAttributes(perCore) {
-				fp.Attributes[k] = v
-			}
-			if perCore < 1 {
-				fp.HealthDescription = "Nomad compute topology pending; task admission disabled"
-			} else if client != nil {
-				c, cancel := context.WithTimeout(ctx, 10*time.Second)
-				v, e := client.Version(c)
-				if e == nil && v == "limactl version "+expected {
-					_, e = client.List(c)
-				}
-				cancel()
-				if e == nil && v == "limactl version "+expected {
-					fp.Health = drivers.HealthStateHealthy
-					fp.HealthDescription = "official Lima CLI reachable; prototype, network policy not isolated"
-					if policy["max_total_disk_gib"] < 1 {
-						d.configMu.RLock()
-						catalogMode := d.config.CatalogFile != ""
-						d.configMu.RUnlock()
-						if catalogMode {
-							fp.Health = drivers.HealthStateUnhealthy
-							fp.HealthDescription = "catalog disk budget pending; task admission disabled"
-						}
-					}
-				} else {
-					fp.HealthDescription = "Lima CLI unavailable/version mismatch"
-				}
-			}
+			fp := d.buildFingerprint(ctx)
 			select {
 			case ch <- fp:
 			case <-ctx.Done():
 				return
-			case <-d.ctx.Done():
-				return
 			}
 			select {
-			case <-tick.C:
 			case <-ctx.Done():
 				return
-			case <-d.ctx.Done():
-				return
+			case <-ticker.C:
 			}
 		}
-	}()
-	return ch, nil
-}
-func (d *Driver) emit(s *State, phase string) {
-	e := &drivers.TaskEvent{TaskID: s.TaskID, TaskName: s.TaskName, AllocID: s.AllocID, Timestamp: time.Now(), Message: "lima " + phase, Annotations: selectionAnnotations(s, phase)}
-	d.eventMu.Lock()
-	defer d.eventMu.Unlock()
-	d.eventHistory = append(d.eventHistory, e)
-	if len(d.eventHistory) > 128 {
-		d.eventHistory = d.eventHistory[len(d.eventHistory)-128:]
-	}
-	for c := range d.subscribers {
-		select {
-		case c <- e:
-		default:
-		}
-	}
-}
-func (d *Driver) TaskEvents(ctx context.Context) (<-chan *drivers.TaskEvent, error) {
-	ch := make(chan *drivers.TaskEvent, 256)
-	d.eventMu.Lock()
-	if d.subscribers == nil {
-		d.subscribers = map[chan *drivers.TaskEvent]bool{}
-	}
-	for _, e := range d.eventHistory {
-		ch <- e
-	}
-	d.subscribers[ch] = true
-	d.eventMu.Unlock()
-	go func() {
-		select {
-		case <-ctx.Done():
-		case <-d.ctx.Done():
-		}
-		d.eventMu.Lock()
-		delete(d.subscribers, ch)
-		close(ch)
-		d.eventMu.Unlock()
 	}()
 	return ch, nil
 }
 
-func (d *Driver) validate(cfg *drivers.TaskConfig) (TaskConfig, string, error) {
-	var tc TaskConfig
-	if cfg == nil || cfg.ID == "" || cfg.AllocID == "" || cfg.Name == "" {
-		return tc, "", fmt.Errorf("Nomad task identity required")
+func (d *Driver) buildFingerprint(ctx context.Context) *drivers.Fingerprint {
+	fp := &drivers.Fingerprint{
+		Attributes:        map[string]*structs.Attribute{},
+		Health:            drivers.HealthStateHealthy,
+		HealthDescription: drivers.DriverHealthy,
 	}
-	if e := cfg.DecodeDriverConfig(&tc); e != nil {
-		return tc, "", e
+	set := func(key, value string) {
+		fp.Attributes[key] = structs.NewStringAttribute(value)
 	}
-	if tc.ResumeFromKey == "" && (tc.ResumeGeneration != 0 || tc.ResumeNodeID != "") {
-		return tc, "", fmt.Errorf("resume fields require source key")
+	set("driver.box.version", version.Version)
+	set("driver.box.arch", box.LimaArch())
+	set("driver.box.os", runtime.GOOS)
+	set("driver.box.vm_type", d.config.VMType)
+	set("driver.box.guests", guestKinds())
+	// Whether the memory budget of a box is enforced on this node: a node with
+	// memory_limit = "off" runs boxes without a cap, and that is visible here.
+	set("driver.box.memory_limit", d.config.MemoryLimit)
+	if d.config.identity != nil {
+		set("driver.box.runtime_user", d.config.identity.Name)
 	}
-	if e := d.resolvePlatform(&tc); e != nil {
-		return tc, "", e
+
+	if d.config.identityErr != nil {
+		fp.Health = drivers.HealthStateUnhealthy
+		fp.HealthDescription = d.config.identityErr.Error()
+		set("driver.box.lima_version", "unknown")
+		set("driver.box.instances", "0")
+		set("driver.box.orphans", "")
+		setDiskUsage(fp, nil)
+		return fp
 	}
-	if tc.GuestOS != "linux" || tc.Architecture != runtime.GOARCH {
-		return tc, "", fmt.Errorf("only native architecture Linux guests supported")
+
+	if d.boxm == nil {
+		fp.Health = drivers.HealthStateUndetected
+		fp.HealthDescription = "box driver is not configured"
+		return fp
 	}
-	if len(tc.Command) == 0 || tc.Command[0] == "" || tc.CPUs < 1 || tc.MemoryMiB < 256 || tc.DiskGiB < 1 || tc.DiskGiB > 1048576 {
-		return tc, "", fmt.Errorf("invalid guest request")
+
+	limaVersion, err := d.limaVersionCached(ctx)
+	if err != nil {
+		fp.Health = drivers.HealthStateUnhealthy
+		fp.HealthDescription = fmt.Sprintf("limactl is not usable: %v", err)
+		set("driver.box.lima_version", "unknown")
+		set("driver.box.instances", "0")
+		set("driver.box.orphans", "")
+		setDiskUsage(fp, nil)
+		return fp
 	}
-	if tc.VaultRequired && !validVaultAddress(d.config.VaultAddress) {
-		return tc, "", fmt.Errorf("operator HTTPS vault_address required")
+	set("driver.box.lima_version", limaVersion)
+
+	instances, err := d.boxm.List(ctx)
+	if err != nil {
+		fp.Health = drivers.HealthStateUnhealthy
+		fp.HealthDescription = fmt.Sprintf("cannot list lima instances: %v", err)
+		set("driver.box.instances", "0")
+		set("driver.box.orphans", "")
+		setDiskUsage(fp, nil)
+		return fp
 	}
-	if tc.VaultRequired && (!vaultSessionID.MatchString(tc.WorkerSessionID) || cfg.Env["VAULT_TOKEN"] != "" || cfg.Env["BAO_TOKEN"] != "" || cfg.Env["LLM_API_KEY"] != "") {
-		return tc, "", fmt.Errorf("vault requires task token file and canonical worker session; secret environment forbidden")
-	}
-	if cfg.User != "" || len(cfg.Mounts) > 0 {
-		return tc, "", fmt.Errorf("host user/mount overrides unsupported")
-	}
-	perCore, overhead := d.admissionCompute()
-	if cfg.Resources == nil || cfg.Resources.NomadResources == nil || perCore < 1 {
-		return tc, "", fmt.Errorf("native Nomad compute/reservations unavailable")
-	}
-	nr := cfg.Resources.NomadResources
-	if !reservationCovers(int64(tc.CPUs), int64(perCore), int64(tc.MemoryMiB), int64(overhead), nr.Cpu.CpuShares, nr.Memory.MemoryMB) {
-		return tc, "", fmt.Errorf("Nomad reservation does not cover guest and overhead")
-	}
-	if tc.PrivateCopyOwnerGeneration != "" && tc.PrivateCopyID == "" {
-		return tc, "", fmt.Errorf("private copy generation requires explicit input ID")
-	}
-	templateHash := d.config.TemplateSHA256
-	privateResume := false
-	if tc.ResumeFromKey != "" && recoveryKey.MatchString(tc.ResumeFromKey) {
-		if original, er := d.store.read(tc.ResumeFromKey); er == nil && original.PrivateCopy != nil {
-			privateResume = true
-			templateHash = "private-copy:" + original.PrivateCopy.Input.CopySHA256
-		}
-	}
-	if tc.PrivateCopyID != "" {
-		input, _, err := d.privateCopyInput(cfg, tc)
-		if err != nil {
-			return tc, "", err
-		}
-		templateHash = "private-copy:" + input.ManifestSHA256 + ":" + input.Input.CopySHA256
-	} else if privateResume {
-		if e := validateCreator(tc); e != nil {
-			return tc, "", e
-		}
-	} else if d.config.CatalogFile != "" {
-		if d.config.MaxTotalDiskGiB < 1 {
-			return tc, "", fmt.Errorf("catalog node disk budget pending; task admission disabled")
-		}
-		entry, e := d.catalogEntry(tc)
-		if e != nil {
-			return tc, "", e
-		}
-		templateHash = entry.Disk.SHA256 + ":" + entry.YAML.SHA256
-		if e = validateCreator(tc); e != nil {
-			return tc, "", e
-		}
-	}
-	if exceeds(tc.CPUs, d.config.MaxGuestCPUs) || exceeds(tc.MemoryMiB, d.config.MaxGuestMemoryMiB) || exceeds(tc.DiskGiB, d.config.MaxGuestDiskGiB) {
-		return tc, "", fmt.Errorf("guest request exceeds operator limit")
-	}
-	b, _ := json.Marshal(struct {
-		Task     TaskConfig
-		Template string
-	}{tc, templateHash})
-	return tc, lima.Hash(b), nil
+	set("driver.box.instances", strconv.Itoa(len(instances)))
+	set("driver.box.orphans", joinOrphanList(d.orphans(instances)))
+	// What each box disk really occupies on this host, per box and in total.
+	setDiskUsage(fp, instances)
+	// Every live VM with its size and whether a task owns it: `box capacity`
+	// counts the ones Nomad does not.
+	setInstanceAttributes(fp, instanceInfos(instances, d.tasks.BoxIDs()))
+	return fp
 }
-func (d *Driver) owned(ctx context.Context, s *State) (*lima.Info, error) {
-	if e := d.currentOwner(s); e != nil {
-		return nil, e
+
+// setDiskUsage publishes the disk usage of every box on the node.
+//
+// The numbers come from one stat per disk, so this is cheap enough to run on
+// every fingerprint. Stopped boxes and orphans are included: their disks hold
+// the work of the box and the space of the host just the same.
+func setDiskUsage(fp *drivers.Fingerprint, instances []*limactl.Instance) {
+	var totalUsed, totalVirtual int64
+	for _, disk := range boxDiskUsages(instances) {
+		totalUsed += disk.UsedBytes
+		totalVirtual += disk.VirtualBytes
+		prefix := diskAttributePrefix + disk.BoxID + "."
+		fp.Attributes[prefix+"used_bytes"] = structs.NewStringAttribute(strconv.FormatInt(disk.UsedBytes, 10))
+		fp.Attributes[prefix+"virtual_bytes"] = structs.NewStringAttribute(strconv.FormatInt(disk.VirtualBytes, 10))
 	}
-	v, e := d.client.Get(ctx, s.Instance)
-	if e != nil {
-		return nil, e
+	fp.Attributes[diskTotalUsed] = structs.NewStringAttribute(strconv.FormatInt(totalUsed, 10))
+	fp.Attributes[diskTotalVirtual] = structs.NewStringAttribute(strconv.FormatInt(totalVirtual, 10))
+}
+
+// guestKinds reports which guest operating systems this node can run.
+func guestKinds() string {
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		return "linux,macos"
 	}
-	if v.Param["nomad_driver_id"] != s.Owner || v.Param["nomad_task_key"] != instanceKey(s) || v.CPUs != s.CPUs || v.Memory != int64(s.MemoryMiB)*1048576 || v.Disk != int64(s.DiskGiB)*1073741824 {
-		return nil, fmt.Errorf("Lima ownership/resources mismatch; VM retained")
+	return "linux"
+}
+
+func joinOrphanList(names []string) string {
+	if len(names) == 0 {
+		return ""
 	}
-	if filepath.Clean(v.Dir) != filepath.Join(d.config.LimaHome, s.Instance) {
-		return nil, fmt.Errorf("Lima directory mismatch")
+	sort.Strings(names)
+	out := ""
+	for i, n := range names {
+		if i > 0 {
+			out += ","
+		}
+		out += n
 	}
-	h, e := d.client.ConfigHash(s.Instance)
-	if e != nil {
-		return nil, e
+	return out
+}
+
+// limaVersionCached returns `limactl --version`, cached for a few minutes.
+func (d *Driver) limaVersionCached(ctx context.Context) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.limaVersion != "" && time.Since(d.limaVersionAt) < limaVersionTTL {
+		return d.limaVersion, nil
 	}
-	if s.ConfigHash != "" && s.ConfigHash != h {
-		return nil, fmt.Errorf("Lima configuration changed; VM retained")
+	probe, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	v, err := d.boxm.Lima().Version(probe)
+	if err != nil {
+		return "", err
 	}
+	d.limaVersion = v
+	d.limaVersionAt = time.Now()
 	return v, nil
 }
-func (d *Driver) payload(s *State, action string) map[string]any {
-	return map[string]any{"key": s.Key, "owner": s.Owner, "action": action, "stdout_offset": s.OutOffset, "stderr_offset": s.ErrOffset}
-}
-func (d *Driver) handle(t *task) (*drivers.TaskHandle, error) {
-	var tc TaskConfig
-	if err := t.cfg.DecodeDriverConfig(&tc); err != nil {
-		return nil, fmt.Errorf("encode recovery config: %w", err)
-	}
-	st := t.state
-	r := recoveryConfig{Version: 1, Allocation: st.AllocID, Task: st.TaskName, Namespace: st.Namespace, Node: st.NodeID, Session: st.WorkerSessionID, CPUs: st.CPUs, MemoryMiB: st.MemoryMiB, DiskGiB: st.DiskGiB, VaultRequired: tc.VaultRequired}
-	raw, err := json.Marshal(r)
-	if err != nil {
-		return nil, err
-	}
-	h := drivers.NewTaskHandle(2)
-	h.Config = t.cfg
-	err = h.SetDriverState(map[string]string{"key": st.Key, "owner": st.Owner, "spec": st.SpecHash, "recovery": string(raw)})
-	return h, err
-}
-func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
-	tc, hash, e := d.validate(cfg)
-	if e != nil {
-		return nil, nil, e
-	}
+
+// orphans returns the lima instances the driver considers abandoned: their disk
+// symlink target is gone, or no task has owned them for orphanGrace.
+func (d *Driver) orphans(instances []*limactl.Instance) []string {
+	attached := d.tasks.BoxIDs()
+	now := time.Now()
+	seen := make(map[string]bool, len(instances))
+	var out []string
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if t := d.tasks[cfg.ID]; t != nil {
-		if t.state.SpecHash != hash {
-			return nil, nil, fmt.Errorf("task spec changed")
-		}
-		h, e := d.handle(t)
-		return h, nil, e
+	if d.unattached == nil {
+		d.unattached = map[string]time.Time{}
 	}
-	// Nomad logmon reads until FIFO EOF. Keep a writer continuously open from
-	// the first control-stage message until attach owns the guest stream writer.
-	// Per-stage open/close alone would terminate logmon before VM boot finishes.
-	logGuard := newTaskLog(d.ctx, cfg.StdoutPath)
-	defer logGuard.Close()
-	logCtx, logCancel := context.WithTimeout(d.ctx, 2*time.Second)
-	e = logGuard.waitOpen(logCtx)
-	logCancel()
-	if e != nil {
-		return nil, nil, fmt.Errorf("native stdout reader unavailable before startup: %w", e)
+	for _, inst := range instances {
+		seen[inst.Name] = true
+		if d.boxm.OrphanReason(inst) != "" {
+			out = append(out, inst.Name)
+			continue
+		}
+		if _, ok := attached[inst.Name]; ok {
+			delete(d.unattached, inst.Name)
+			continue
+		}
+		first, ok := d.unattached[inst.Name]
+		if !ok {
+			d.unattached[inst.Name] = now
+			continue
+		}
+		if now.Sub(first) > orphanGrace {
+			out = append(out, inst.Name)
+		}
 	}
-	key := lima.Hash([]byte(cfg.ID))
-	lock, e := d.store.lock(key)
-	if e != nil {
-		return nil, nil, e
+	for name := range d.unattached {
+		if !seen[name] {
+			delete(d.unattached, name)
+		}
 	}
-	accepted := false
-	noVMConfirmed := false
-	var failedState *State
-	defer func() {
-		if !accepted {
-			if noVMConfirmed && failedState != nil && failedState.Phase == "intent" {
-				failedState.Phase = "no_vm_failed"
-				_ = d.store.write(failedState)
-			}
-			unlock(lock)
-		}
-	}()
-	s, e := d.store.read(key)
-	fresh := os.IsNotExist(e)
-	if e != nil && !fresh {
-		return nil, nil, e
-	}
-	if fresh && tc.ResumeFromKey != "" {
-		s, e = d.prepareResume(cfg, tc, hash, key)
-		if e != nil {
-			return nil, nil, e
-		}
-		fresh = false
-	}
-	if fresh {
-		selectedRepositories, profileErr := d.selectRepositories(tc)
-		if profileErr != nil {
-			return nil, nil, profileErr
-		}
-		admission, e := d.store.lock(lima.Hash([]byte("node-admission")))
-		if e != nil {
-			return nil, nil, e
-		}
-		defer unlock(admission)
-		if e = d.guardAllocationInvocation(cfg); e != nil {
-			return nil, nil, e
-		}
-		if e = d.checkBudget(tc); e != nil {
-			return nil, nil, e
-		}
-		privateAdmission, e := d.reservePrivateCopyIfRequested(cfg, tc)
-		if e != nil {
-			return nil, nil, e
-		}
-		cleanupVaultRequired := tc.VaultRequired
-		s = &State{CleanupVaultRequired: &cleanupVaultRequired, PrivateCopy: privateAdmission, Version: 1, NodeID: cfg.NodeID, Namespace: cfg.Namespace, Generation: 1, Key: key, Owner: d.store.Owner, TaskID: cfg.ID, AllocID: cfg.AllocID, TaskName: cfg.Name, Instance: instanceName(tc, key), SpecHash: hash, Phase: "intent", RepositoryProfile: selectedRepositories, CPUs: tc.CPUs, MemoryMiB: tc.MemoryMiB, DiskGiB: tc.DiskGiB, CreatorAgentID: tc.CreatorAgentID, CreatorSessionID: tc.CreatorSessionID, WorkerSessionID: tc.WorkerSessionID, TemplateID: tc.TemplateID, TemplateVersion: tc.TemplateVersion, TemplateDiskSHA256: tc.TemplateDiskSHA256, TemplateCatalogSHA256: tc.TemplateCatalogSHA256, TemplateYAMLSHA256: tc.resolvedYAMLSHA256, ResolvedArchitecture: tc.Architecture, ResolvedVMType: tc.resolvedVMType, Purpose: tc.Purpose, Project: tc.Project, TaskLink: tc.TaskLink}
-		if selectedRepositories != nil {
-			s.Version = 2
-		}
-		if privateAdmission != nil {
-			s.Version = 3
-		}
+	return out
+}
 
-		if e = d.store.write(s); e != nil {
-			return nil, nil, e
-		}
-	} else if s.SpecHash != hash || s.TaskID != cfg.ID || s.Destroyed {
-		return nil, nil, fmt.Errorf("existing task identity/spec mismatch")
+// emit records a task event so the Nomad UI shows what happened to the VM.
+func (d *Driver) emit(tc *drivers.TaskConfig, kind, message string) {
+	d.logger.Info(message, "task", tc.ID, "box_event", kind)
+	if tc == nil {
+		return
 	}
-	if s.ResumeNext != nil {
-		return nil, nil, fmt.Errorf("allocation ownership transferred")
+	err := d.EmitEvent(&drivers.TaskEvent{
+		TaskID:      tc.ID,
+		TaskName:    tc.Name,
+		AllocID:     tc.AllocID,
+		Timestamp:   time.Now(),
+		Message:     message,
+		Annotations: map[string]string{"kind": kind},
+	})
+	if err != nil {
+		d.logger.Debug("cannot emit task event", "task", tc.ID, "error", err)
 	}
-	if e = verifyResolvedState(tc, s); e != nil {
-		return nil, nil, e
+}
+
+// StartTask creates or adopts the box and leaves it running.
+func (d *Driver) StartTask(tc *drivers.TaskConfig) (*drivers.TaskHandle, *drivers.DriverNetwork, error) {
+	if tc == nil {
+		return nil, nil, fmt.Errorf("nil task config")
 	}
-	if e = s.RepositoryProfile.Validate(); e != nil {
-		return nil, nil, e
+	if d.config.identityErr != nil {
+		return nil, nil, d.config.identityErr
 	}
-	failedState = s
-	ctx, cancel := context.WithTimeout(d.ctx, 10*time.Minute)
-	defer cancel()
-	if e = d.stage(cfg, s, "admission_verified", nil); e != nil {
-		return nil, nil, e
+	if d.boxm == nil {
+		return nil, nil, fmt.Errorf("driver is not configured")
+	}
+	var cfg TaskConfig
+	if err := tc.DecodeDriverConfig(&cfg); err != nil {
+		return nil, nil, fmt.Errorf("decode task config: %w", err)
+	}
+	if err := cfg.applyDefaults(); err != nil {
+		return nil, nil, err
+	}
+	volumeDir, err := diskVolumePath(tc)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	v, e := d.client.Get(ctx, s.Instance)
-	if errors.Is(e, lima.ErrNotFound) {
-		noVMConfirmed = true
-		if s.Phase != "intent" || s.ResumedFrom != "" {
-			if s.Phase == "no_vm_failed" {
-				return nil, nil, fmt.Errorf("previous pre-create failure confirmed no VM; inspect logs and use a new allocation")
-			}
-			return nil, nil, fmt.Errorf("uncertain create: no retry, retain ledger")
-		}
-		if e = physicalFree(d.config.LimaHome, tc.DiskGiB, d.config.DiskFreeFloorMiB); e != nil {
-			return nil, nil, e
-		}
-		templateFile := d.config.TemplateFile
-		if s.PrivateCopy != nil {
-			var er error
-			templateFile, er = d.materializePrivateCopy(ctx, cfg, s)
-			if er != nil {
-				return nil, nil, er
-			}
-		} else if d.config.CatalogFile != "" {
-			entry, er := d.catalogEntry(tc)
-			if er != nil {
-				return nil, nil, er
-			}
-			cache := catalog.Cache{Dir: filepath.Join(d.config.LimaHome, "_catalog-cache"), Runtime: &catalog.Access{UID: d.runtimeIdentity.uid, GID: d.runtimeIdentity.gid}, Progress: func(phase string, n, total int64) {
-				_ = d.stage(cfg, s, phase, map[string]any{"bytes": n, "total_bytes": total})
-			}}
-			templateFile, er = cache.Materialize(ctx, entry)
-			if er != nil {
-				_ = d.stage(cfg, s, "artifact_failed", nil)
-				return nil, nil, er
-			}
-		}
-		if e = d.client.ValidateTemplate(ctx, templateFile); e != nil {
-			return nil, nil, fmt.Errorf("runtime template preflight failed before create: %w", e)
-		}
-		if e = d.stage(cfg, s, "vm_create", nil); e != nil {
-			return nil, nil, e
-		}
-		s.Phase = "creating"
-		if e = d.store.write(s); e != nil {
-			return nil, nil, e
-		}
-		noVMConfirmed = false // Once dispatched, an uncertain create must retain its reservation.
-		e = d.client.Create(ctx, lima.Request{Name: s.Instance, Owner: s.Owner, Key: s.Key, Template: templateFile, CPUs: tc.CPUs, MemoryMiB: tc.MemoryMiB, DiskGiB: tc.DiskGiB})
-		if e != nil {
-			return nil, nil, e
-		}
-		v, e = d.client.Get(ctx, s.Instance)
+	if old := d.tasks.Get(tc.ID); old != nil {
+		d.emit(tc, "restart", "A previous box task with this ID is still tracked; detaching from it")
+		d.stopGuestLogs(old)
+		d.stopWatcher(old)
+		old.finish(&drivers.ExitResult{ExitCode: 1, Err: fmt.Errorf("task handle superseded by a new start")})
+		d.tasks.Delete(tc.ID)
 	}
-	if e != nil {
-		return nil, nil, e
+
+	h := newTaskHandle(tc, cfg)
+	rep := func(kind, message string) { d.emit(tc, kind, message) }
+	b, err := d.boxFor(h, volumeDir, rep)
+	if err != nil {
+		return nil, nil, err
 	}
-	v, e = d.owned(ctx, s)
-	if e != nil {
-		return nil, nil, e
+
+	st, err := b.Ensure(d.ctx)
+	if err != nil {
+		return nil, nil, err
 	}
-	if s.ConfigHash == "" {
-		s.ConfigHash, e = d.client.ConfigHash(s.Instance)
-		if e != nil {
-			return nil, nil, e
+	h.setBoxDetails(boxState{
+		VolumeDir:   volumeDir,
+		DiskPath:    st.DiskPath,
+		InstanceDir: b.InstanceDir(),
+		CgroupMode:  st.CgroupMode,
+	})
+	h.markRunning(time.Now())
+
+	if _, err := b.CopyTaskFiles(d.ctx, tc.TaskDir().LocalDir, tc.TaskDir().SecretsDir, cfg.FilesDirInGuest, cfg.SecretsDirInGuest); err != nil {
+		rep("files", fmt.Sprintf("Could not install the task files in the guest: %v", err))
+		// The VM is up but its task can never run: take it away, so a retry
+		// starts cleanly instead of adopting an instance whose disk symlink may
+		// point at a volume that was deleted in the meantime.
+		if discardErr := b.Discard(d.ctx); discardErr != nil {
+			rep("files", fmt.Sprintf("Could not remove the failed box %s: %v", cfg.BoxID, discardErr))
 		}
-		if e = d.store.write(s); e != nil {
-			return nil, nil, e
-		}
+		return nil, nil, err
 	}
-	if v.Status != "Running" {
-		if s.MachineID != "" {
-			return nil, nil, fmt.Errorf("previously started VM is not running; no reboot/replay")
-		}
-		s.Phase = "starting"
-		if e = d.store.write(s); e != nil {
-			return nil, nil, e
-		}
-		if e = d.stage(cfg, s, "vm_boot", nil); e != nil {
-			return nil, nil, e
-		}
-		if e = d.client.Start(ctx, s.Instance); e != nil {
-			return nil, nil, e
-		}
+
+	// The guest now has these files; a later re-render (a rotated credential)
+	// changes this digest and the watcher copies them again.
+	h.setFilesDigest(taskFilesDigest(tc))
+
+	d.startGuestLogs(d.ctx, h)
+	d.startWatcher(h, b)
+	d.tasks.Add(h)
+	rep("ready", fmt.Sprintf("Box %s is ready: VM %s with %d vCPU and %d MiB RAM; task files in %s, credentials on the tmpfs in %s",
+		cfg.BoxID, st.Instance.StatusMessage(), cfg.CPUs, cfg.MemoryMiB, cfg.FilesDirInGuest, cfg.SecretsDirInGuest))
+
+	stateData, err := h.encodeState()
+	if err != nil {
+		return nil, nil, err
 	}
-	if s.MachineID != "" && s.StartedAt.IsZero() && s.Exit == nil {
-		return nil, nil, fmt.Errorf("workload launch outcome unknown; no automatic attach or replay")
-	}
-	if s.MachineID == "" {
-		if s.PrivateCopy != nil && s.ResumedFrom == "" {
-			if e = d.preparePrivateCopyGuest(ctx, cfg, s); e != nil {
-				return nil, nil, e
-			}
-		}
-		_, id, e := d.client.Guest(ctx, s.Instance, d.payload(s, "identity"))
-		if e != nil {
-			return nil, nil, e
-		}
-		if s.ResumedFrom != "" && (id.MachineID != s.ResumeMachineID || id.BootID == s.ResumePreviousBootID) {
-			return nil, nil, fmt.Errorf("resume guest disk/machine or reboot identity mismatch")
-		}
-		if id.MachineID == "" || id.BootID == "" {
-			return nil, nil, fmt.Errorf("missing guest identity")
-		}
-		if e = d.uniqueIdentity(s, id.MachineID); e != nil {
-			return nil, nil, e
-		}
-		if e = d.stage(cfg, s, "guest_identity_verified", nil); e != nil {
-			return nil, nil, e
-		}
-		s.MachineID = id.MachineID
-		s.BootID = id.BootID
-		if e = d.applyRepositories(ctx, cfg, s); e != nil {
-			return nil, nil, e
-		}
-		s.Phase = "launching"
-		if e = d.store.write(s); e != nil {
-			return nil, nil, e
-		}
-		if e = d.stage(cfg, s, "workload_launch", nil); e != nil {
-			return nil, nil, e
-		}
-		if _, e = d.syncVault(ctx, cfg, s, ""); e != nil {
-			return nil, nil, e
-		}
-		p := d.payload(s, "launch")
-		command, profileErr := lima.RepositoryCommand(s.RepositoryProfile, tc.Command)
-		if profileErr != nil {
-			return nil, nil, profileErr
-		}
-		p["command"] = command
-		if _, _, e = d.client.Guest(ctx, s.Instance, p); e != nil {
-			return nil, nil, fmt.Errorf("uncertain launch; no replay: %w", e)
-		}
-		s.StartedAt = time.Now()
-		s.Phase = "running"
-		if e = d.store.write(s); e != nil {
-			return nil, nil, e
-		}
-	}
-	t, e := d.attach(cfg, s, lock)
-	if e != nil {
-		return nil, nil, e
-	}
-	d.tasks[cfg.ID] = t
-	d.emit(s, "started")
-	accepted = true
-	h, e := d.handle(t)
-	return h, nil, e
+	handle := &drivers.TaskHandle{Version: taskHandleVersion, Config: tc, State: drivers.TaskStateRunning}
+	handle.DriverState = stateData
+	return handle, nil, nil
 }
-func (d *Driver) attach(cfg *drivers.TaskConfig, s *State, lock *os.File, recovering ...bool) (*task, error) {
-	// New launches still reject invalid log endpoint types. Recovery must not
-	// turn a log endpoint outage into Nomad DestroyTask of a surviving VM.
-	if !(len(recovering) > 0 && recovering[0]) {
-		for _, path := range []string{cfg.StdoutPath, cfg.StderrPath} {
-			info, err := os.Lstat(path)
-			if err != nil {
-				return nil, fmt.Errorf("native log endpoint unavailable: %w", err)
+
+// diskVolumePath returns the host path of the dynamic host volume the task
+// mounts for the box disk.
+//
+// Nomad names a host volume mount after the volume itself (the DHV name, for
+// example "boxdisk"), while a CSI or static volume request keeps the name from
+// the jobspec. A box has exactly one disk, so a single mount is unambiguous; with
+// several mounts the disk one must be named "disk".
+func diskVolumePath(tc *drivers.TaskConfig) (string, error) {
+	var names []string
+	for _, m := range tc.Mounts {
+		if m.RequestName == defaultDiskVolumeRequest {
+			if m.HostPath == "" {
+				return "", fmt.Errorf("the mount named %q has an empty host path", defaultDiskVolumeRequest)
 			}
-			if !info.Mode().IsRegular() && info.Mode()&os.ModeNamedPipe == 0 && path != os.DevNull {
-				return nil, fmt.Errorf("unsupported native log endpoint")
-			}
+			return m.HostPath, nil
 		}
+		names = append(names, fmt.Sprintf("%s (%s)", m.RequestName, m.HostPath))
 	}
-	out := newTaskLog(d.ctx, cfg.StdoutPath)
-	errout := newTaskLog(d.ctx, cfg.StderrPath)
-	var e error
-	if s.Exit == nil && !s.VaultFinalizing && !(len(recovering) > 0 && recovering[0]) {
-		secretCtx, secretCancel := context.WithTimeout(d.ctx, 15*time.Second)
-		_, e = d.syncVault(secretCtx, cfg, s, "")
-		secretCancel()
+	if len(tc.Mounts) == 0 {
+		return "", fmt.Errorf("the box task needs a volume mount to hold its disk, but the task has no mounts")
 	}
-	if e != nil {
-		out.Close()
-		errout.Close()
-		return nil, e
+	if len(tc.Mounts) == 1 {
+		if tc.Mounts[0].HostPath == "" {
+			return "", fmt.Errorf("the mount %q has an empty host path", tc.Mounts[0].RequestName)
+		}
+		return tc.Mounts[0].HostPath, nil
 	}
-	operationCtx, cancelOperations := context.WithCancel(d.ctx)
-	if s.VaultFinalizing {
-		cancelOperations()
-	}
-	t := &task{operationCtx: operationCtx, cancelOperations: cancelOperations, vaultStopped: s.VaultFinalizing, cfg: cfg, state: s, done: make(chan struct{}), lock: lock, out: out, err: errout}
-	d.wg.Add(1)
-	go d.monitor(t)
-	return t, nil
+	return "", fmt.Errorf("the box task needs one volume mount to hold its disk (named %q); found: %s", defaultDiskVolumeRequest, joinStrings(names))
 }
-func (d *Driver) monitor(t *task) {
-	defer d.wg.Done()
-	defer unlock(t.lock)
-	defer t.out.Close()
-	defer t.err.Close()
-	for {
-		if d.ctx.Err() != nil {
-			return
+
+func joinStrings(in []string) string {
+	out := ""
+	for i, s := range in {
+		if i > 0 {
+			out += ", "
 		}
-		ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
-		t.mu.Lock()
-		s := *t.state
-		t.mu.Unlock()
-		if s.Exit != nil {
-			cancel()
-			t.once.Do(func() { close(t.done) })
-			return
-		}
-		v, e := d.owned(ctx, &s)
-		if e == nil && v.Status != "Running" {
-			e = fmt.Errorf("VM not running without confirmed guest result")
-		}
-		var snap lima.Snapshot
-		var ident lima.Identity
-		if e == nil {
-			t.vaultMu.Lock()
-			if !t.vaultStopped {
-				t.vaultHash, e = d.syncVault(ctx, t.cfg, &s, t.vaultHash)
+		out += s
+	}
+	return out
+}
+
+// boxFor rebuilds the box handle from a task handle.
+func (d *Driver) boxFor(h *taskHandle, volumeDir string, rep box.Reporter) (*box.Box, error) {
+	spec := box.Spec{
+		BoxID:       h.boxID,
+		VolumeDir:   volumeDir,
+		ImageURL:    h.cfg.Image.URL,
+		ImageSHA256: h.cfg.Image.SHA256,
+		CPUs:        h.cfg.CPUs,
+		MemoryMiB:   h.cfg.MemoryMiB,
+		DiskGiB:     h.cfg.DiskGiB,
+	}
+	return d.boxm.Box(spec, rep)
+}
+
+// startWatcher finishes the task handle when the VM stops.
+func (d *Driver) startWatcher(h *taskHandle, b *box.Box) {
+	ctx, cancel := context.WithCancel(d.ctx)
+	h.mu.Lock()
+	h.watchStop = cancel
+	h.mu.Unlock()
+	go func() {
+		defer cancel()
+		ticker := time.NewTicker(watchInterval)
+		defer ticker.Stop()
+		// The task files are re-read every fileRefreshEvery ticks: Nomad re-renders
+		// a template whose Variable changed without restarting the VM, and a
+		// rotated credential has to reach the guest's tmpfs.
+		const fileRefreshEvery = 5
+		ticks := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-h.done:
+				return
+			case <-ticker.C:
 			}
-			t.vaultMu.Unlock()
-			if e == nil {
-				snap, ident, e = d.client.Guest(ctx, s.Instance, d.payload(&s, "status"))
+			ticks++
+			if ticks%fileRefreshEvery == 0 {
+				d.refreshTaskFiles(h, b)
 			}
-		}
-		cancel()
-		if d.ctx.Err() != nil {
-			return
-		}
-		if e != nil {
-			t.mu.Lock()
-			t.lastErr = e
-			d.reportActivity(t, time.Now(), true)
-			t.mu.Unlock()
-		} else {
-			if ident.MachineID != "" && (ident.MachineID != s.MachineID || ident.BootID != s.BootID) {
-				e = fmt.Errorf("guest identity changed")
-			}
-			if snap.Phase == "unknown" {
-				e = fmt.Errorf("guest workload state unknown; no replay")
-			}
-			outN, errN := 0, 0
-			if e == nil {
-				outN, e = t.out.Write(snap.Stdout)
-				if e == nil {
-					errN, e = t.err.Write(snap.Stderr)
+			// Fast path: the pid files lima writes say whether the VM and its
+			// hostagent are still there. `limactl list` is only needed when they
+			// are gone, to tell a clean stop from a crash.
+			if live := b.Liveness(); live.Known {
+				if live.DriverAlive && live.HostAgentAlive {
+					continue
 				}
-			}
-			t.mu.Lock()
-			// A FIFO can accept a prefix before backpressure or reader loss. Commit
-			// exactly that prefix independently for each stream; do not replay stdout
-			// just because stderr is waiting for its own reader.
-			t.state.OutOffset = s.OutOffset + int64(outN)
-			t.state.ErrOffset = s.ErrOffset + int64(errN)
-			if outN > 0 {
-				d.observeActivity(t, snap.Stdout[:outN], time.Now())
-			}
-			if e == nil {
-				t.state.OutOffset = snap.StdoutOffset
-				t.state.ErrOffset = snap.StderrOffset
-				t.lastErr = nil
-				if snap.Result != nil && snap.StdoutEOF && snap.StderrEOF {
-					t.state.Exit = snap.Result
-					t.state.Phase = "exited"
-					t.state.CompletedAt = time.Now()
+				d.stopGuestLogs(h)
+				reason := "its qemu process is gone"
+				if live.DriverAlive && !live.HostAgentAlive {
+					reason = "its lima hostagent is gone"
 				}
-			} else {
-				t.lastErr = e
-			}
-			d.reportActivity(t, time.Now(), t.lastErr != nil)
-			_ = d.store.write(t.state)
-			exited := t.state.Exit != nil
-			t.mu.Unlock()
-			if exited {
-				d.emit(t.state, "guest_workload_exited")
-				t.once.Do(func() { close(t.done) })
+				d.emit(h.tc, "exit", fmt.Sprintf("Box %s stopped: %s", h.boxID, reason))
+				h.finish(&drivers.ExitResult{ExitCode: 1, Err: fmt.Errorf("box %s stopped: %s", h.boxID, reason)})
 				return
 			}
-		}
-		select {
-		case <-d.ctx.Done():
+			checkCtx, cancelCheck := context.WithTimeout(ctx, 15*time.Second)
+			inst, err := b.Status(checkCtx)
+			cancelCheck()
+			if err != nil {
+				d.logger.Warn("cannot check box state", "task", h.tc.ID, "error", err)
+				continue
+			}
+			if d.boxm.Alive(inst) {
+				continue
+			}
+			d.stopGuestLogs(h)
+			res := &drivers.ExitResult{}
+			status := "gone"
+			if inst != nil {
+				status = inst.StatusMessage()
+				if inst.Status != limactl.StatusStopped {
+					res.ExitCode = 1
+					res.Err = fmt.Errorf("box %s ended in state %s", h.boxID, status)
+				}
+			} else {
+				res.ExitCode = 1
+				res.Err = fmt.Errorf("box %s disappeared", h.boxID)
+			}
+			d.emit(h.tc, "exit", fmt.Sprintf("Box %s stopped: %s", h.boxID, status))
+			h.finish(res)
 			return
-		case <-time.After(d.interval):
 		}
+	}()
+}
+
+func (d *Driver) stopWatcher(h *taskHandle) {
+	h.mu.Lock()
+	cancel := h.watchStop
+	h.watchStop = nil
+	h.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
-func (d *Driver) RecoverTask(h *drivers.TaskHandle) error {
-	if h == nil || h.Config == nil {
-		return fmt.Errorf("missing task handle")
+
+// RecoverTask re-attaches to a box that is still running, and refuses to hand
+// back a fake handle when it is not.
+func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
+	if handle == nil || handle.Config == nil {
+		return fmt.Errorf("cannot recover a task without a handle")
 	}
-	var b map[string]string
-	if e := h.GetDriverState(&b); e != nil {
-		return fmt.Errorf("recover handle decode (version=%d bytes=%d): %w", h.Version, len(h.DriverState), e)
+	st, err := decodeDriverState(handle.DriverState)
+	if err != nil {
+		return err
 	}
-	if b["key"] != lima.Hash([]byte(h.Config.ID)) || b["owner"] != d.store.Owner {
-		return fmt.Errorf("handle owner mismatch")
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.tasks[h.Config.ID] != nil {
-		return nil
-	}
-	lock, e := d.store.lock(b["key"])
-	if e != nil {
-		return e
-	}
-	s, e := d.store.read(b["key"])
-	if e != nil {
-		unlock(lock)
-		return e
-	}
-	if s.SpecHash != b["spec"] || s.TaskID != h.Config.ID || s.Destroyed {
-		unlock(lock)
-		return fmt.Errorf("recovery identity mismatch")
-	}
-	if h.Version == 2 {
-		if e = d.restoreAttachmentConfig(h, s, b["recovery"]); e != nil {
-			unlock(lock)
-			return e
-		}
-	} else if h.Version == 1 && missingLegacyConfig(h.Config) {
-		if e = d.restoreLegacyAttachmentConfig(h, s); e != nil {
-			unlock(lock)
-			return e
-		}
-	} else if h.Version != 1 {
-		unlock(lock)
-		return fmt.Errorf("unsupported task handle version")
-	} else if s.TemplateCatalogSHA256 != "" {
-		tc, currentSpec, err := d.validate(h.Config)
-		if err != nil {
-			unlock(lock)
-			return err
-		}
-		if currentSpec != s.SpecHash {
-			unlock(lock)
-			return fmt.Errorf("recovery task specification changed")
-		}
-		if err = verifyResolvedState(tc, s); err != nil {
-			unlock(lock)
-			return err
+	// The driver config bytes are not part of the handle Nomad persists, so the
+	// task config comes from the state the driver wrote itself.
+	cfg := st.Config
+	if cfg.BoxID == "" {
+		if err := handle.Config.DecodeDriverConfig(&cfg); err != nil {
+			return fmt.Errorf("decode task config from the handle: %w", err)
 		}
 	}
-	if e = s.RepositoryProfile.Validate(); e != nil {
-		unlock(lock)
-		return e
+	if err := cfg.applyDefaults(); err != nil {
+		return err
+	}
+	if cfg.BoxID != st.BoxID {
+		return fmt.Errorf("task handle names box %q but the task config names %q", st.BoxID, cfg.BoxID)
+	}
+	if d.boxm == nil {
+		return fmt.Errorf("driver is not configured")
 	}
 
-	ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
-	defer cancel()
-	v, e := d.owned(ctx, s)
-	if e == nil && s.Exit == nil && v.Status != "Running" {
-		e = fmt.Errorf("VM not running; do not recreate")
+	h := newTaskHandle(handle.Config, cfg)
+	h.setBoxDetails(boxState{
+		VolumeDir:   st.VolumeDir,
+		DiskPath:    st.DiskPath,
+		InstanceDir: st.InstanceDir,
+		CgroupMode:  st.CgroupMode,
+	})
+
+	b, err := d.boxFor(h, st.VolumeDir, func(kind, message string) { d.emit(handle.Config, kind, message) })
+	if err != nil {
+		return err
 	}
-	if e != nil {
-		unlock(lock)
-		return e
+	inst, err := b.Status(d.ctx)
+	if err != nil {
+		return fmt.Errorf("check box %s: %w", st.BoxID, err)
 	}
-	t, e := d.attach(h.Config, s, lock, true)
-	if e != nil {
-		unlock(lock)
-		return e
+	if reason := d.boxm.ReattachReason(inst); reason != "" {
+		return fmt.Errorf("cannot re-attach to box %s: %s", st.BoxID, reason)
 	}
-	d.tasks[h.Config.ID] = t
-	d.emit(s, "recovered_same_instance")
+	h.markRunning(time.Now())
+	d.startGuestLogs(d.ctx, h)
+	d.startWatcher(h, b)
+	d.tasks.Add(h)
+	d.emit(handle.Config, "recover", fmt.Sprintf("Re-attached to the running box %s (pid %d); the VM was not restarted", st.BoxID, inst.DriverPID))
 	return nil
 }
-func (d *Driver) get(id string) (*task, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	t := d.tasks[id]
-	if t == nil {
-		return nil, fmt.Errorf("unknown task")
+
+// WaitTask blocks until the VM stops.
+func (d *Driver) WaitTask(ctx context.Context, taskID string) (<-chan *drivers.ExitResult, error) {
+	h := d.tasks.Get(taskID)
+	if h == nil {
+		return nil, fmt.Errorf("task %q is not running", taskID)
 	}
-	return t, nil
+	return h.wait(), nil
 }
-func result(s *State) *drivers.ExitResult {
-	if s.Exit == nil {
+
+// StopTask stops the VM, first gracefully and then by force.
+func (d *Driver) StopTask(taskID string, timeout time.Duration, signal string) error {
+	h := d.tasks.Get(taskID)
+	if h == nil {
+		return fmt.Errorf("task %q is not running", taskID)
+	}
+	// Nomad uses the detach signal to hand the box to a replacement allocation:
+	// stop watching it, but leave the VM and its disk untouched.
+	if signal == drivers.DetachSignal {
+		d.stopGuestLogs(h)
+		d.stopWatcher(h)
+		d.emit(h.tc, "detach", fmt.Sprintf("Detached from box %s; the VM keeps running", h.boxID))
 		return nil
 	}
-	r := &drivers.ExitResult{ExitCode: s.Exit.Code, Signal: s.Exit.Signal}
-	if s.Exit.Error != "" {
-		r.Err = fmt.Errorf("guest execution failed: %s", s.Exit.Error)
+	// A box is shared by every allocation that names it. When Nomad stops a
+	// superseded allocation (a job update, a reconnect after the node was marked
+	// down), that allocation must not take the VM away from the one that still
+	// uses it: detach and leave the VM and its disk alone.
+	if others := d.tasks.OthersForBox(h.boxID, h.tc.ID); len(others) > 0 {
+		d.stopGuestLogs(h)
+		d.stopWatcher(h)
+		d.emit(h.tc, "detach", fmt.Sprintf("Not stopping box %s: %d other allocation(s) still use it", h.boxID, len(others)))
+		h.finish(&drivers.ExitResult{})
+		return nil
 	}
-	return r
+	if timeout <= 0 {
+		timeout = defaultStopTimeout
+	}
+	b, err := d.boxFor(h, h.volumeDir, func(kind, message string) { d.emit(h.tc, kind, message) })
+	if err != nil {
+		return err
+	}
+	return b.Stop(d.ctx, timeout)
 }
-func (d *Driver) WaitTask(ctx context.Context, id string) (<-chan *drivers.ExitResult, error) {
-	t, e := d.get(id)
-	if e != nil {
-		return nil, e
+
+// DestroyTask stops the VM if needed. It never deletes the Lima instance or the
+// disk: those are the box, and they live on the host volume.
+func (d *Driver) DestroyTask(taskID string, force bool) error {
+	h := d.tasks.Get(taskID)
+	if h == nil {
+		return nil
 	}
-	ch := make(chan *drivers.ExitResult, 1)
+	d.stopGuestLogs(h)
+	d.stopWatcher(h)
+	defer d.tasks.Delete(taskID)
+
+	if others := d.tasks.OthersForBox(h.boxID, h.tc.ID); len(others) > 0 {
+		d.emit(h.tc, "detach", fmt.Sprintf("Not destroying box %s: %d other allocation(s) still use it", h.boxID, len(others)))
+		h.finish(&drivers.ExitResult{})
+		return nil
+	}
+	b, err := d.boxFor(h, h.volumeDir, func(kind, message string) { d.emit(h.tc, kind, message) })
+	if err != nil {
+		d.logger.Warn("cannot rebuild box handle for destroy", "task", taskID, "error", err)
+		h.finish(&drivers.ExitResult{})
+		return nil
+	}
+	inst, err := b.Status(d.ctx)
+	if err != nil {
+		d.logger.Warn("cannot check box state during destroy", "task", taskID, "error", err)
+	} else if inst != nil && inst.IsRunning() {
+		timeout := defaultStopTimeout
+		if force {
+			timeout = 10 * time.Second
+		}
+		if err := b.Stop(d.ctx, timeout); err != nil {
+			if !force {
+				return fmt.Errorf("stop box %s: %w", h.boxID, err)
+			}
+			d.logger.Warn("box is still running after a forced destroy", "task", taskID, "error", err)
+		}
+	}
+	h.finish(&drivers.ExitResult{})
+	return nil
+}
+
+// InspectTask returns the driver's view of the task.
+func (d *Driver) InspectTask(taskID string) (*drivers.TaskStatus, error) {
+	h := d.tasks.Get(taskID)
+	if h == nil {
+		return nil, fmt.Errorf("task %q is not running", taskID)
+	}
+	return h.taskStatus(), nil
+}
+
+// TaskStats returns periodic resource usage of the VM processes.
+func (d *Driver) TaskStats(ctx context.Context, taskID string, interval time.Duration) (<-chan *drivers.TaskResourceUsage, error) {
+	h := d.tasks.Get(taskID)
+	if h == nil {
+		return nil, fmt.Errorf("task %q is not running", taskID)
+	}
+	ch := make(chan *drivers.TaskResourceUsage, 1)
+	statsCtx, cancel := context.WithCancel(ctx)
 	go func() {
 		defer close(ch)
-		select {
-		case <-t.done:
-			t.mu.Lock()
-			ch <- result(t.state)
-			t.mu.Unlock()
-		case <-ctx.Done():
-		case <-d.ctx.Done():
-		}
+		defer cancel()
+		d.streamStats(statsCtx, h, interval, ch)
 	}()
 	return ch, nil
 }
-func (d *Driver) InspectTask(id string) (*drivers.TaskStatus, error) {
-	t, e := d.get(id)
-	if e != nil {
-		return nil, e
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	s := t.state
-	phase := drivers.TaskStateRunning
-	if s.Exit != nil {
-		phase = drivers.TaskStateExited
-	}
-	if t.lastErr != nil {
-		phase = drivers.TaskStateUnknown
-	}
-	return &drivers.TaskStatus{ID: id, Name: s.TaskName, State: phase, StartedAt: s.StartedAt, CompletedAt: s.CompletedAt, ExitResult: result(s), DriverAttributes: map[string]string{"instance": s.Instance, "guest_os": "linux", "guest_arch": runtime.GOARCH, "network_isolated": "false", "results_retained": "true", "stats_scope": "host VM process snapshot", "lifecycle_mode": "report-only", "owner_state": "owner_unconfirmed", "work_state": s.Lifecycle.WorkState, "auto_close": "false", "auto_delete": "false", "lifecycle_report": s.Lifecycle.Report}}, nil
-}
-func (d *Driver) SignalTask(id, sig string) error {
-	lock, e := d.lockTaskOperation(id)
-	if e != nil {
-		return e
-	}
-	defer unlock(lock)
-	return d.signalTask(id, sig)
-}
-func (d *Driver) signalTask(id, sig string) error {
-	t, e := d.get(id)
-	if e != nil {
-		return e
-	}
-	signals := map[string]int{"SIGTERM": 15, "SIGINT": 2, "SIGKILL": 9, "TERM": 15, "INT": 2, "KILL": 9}
-	n, ok := signals[sig]
-	if !ok {
-		return fmt.Errorf("unsupported signal")
-	}
-	t.mu.Lock()
-	s := *t.state
-	t.mu.Unlock()
-	ctx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
-	defer cancel()
-	if _, e = d.owned(ctx, &s); e != nil {
-		return e
-	}
-	p := d.payload(&s, "signal")
-	p["signal"] = n
-	_, _, e = d.client.Guest(ctx, s.Instance, p)
-	return e
-}
-func (d *Driver) StopTask(id string, timeout time.Duration, sig string) error {
-	t, release, e := d.cleanupTask(id)
-	defer release()
-	if e != nil {
-		return e
-	}
-	t.mu.Lock()
-	instance := t.state.Instance
-	t.mu.Unlock()
-	lock, e := d.drainTaskOperations(t, instance)
-	if e != nil {
-		return e
-	}
-	defer unlock(lock)
-	return d.stopTask(id, timeout, sig)
-}
-func (d *Driver) stopTask(id string, timeout time.Duration, sig string) error {
-	t, e := d.get(id)
-	if e != nil {
-		return e
-	}
-	t.mu.Lock()
-	s := *t.state
-	t.mu.Unlock()
-	ctx, cancel := context.WithTimeout(d.ctx, 2*time.Minute)
-	defer cancel()
-	v, e := d.owned(ctx, &s)
-	if e != nil {
-		return e
-	}
-	revoked := false
-	if v.Status == "Running" {
-		// Journal before signalling: recovery must never restart secret delivery
-		// after cancellation/finish has begun, even if runtime shutdown is slow.
-		t.vaultMu.Lock()
-		t.vaultStopped = true
-		if t.vaultHash != "" {
-			s.VaultTokenSHA256 = t.vaultHash
-		}
-		t.mu.Lock()
-		t.state.VaultFinalizing = true
-		sealErr := d.store.write(t.state)
-		t.mu.Unlock()
-		t.vaultMu.Unlock()
-		if sealErr != nil {
-			return sealErr
-		}
-		if s.Exit == nil {
-			if sig == "" {
-				sig = "SIGTERM"
-			}
-			_ = d.signalTask(id, sig)
-			if timeout <= 0 {
-				timeout = time.Second
-			}
-			select {
-			case <-t.done:
-			case <-time.After(timeout):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		if _, e = d.owned(ctx, &s); e != nil {
-			return e
-		}
-		t.vaultMu.Lock()
-		er := d.finalizeVault(ctx, t.cfg, &s)
-		t.vaultMu.Unlock()
-		if er != nil {
-			return er
-		}
-		var vaultTask TaskConfig
-		_ = t.cfg.DecodeDriverConfig(&vaultTask)
-		revoked = vaultTask.VaultRequired
-		if vaultTask.VaultRequired {
-			d.emit(&s, "task_token_revoked")
-		}
-		if e = d.client.Stop(ctx, s.Instance); e != nil {
-			return e
-		}
-	}
-	confirmed, err := d.owned(ctx, &s)
-	if err != nil {
-		return err
-	}
-	if confirmed.Status != "Stopped" || confirmed.DriverPID > 0 || confirmed.HostAgentPID > 0 {
-		return fmt.Errorf("runtime stop not confirmed; VM/reservations retained")
-	}
-	var hashes []string
-	var disk *RetainedDiskIdentity
-	if revoked {
-		var vaultTask TaskConfig
-		_ = t.cfg.DecodeDriverConfig(&vaultTask)
-		if vaultTask.VaultRequired {
-			hashes, e = d.store.vaultExposures(&s)
-			if e != nil || len(hashes) == 0 {
-				return fmt.Errorf("durable token exposure history required for stop receipt")
-			}
-		}
-		disk, e = d.retainedDiskIdentity(s.Instance)
-		if e != nil {
-			return e
-		}
-	}
-	t.mu.Lock()
-	if t.state.Exit == nil {
-		t.state.Exit = &lima.Result{Code: -1, Error: "stopped_before_exit_record"}
-		t.state.CompletedAt = time.Now()
 
+// ExecTask runs a command inside the guest and returns its buffered output.
+func (d *Driver) ExecTask(taskID string, args []string, timeout time.Duration) (*drivers.ExecTaskResult, error) {
+	h := d.tasks.Get(taskID)
+	if h == nil {
+		return nil, fmt.Errorf("task %q is not running", taskID)
 	}
-	t.state.Phase = "stopped"
-	if revoked {
-		t.state.StopReceipt = &StopReceipt{Allocation: s.AllocID, Session: s.WorkerSessionID, Instance: s.Instance, Generation: generation(&s), TokenSHA256: s.VaultTokenSHA256, ConfirmedAt: time.Now().UTC(), RevocationConfirmed: true, ExposedTokenSHA256: hashes, Disk: disk}
+	if len(args) == 0 {
+		return nil, fmt.Errorf("exec needs a command")
 	}
-	e = d.store.write(t.state)
-	t.mu.Unlock()
-	t.once.Do(func() { close(t.done) })
-	if e == nil {
-		t.mu.Lock()
-		stopped := *t.state
-		t.mu.Unlock()
-		d.emit(&stopped, "vm_stopped")
+	ctx := d.ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
-	return e
-}
-func (d *Driver) DestroyTask(id string, force bool) error {
-	t, release, e := d.cleanupTask(id)
-	defer release()
-	if e != nil {
-		return e
+	stdout, stderr, err := d.boxm.Lima().Shell(ctx, h.boxID, args)
+	res := &drivers.ExecTaskResult{
+		Stdout:     []byte(stdout),
+		Stderr:     []byte(stderr),
+		ExitResult: &drivers.ExitResult{},
 	}
-	t.mu.Lock()
-	s := *t.state
-	t.mu.Unlock()
-	operation, e := d.drainTaskOperations(t, s.Instance)
-	if e != nil {
-		return e
-	}
-	defer unlock(operation)
-	ctx, cancel := context.WithTimeout(d.ctx, 2*time.Minute)
-	defer cancel()
-	v, e := d.owned(ctx, &s)
-	if e != nil {
-		return e
-	}
-	if v.Status == "Running" {
-		if s.Exit == nil && !force {
-			return fmt.Errorf("active workload; stop explicitly before destroy")
-		}
-		if e = d.stopTask(id, time.Second, "SIGTERM"); e != nil {
-			return e
-		}
-	}
-	confirmed, err := d.owned(ctx, &s)
 	if err != nil {
-		return err
+		res.ExitResult.ExitCode = exitCode(err)
+		res.ExitResult.Err = err
 	}
-	if confirmed.Status != "Stopped" || confirmed.DriverPID > 0 || confirmed.HostAgentPID > 0 {
-		return fmt.Errorf("destroy requires confirmed stopped owned VM; retained")
-	}
-	t.mu.Lock()
-	t.state.Destroyed = true
-	t.state.Phase = "destroyed_disk_retained"
-	e = d.store.write(t.state)
-	t.mu.Unlock()
-	return e
+	return res, nil
 }
-func (d *Driver) ExecTask(id string, cmd []string, timeout time.Duration) (*drivers.ExecTaskResult, error) {
-	operation, err := d.lockTaskOperation(id)
-	if err != nil {
-		return nil, err
+
+// exitCode extracts a process exit code from a limactl error.
+func exitCode(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
 	}
-	defer unlock(operation)
-	t, e := d.get(id)
-	if e != nil {
-		return nil, e
-	}
-	t.mu.Lock()
-	s := *t.state
-	t.mu.Unlock()
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	operationCtx := t.operationCtx
-	if operationCtx == nil {
-		operationCtx = d.ctx
-	}
-	ctx, cancel := context.WithTimeout(operationCtx, timeout)
-	defer cancel()
-	if _, e = d.owned(ctx, &s); e != nil {
-		return nil, e
-	}
-	cmd, e = lima.RepositoryCommand(s.RepositoryProfile, cmd)
-	if e != nil {
-		return nil, e
-	}
-	out, e := d.client.Exec(ctx, s.Instance, cmd)
-	r := &drivers.ExecTaskResult{Stdout: out, ExitResult: &drivers.ExitResult{ExitCode: 0}}
-	if e != nil {
-		r.ExitResult.ExitCode = -1
-		r.ExitResult.Err = e
-		return r, e
-	}
-	return r, nil
+	return -1
 }
+
+// SignalTask is not supported: signals are sent to the VM, not to a process.
+func (d *Driver) SignalTask(taskID, signal string) error {
+	return fmt.Errorf("the box driver does not send signals to the VM (task %q, signal %q)", taskID, signal)
+}
+
+// Shutdown stops the driver's background work. Running boxes keep running: they
+// are recovered by RecoverTask when the plugin comes back.
 func (d *Driver) Shutdown(ctx context.Context) error {
 	d.cancel()
-	d.mu.Lock()
-	for _, t := range d.tasks {
-		t.out.Close()
-		t.err.Close()
-	}
-	d.mu.Unlock()
-	done := make(chan struct{})
-	go func() { d.wg.Wait(); close(done) }()
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return nil
 }
 
-// Non-TTY native Nomad exec streams; no wrapper server or alternate RPC.
-func (d *Driver) ExecTaskStreaming(ctx context.Context, id string, o *drivers.ExecOptions) (*drivers.ExitResult, error) {
-	operation, err := d.lockTaskOperation(id)
-	if err != nil {
-		return nil, err
-	}
-	defer unlock(operation)
-	if o == nil {
-		return nil, fmt.Errorf("exec options required")
-	}
-	t, e := d.get(id)
-	if e != nil {
-		return nil, e
-	}
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	if t.operationCtx != nil {
-		stop := context.AfterFunc(t.operationCtx, cancel)
-		defer stop()
-	}
-	ctx = streamCtx
-	t.mu.Lock()
-	s := *t.state
-	t.mu.Unlock()
-	if _, e = d.owned(ctx, &s); e != nil {
-		return nil, e
-	}
-	if o.Tty {
-		sizes := make(chan lima.TerminalSize, 1)
-		resizeCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-		go func() {
-			defer close(sizes)
-			for {
-				select {
-				case <-resizeCtx.Done():
-					return
-				case v, ok := <-o.ResizeCh:
-					if !ok {
-						return
-					}
-					select {
-					case sizes <- lima.TerminalSize{Rows: uint16(v.Height), Cols: uint16(v.Width)}:
-					case <-resizeCtx.Done():
-						return
-					}
-				}
-			}
-		}()
-		command, profileErr := lima.RepositoryCommand(s.RepositoryProfile, o.Command)
-		if profileErr != nil {
-			return nil, profileErr
-		}
-		e = d.client.PTY(ctx, s.Instance, command, o.Stdin, o.Stdout, sizes)
-	} else {
-		command, profileErr := lima.RepositoryCommand(s.RepositoryProfile, o.Command)
-		if profileErr != nil {
-			return nil, profileErr
-		}
-		e = d.client.Stream(ctx, s.Instance, command, o.Stdin, o.Stdout, o.Stderr)
-	}
-	if e == nil {
-		return &drivers.ExitResult{ExitCode: 0}, nil
-	}
-	var exit *exec.ExitError
-	if errors.As(e, &exit) && exit.ExitCode() != 255 && ctx.Err() == nil {
-		return &drivers.ExitResult{ExitCode: exit.ExitCode()}, nil
-	}
-	return &drivers.ExitResult{ExitCode: -1, Err: fmt.Errorf("exec transport uncertain; no retry")}, e
-}
+// compile-time proof that the driver satisfies the plugin interfaces.
+var (
+	_ drivers.DriverPlugin            = (*Driver)(nil)
+	_ drivers.DriverShutdowner        = (*Driver)(nil)
+	_ drivers.ExecTaskStreamingDriver = (*Driver)(nil)
+)

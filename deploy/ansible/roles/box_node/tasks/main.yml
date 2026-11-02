@@ -1,0 +1,30 @@
+---
+# box_node: the box driver, its volume plugin and its prerequisites on a Nomad
+# client node.
+#
+# What this role owns: the release directories and the `current` symlink, the two
+# plugin binaries, the box-volume operator settings file, lima and qemu (checked,
+# installed only when box_install_deps says so), /dev/kvm access, the runtime user
+# and its groups, and the cgroup prerequisites of the memory cap.
+#
+# What it does NOT own: the Nomad client configuration and the service. The
+# nomad_client role of the same play renders /etc/nomad.d from these variables
+# (including the driver's plugin block), writes the unit or the launchd plist,
+# validates the result and restarts the client once. This role only reports that
+# the plugin binaries changed. See deploy/README.md, "The two roles on a node".
+#
+# The two stages are tagged, so they can be run apart:
+#
+#   --tags preflight   read-only checks, nothing is written
+#   --tags install     the release, the two plugins, the settings file, the
+#                      runtime user, the cgroup prerequisites
+#
+# Both run by default. --check lists every change without making any.
+
+- name: Preflight
+  ansible.builtin.import_tasks: preflight.yml
+  tags: [preflight]
+
+- name: Install the box driver
+  ansible.builtin.import_tasks: install.yml
+  tags: [install]

@@ -1,0 +1,133 @@
+# The real thing: both integration suites on a runner that has KVM, against a
+# real Lima VM and a real Nomad server and client.
+#
+# Both suites use their own ports and their own work directory, so they run as a
+# matrix on two runners instead of one after the other. A 4 vCPU / 16 GB runner
+# is enough: the boxes are 2 vCPU / 1 GiB, and one scenario resizes one to
+# 4 vCPU / 1536 MiB.
+#
+# Manual runs: the "Run workflow" button (workflow_dispatch).
+name: Integration
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned, with the digest from the project's own SHA256SUMS: the versions the
+  # suites were measured against (Nomad 2.0.7 and lima 2.2.0).
+  NOMAD_VERSION: "2.0.7"
+  NOMAD_SHA256: 4c9b8a0850d6fd9caadbbab09b3e6fdf8b77aa777729543c70c61b85acca68c1
+  LIMA_VERSION: "2.2.0"
+  LIMA_SHA256: a0ea1ccf6b7335a900adb5f8d2b8384457965fecb1ba72f09b4e3e46d12f424a
+
+jobs:
+  integration:
+    name: ${{ matrix.suite.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - key: driver
+            name: driver suite (scripts/integration.sh)
+            script: scripts/integration.sh
+            work: .integration
+          - key: cli
+            name: CLI suite (scripts/integration-cli.sh)
+            script: scripts/integration-cli.sh
+            work: .integration-cli
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Each suite downloads the cloud image (about 250 MB) and gives one box an
+      # 8 GiB disk, so the space the image's preinstalled toolchains hold is
+      # wanted back first.
+      - name: Make room
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
+
+      # GitHub's documented way to give an unprivileged user /dev/kvm.
+      - name: Enable /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      # The driver puts every VM into a transient systemd user scope with a
+      # memory cap, and a scenario asserts that the scope exists: a runner
+      # service starts without a user manager, so give the runner user one.
+      - name: Give the runner user a systemd manager
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u)"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+
+      - name: The driver can make its memory scope
+        run: systemd-run --user --scope --collect -q true
+
+      - name: Install Nomad ${{ env.NOMAD_VERSION }}
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/nomad.zip" \
+            "https://releases.hashicorp.com/nomad/${NOMAD_VERSION}/nomad_${NOMAD_VERSION}_linux_amd64.zip"
+          echo "${NOMAD_SHA256}  $RUNNER_TEMP/nomad.zip" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          unzip -q "$RUNNER_TEMP/nomad.zip" nomad -d "$RUNNER_TEMP/bin"
+          "$RUNNER_TEMP/bin/nomad" version
+
+      - name: Install qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils cloud-image-utils
+
+      # lima's guest agents live next to the binary in share/lima, so the
+      # tarball is unpacked into a prefix, not just its bin/.
+      - name: Install lima ${{ env.LIMA_VERSION }}
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/lima.tgz" \
+            "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-x86_64.tar.gz"
+          echo "${LIMA_SHA256}  $RUNNER_TEMP/lima.tgz" | sha256sum -c -
+          sudo tar -C /usr/local -xzf "$RUNNER_TEMP/lima.tgz"
+          limactl --version
+          qemu-system-x86_64 --version | head -1
+
+      # KEEP keeps the work directory, so the logs below still exist when the
+      # suite fails; the runner is thrown away afterwards, so nothing leaks.
+      - name: Run ${{ matrix.suite.script }}
+        env:
+          BOX_TEST_NOMAD: ${{ runner.temp }}/bin/nomad
+          BOX_TEST_LIMACTL: /usr/local/bin/limactl
+          BOX_TEST_KEEP: "1"
+          BOX_CLI_KEEP: "1"
+        timeout-minutes: 35
+        run: ${{ matrix.suite.script }}
+
+      - name: Upload the Nomad and Lima logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: integration-logs-${{ matrix.suite.key }}
+          path: |
+            ${{ matrix.suite.work }}/*.log
+            ${{ matrix.suite.work }}/lima-home/*/ha.log
+            ${{ matrix.suite.work }}/lima-home/*/serial*.log
+            ${{ matrix.suite.work }}/lima-home/*/cloud-init.log
+          if-no-files-found: ignore
+          retention-days: 7

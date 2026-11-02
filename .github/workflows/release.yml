@@ -1,0 +1,91 @@
+# A tag vX.Y.Z becomes a GitHub release: the binaries deploy/build.sh builds for
+# every target, the SHA256SUMS that covers them, and a build provenance
+# attestation for each artifact.
+#
+# The box images are a separate workflow (image.yml), which a published release
+# also triggers; it adds its assets to the same release.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  # the release and its assets
+  contents: write
+  # the provenance attestation
+  id-token: write
+  attestations: write
+  # the image build this workflow asks for (see the last step)
+  actions: write
+
+jobs:
+  release:
+    name: Build and publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # tags and history, so a version can be read from git
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The tag names the version: v1.2.3 becomes 1.2.3, which is what Nomad
+      # parses when it loads the plugin.
+      - name: Build the release artifacts
+        run: ./deploy/build.sh --version "${GITHUB_REF_NAME#v}" --out dist
+
+      - name: The checksums cover the artifacts
+        run: |
+          ls -l dist
+          (cd dist && sha256sum --check SHA256SUMS)
+
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      # gh is on the runner. It refuses to overwrite an asset, and the release
+      # is created once: a tag pushed twice cannot replace a published artifact.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "a release for $GITHUB_REF_NAME exists already; nothing is overwritten" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+
+      # A release created with the workflow's own token does not trigger the
+      # workflows that listen for `release: published` (GitHub's rule against a
+      # token starting a run), so the image build is asked for by name. Without
+      # it, run image.yml yourself: the "Run workflow" button takes the version.
+      - name: Ask for the box image
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run image.yml \
+            -f version="${GITHUB_REF_NAME#v}" \
+            -f release_tag="$GITHUB_REF_NAME"
+          echo "the image build is queued; watch it with: gh run list --workflow image.yml"
+
+      - name: Say what was published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### Release $GITHUB_REF_NAME"
+            echo
+            gh release view "$GITHUB_REF_NAME" --json assets \
+              --jq '.assets[] | "| \(.name) | \(.size) bytes |"'
+          } >> "$GITHUB_STEP_SUMMARY"

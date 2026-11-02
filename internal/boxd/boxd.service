@@ -1,0 +1,36 @@
+[Unit]
+Description=boxd: box guest agent-session daemon
+Documentation=https://github.com/shady2k/nomad-driver-lima
+After=local-fs.target network.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+# Sessions and transcripts live on the box disk (/var/lib/boxd). Nothing secret
+# does: the executor credentials arrive on the guest's tmpfs (/run/box/secrets,
+# mode 0700 root, written by the Nomad driver) and everything boxd derives from
+# them lives in the runtime directory (/run/boxd), which a reboot removes. The
+# socket is recreated per boot too.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StateDirectory=boxd
+StateDirectoryMode=0700
+RuntimeDirectory=boxd
+RuntimeDirectoryMode=0755
+ExecStart=/usr/local/bin/boxd \
+    --socket /run/boxd/boxd.sock \
+    --state-dir /var/lib/boxd \
+    --runtime-dir /run/boxd \
+    --secrets-dir /run/box/secrets \
+    --local-dir /etc/box/local
+# The event feed is stdout: one JSON line per event, which the driver streams
+# into the Nomad task log through `journalctl -f -o cat -u boxd`.
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=1
+# boxd stops its executors itself; mixed mode cleans up any stragglers.
+KillMode=mixed
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

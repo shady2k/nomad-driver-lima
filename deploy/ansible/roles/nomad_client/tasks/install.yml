@@ -1,0 +1,260 @@
+---
+# Write the client configuration, the service and its secrets, validate the whole
+# configuration, and restart the client once - only when something changed.
+
+- name: Install | Create the directories the client uses
+  ansible.builtin.file:
+    path: '{{ item.path }}'
+    state: directory
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ nomad_file_group }}'
+    mode: '{{ item.mode }}'
+  loop:
+    - path: '{{ nomad_config_dir }}'
+      mode: '0755'
+    - path: '{{ nomad_data_dir }}'
+      mode: '0750'
+    - path: '{{ nomad_host_volumes_dir }}'
+      mode: '0755'
+  loop_control:
+    label: '{{ item.path }}'
+
+# --------------------------------------------------------------- the configuration
+- name: Install | Write the base configuration (10-base.json)
+  ansible.builtin.template:
+    src: 10-base.json.j2
+    dest: '{{ nomad_base_config_file }}'
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ nomad_file_group }}'
+    mode: '0644'
+  notify: Restart the Nomad client
+
+- name: Install | Write the box driver configuration (50-box.json)
+  ansible.builtin.template:
+    src: 50-box.json.j2
+    dest: '{{ nomad_box_config_file }}'
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ nomad_file_group }}'
+    mode: '0644'
+  notify: Restart the Nomad client
+  when: nomad_box_enabled | bool
+
+- name: Install | Remove the box configuration of a node that no longer runs boxes
+  ansible.builtin.file:
+    path: '{{ nomad_box_config_file }}'
+    state: absent
+  notify: Restart the Nomad client
+  when: not nomad_box_enabled | bool
+
+# The tokens. Mode 0600, root only, and no_log so the value never reaches a log
+# or a --diff: these are the only secrets this role touches.
+- name: Install | Write the service environment of a Linux node
+  ansible.builtin.template:
+    src: nomad.env.j2
+    dest: '{{ nomad_env_file }}'
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ nomad_file_group }}'
+    mode: '0600'
+  no_log: true
+  notify: Restart the Nomad client
+  when: ansible_facts.system == 'Linux'
+
+# ------------------------------------------------------------------ the service
+- name: Install | Create the unit directory
+  ansible.builtin.file:
+    path: '{{ nomad_unit_dir }}'
+    state: directory
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ nomad_file_group }}'
+    mode: '0755'
+  when: ansible_facts.system == 'Linux'
+
+- name: Install | Write the systemd unit
+  ansible.builtin.template:
+    src: nomad.service.j2
+    dest: '{{ nomad_unit_path }}'
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ nomad_file_group }}'
+    mode: '0644'
+  notify: Restart the Nomad client
+  when: ansible_facts.system == 'Linux'
+
+# The launchd daemon of the Mac. It carries the same two tokens in its
+# EnvironmentVariables (macOS has no EnvironmentFile), so it is written 0600 and
+# with no_log.
+- name: Install | Create the directory of the launchd plist
+  ansible.builtin.file:
+    path: '{{ nomad_launchd_plist | dirname }}'
+    state: directory
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ nomad_file_group }}'
+    mode: '0755'
+  when: nomad_launchd_enabled | bool
+
+- name: Install | Write the launchd plist (macOS)
+  ansible.builtin.template:
+    src: nomad.plist.j2
+    dest: '{{ nomad_launchd_plist }}'
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ nomad_file_group }}'
+    mode: '0600'
+  no_log: true
+  notify: Reload the launchd daemon
+  when: nomad_launchd_enabled | bool
+
+# launchd reads a plist once, when the job is loaded, so a changed plist needs a
+# bootout + bootstrap (the "Reload the launchd daemon" handler). A job that is not
+# loaded yet - the first run on a fresh Mac - is loaded here.
+- name: Install | Ask launchd whether the daemon is loaded
+  ansible.builtin.command:
+    argv: ['launchctl', 'print', 'system/{{ nomad_launchd_label }}']
+  register: nomad_launchd_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - nomad_launchd_enabled | bool
+    - nomad_launchd_load | bool
+
+- name: Install | Load the launchd daemon
+  ansible.builtin.command:
+    argv: ['launchctl', 'bootstrap', 'system', '{{ nomad_launchd_plist }}']
+  when:
+    - nomad_launchd_enabled | bool
+    - nomad_launchd_load | bool
+    - nomad_launchd_state.rc | default(1) != 0
+  changed_when: true
+
+- name: Install | Report the launchd commands of this host
+  ansible.builtin.debug:
+    msg:
+      - >-
+        launchd writes {{ nomad_launchd_plist }}; the job is
+        {{ "loaded by this role" if nomad_launchd_load | bool
+           else "STAGED - load it with: sudo launchctl bootstrap system " ~ nomad_launchd_plist }}
+      - >-
+        a restart that keeps the boxes: sudo launchctl kickstart -k
+        system/{{ nomad_launchd_label }} (AbandonProcessGroup={{ nomad_launchd_abandon_process_group }}
+        leaves the VMs running)
+  when: nomad_launchd_enabled | bool
+
+# A new driver or volume plugin binary only takes effect when the client starts
+# the plugin again, so a plugin change (or a rollback to another release) restarts
+# the client even when no configuration file changed. The box_node role sets the
+# flag; a play without it leaves the handler alone.
+- name: Install | Restart the client when the plugins changed
+  ansible.builtin.debug:
+    msg: 'the box plugins changed; the client is restarted so it loads them'
+  changed_when: true
+  notify: Restart the Nomad client
+  when:
+    - box_plugins_changed | default(false) | bool
+    - not ansible_check_mode
+
+# -------------------------------------------------------------- validate, restart
+- name: Install | Validate the complete client configuration
+  ansible.builtin.command:
+    argv: ['{{ nomad_binary }}', 'config', 'validate', '{{ nomad_config_dir }}']
+  register: nomad_config_validate
+  changed_when: false
+  when:
+    - nomad_validate_config | bool
+    - not ansible_check_mode
+
+- name: Install | Report the validated configuration
+  ansible.builtin.debug:
+    msg: >-
+      nomad config validate {{ nomad_config_dir }}:
+      {{ nomad_config_validate.stdout_lines | default([]) | join('; ') }}
+  when:
+    - nomad_validate_config | bool
+    - not ansible_check_mode
+
+- name: Install | Restart the client now, rather than at the end of the play
+  ansible.builtin.meta: flush_handlers
+
+# -------------------------------------------------------------------- what next
+- name: Install | Wait for the cluster to report this node as ready
+  ansible.builtin.uri:
+    url: '{{ nomad_wait_addr }}/v1/nodes'
+    method: GET
+    headers: '{{ nomad_api_headers }}'
+    status_code: [200]
+    timeout: 20
+  register: nomad_nodes_list
+  until: >-
+    (nomad_nodes_list.json | default([]) | selectattr('Name', 'equalto', nomad_node_name)
+     | selectattr('Status', 'equalto', 'ready') | list | length > 0)
+  retries: '{{ nomad_wait_retries }}'
+  delay: '{{ nomad_wait_delay }}'
+  changed_when: false
+  failed_when: false
+  when:
+    - nomad_wait_ready | bool
+    - nomad_system_changes | bool
+    - not ansible_check_mode
+
+- name: Install | Remember the node the cluster reports
+  ansible.builtin.set_fact:
+    nomad_cluster_node: >-
+      {{ (nomad_nodes_list.json | default([]) | selectattr('Name', 'equalto', nomad_node_name)
+          | list | first) | default({}, true) }}
+  when:
+    - nomad_wait_ready | bool
+    - nomad_system_changes | bool
+    - not ansible_check_mode
+
+- name: Install | Report that the cluster does not know this node yet
+  ansible.builtin.debug:
+    msg: >-
+      The cluster does not list a ready node named {{ nomad_node_name }} after
+      {{ nomad_wait_retries }} attempts. Check nomad_servers
+      ({{ nomad_servers | join(', ') }}), the client log
+      (journalctl -u {{ nomad_service_name }} -n 100 on Linux,
+      tail {{ nomad_launchd_stderr }} on macOS), and whether the node registered
+      under another name.
+  when:
+    - nomad_wait_ready | bool
+    - nomad_system_changes | bool
+    - not ansible_check_mode
+    - nomad_cluster_node | length == 0
+
+- name: Install | Report the node and the box driver the cluster sees
+  ansible.builtin.debug:
+    msg:
+      - >-
+        node {{ nomad_node_name }} ({{ nomad_cluster_node.ID | default("?") }}) is
+        {{ nomad_cluster_node.Status | default("?") }} in
+        {{ nomad_cluster_node.Datacenter | default("?") }}
+      - >-
+        box driver:
+        {{ 'healthy' if (nomad_cluster_node.Drivers.box.Healthy | default(false)) | bool
+           else ('not healthy: ' ~ (nomad_cluster_node.Drivers.box.HealthDescription | default('not reported')))
+           if nomad_box_enabled | bool else 'not configured on this node' }}
+      - >-
+        box volume plugin:
+        {{ nomad_cluster_node.Attributes['plugins.host_volume.box-volume.version'] | default('not fingerprinted') }}
+  when:
+    - nomad_wait_ready | bool
+    - nomad_system_changes | bool
+    - not ansible_check_mode
+    - nomad_cluster_node | length > 0
+
+- name: Install | Report what was written
+  ansible.builtin.debug:
+    msg:
+      - >-
+        configuration {{ nomad_base_config_file }}
+        {{ '+ ' ~ nomad_box_config_file if nomad_box_enabled | bool else '(no box plugin block)' }}
+        loaded by {{ nomad_unit_path if ansible_facts.system == 'Linux' else nomad_launchd_plist }}
+      - >-
+        secrets: {{ nomad_env_file ~ ' (0600)' if ansible_facts.system == 'Linux' else nomad_launchd_plist ~ ' (0600, EnvironmentVariables)' }} holds
+        {{ (['the ACL token'] if nomad_acl_token | length > 0 else [])
+           + (['the client introduction token'] if nomad_client_intro_token | length > 0 else [])
+           | join(' and ') if (nomad_acl_token | length > 0) or (nomad_client_intro_token | length > 0)
+           else 'nothing (no token configured)' }}
+      - >-
+        client restart:
+        {{ 'done by this role when something changed' if nomad_system_changes | bool and nomad_restart_enabled | bool
+           else 'disabled (nomad_system_changes: false or nomad_restart_enabled: false)' }}
+      - 'next: deploy/accept.sh --node {{ nomad_node_name }} on the coordinator'

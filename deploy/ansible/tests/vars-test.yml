@@ -1,0 +1,97 @@
+---
+# The values the role checks use. Every path is inside NOMAD_TEST_PREFIX (the
+# throwaway prefix run-tests.sh creates under the repository), and every switch
+# that would touch the machine is off: this runs as the operator, without root,
+# and without a service manager.
+nomad_test_prefix: "{{ lookup('env', 'NOMAD_TEST_PREFIX') }}"
+
+# The release under test, built by deploy/build.sh at the start of the run.
+box_version: "{{ lookup('env', 'BOX_TEST_VERSION') }}"
+box_dist_dir: "{{ lookup('env', 'BOX_TEST_DIST') }}"
+
+# ------------------------------------------------------------------ the release
+# The same layout a node gets: one directory per version, one live symlink.
+box_release_root: '{{ nomad_test_prefix }}/opt/box'
+box_lima_home: '{{ nomad_test_prefix }}/var/lib/box/lima'
+box_image_cache_dir: '{{ nomad_test_prefix }}/var/lib/box/images'
+box_volume_config_file: '{{ nomad_test_prefix }}/etc/box/volume.json'
+
+# ------------------------------------------------------------- the client paths
+nomad_config_dir: '{{ nomad_test_prefix }}/etc/nomad.d'
+nomad_unit_dir: '{{ nomad_test_prefix }}/etc/systemd/system'
+nomad_data_dir: '{{ nomad_test_prefix }}/var/lib/nomad'
+nomad_host_volumes_dir: '{{ nomad_test_prefix }}/var/lib/nomad-volumes'
+nomad_binary: '{{ nomad_test_prefix }}/usr/local/bin/nomad'
+nomad_stage_dir: '{{ nomad_test_prefix }}/var/tmp/nomad-release'
+nomad_env_file: '{{ nomad_config_dir }}/nomad.env'
+
+# The launchd plist of the Mac, rendered into the prefix so the checks can
+# validate it on Linux. Nothing loads it here (nomad_launchd_load is false).
+nomad_launchd_enabled: true
+nomad_launchd_load: false
+nomad_launchd_plist: '{{ nomad_test_prefix }}/Library/LaunchDaemons/com.hashicorp.nomad.plist'
+
+# --------------------------------------------------------------- the coordinator
+# The coordinator role would otherwise write the CLI, the skill and the
+# environment file into the home of the user that runs the checks: point all
+# three into the prefix.
+box_coordinator_user: '{{ ansible_facts.user_id }}'
+box_skill_dir: '{{ nomad_test_prefix }}/home/.agents/skills'
+box_claude_skill_dir: '{{ nomad_test_prefix }}/home/.claude/skills'
+# Claude Code keeps its marketplaces and plugins in its own directory: point it at
+# the prefix, so no check adds a marketplace to the real ~/.claude.
+box_claude_config_dir: '{{ nomad_test_prefix }}/home/.claude-config'
+box_env_file: '{{ nomad_test_prefix }}/home/.config/box/env'
+box_cli_path: '{{ nomad_test_prefix }}/usr/local/bin/box'
+
+# -------------------------------------------------------------- the box plugin
+box_runtime_user: '{{ ansible_facts.user_id }}'
+box_limactl: "{{ lookup('env', 'NOMAD_TEST_LIMACTL') }}"
+box_qemu_binary: "{{ lookup('env', 'NOMAD_TEST_QEMU') }}"
+box_install_deps: false
+box_disk_free_floor_mib: 1
+box_disk_free_warn_mib: 1
+
+# ------------------------------------------------------------------ the client
+nomad_node_name: 'box-test-node'
+nomad_region: global
+nomad_datacenter: dc-test
+nomad_bind_addr: '127.0.0.1'
+nomad_advertise_addr: '127.0.0.1'
+nomad_servers: ['127.0.0.1:54647']
+nomad_ports:
+  http: 54646
+  rpc: 54647
+  serf: 54648
+nomad_client_extra:
+  min_dynamic_port: 54650
+  max_dynamic_port: 54658
+nomad_node_pool: default
+nomad_meta:
+  box_test: 'yes'
+nomad_reserved:
+  cpu: 200
+  memory: 512
+nomad_telemetry:
+  prometheus_metrics: true
+  disable_hostname: true
+
+nomad_box_enabled: true
+nomad_box_runtime_user: '{{ box_runtime_user }}'
+nomad_box_vm_type: qemu
+nomad_box_driver_allowlist: box
+
+# The prefix is not /etc, but this host is NixOS: say so explicitly.
+nomad_allow_nixos: true
+
+# Nothing is started, restarted or waited for: the run writes files only.
+nomad_system_changes: false
+nomad_wait_ready: false
+nomad_restart_enabled: false
+box_system_changes: false
+
+# The binary: install the pinned release from a local zip when the run has one,
+# otherwise the check has already put a nomad in the prefix (run-tests.sh does).
+nomad_install_binary: "{{ lookup('env', 'NOMAD_TEST_ZIP') | length > 0 }}"
+nomad_release_url: "file://{{ lookup('env', 'NOMAD_TEST_ZIP') }}"
+nomad_release_sha256_pinned: "{{ lookup('env', 'NOMAD_TEST_ZIP_SHA256') }}"

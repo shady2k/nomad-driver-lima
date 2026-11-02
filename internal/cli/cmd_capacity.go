@@ -1,0 +1,124 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"strings"
+)
+
+// capacityOutput is the JSON document of `box capacity`.
+type capacityOutput struct {
+	Nodes  []*NodeCapacity `json:"nodes"`
+	Arches []archSummary   `json:"arches"`
+}
+
+// diskSummary renders the box disks of one node for the table.
+func diskSummary(node *NodeCapacity) string {
+	if node.DiskUsedBytes == 0 && node.DiskVirtualBytes == 0 {
+		return "-"
+	}
+	if node.DiskVirtualBytes > 0 {
+		return fmt.Sprintf("%s of %s", humanBytes(node.DiskUsedBytes), humanBytes(node.DiskVirtualBytes))
+	}
+	return humanBytes(node.DiskUsedBytes)
+}
+
+// uncountedSummary renders the VMs of a node that no Nomad allocation covers.
+func uncountedSummary(node *NodeCapacity) string {
+	if len(node.Uncounted) == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d (%s)", len(node.Uncounted), humanMiB(node.UncountedMemoryMiB))
+}
+
+// cmdCapacity lists the nodes that can run boxes.
+func (a *App) cmdCapacity(ctx context.Context, args []string) error {
+	fs := newFlagSet("capacity")
+	if err := parseFlags(fs, args, 0); err != nil {
+		return err
+	}
+	nodes, err := a.nodeCapacities(ctx)
+	if err != nil {
+		return err
+	}
+	arches := summarizeArches(nodes)
+	if a.JSON {
+		return a.printJSON(capacityOutput{Nodes: nodes, Arches: arches})
+	}
+	if len(nodes) == 0 {
+		a.note("no Nomad client node is registered; start a client with the box driver and the %s plugin", boxVolumePluginID)
+		return nil
+	}
+	rows := make([][]string, 0, len(nodes)+len(arches))
+	headers := []string{"NODE", "ARCH", "OS", "STATUS", "ELIGIBLE", "CPU free/total", "MEM free/total", "DISK free/total", "BOX DISKS used", "UNCOUNTED VMs", "DRIVER", "VOLUME PLUGIN", "BOXES"}
+	for _, node := range nodes {
+		eligible := "no"
+		if node.Eligible {
+			eligible = "yes"
+		}
+		driver := "missing"
+		if node.Driver.Installed {
+			driver = dash(node.Driver.Version)
+			if node.Driver.LimaVersion != "" {
+				driver += " lima " + node.Driver.LimaVersion
+			}
+		}
+		plugin := "missing"
+		for _, p := range node.VolumePlugins {
+			if p.ID == boxVolumePluginID {
+				plugin = dash(p.Version)
+			}
+		}
+		rows = append(rows, []string{
+			node.Name,
+			dash(node.Arch),
+			dash(node.OS),
+			node.Status,
+			eligible,
+			fmt.Sprintf("%s/%s", humanMHz(node.CPU.Free), humanMHz(node.CPU.Total)),
+			fmt.Sprintf("%s/%s", humanMiB(node.Memory.Free), humanMiB(node.Memory.Total)),
+			fmt.Sprintf("%s/%s", humanMiB(node.Disk.Free), humanMiB(node.Disk.Total)),
+			diskSummary(node),
+			uncountedSummary(node),
+			driver,
+			plugin,
+			fmt.Sprintf("%d", node.Boxes),
+		})
+	}
+	a.printTable(headers, rows)
+
+	// A running VM Nomad does not account for is what makes a node look roomier
+	// than it is; say which one it is, so the operator can stop or remove it.
+	for _, node := range nodes {
+		for _, inst := range node.Uncounted {
+			a.note("%s/%s: a running VM with no running allocation — %d vCPU, %s RAM, %d GiB disk are already taken",
+				node.Name, inst.BoxID, inst.CPUs, humanMiB(inst.MemoryMiB), inst.DiskGiB)
+		}
+	}
+
+	// Per box, because the owner asked for the space each VM occupies, not only
+	// the sum.
+	for _, node := range nodes {
+		for _, disk := range node.Disks {
+			a.note("%s/%s: %s used of %s", node.Name, disk.BoxID, humanBytes(disk.UsedBytes), humanBytes(disk.VirtualBytes))
+		}
+	}
+
+	// Architectures are never added together: a vCPU on amd64 cannot run an
+	// arm64 image. The subtotals are therefore per architecture.
+	for _, summary := range arches {
+		a.note("%s: %s with %s free memory, %s MHz free CPU, %s free disk (%d of %d ready for boxes)",
+			summary.Arch, describeCount(summary.Nodes, "node"), humanMiB(summary.MemoryMiB),
+			humanMHz(summary.CPUShares), humanMiB(summary.DiskMiB), summary.ReadyNodes, summary.Nodes)
+	}
+	var problems []string
+	for _, node := range nodes {
+		if problem := node.NodeProblem(PlacementRequest{}); problem != "" {
+			problems = append(problems, problem)
+		}
+	}
+	if len(problems) > 0 {
+		a.note("nodes that cannot take a new box: %s", strings.Join(problems, "; "))
+	}
+	return nil
+}

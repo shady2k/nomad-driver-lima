@@ -1,0 +1,51 @@
+---
+# rollback.yml: put a node and the coordinator back on a release that is already
+# installed.
+#
+#   cd deploy/ansible
+#   ansible-playbook -i inventory rollback.yml -e box_version=0.1.0 --check
+#   ansible-playbook -i inventory rollback.yml -e box_version=0.1.0
+#
+# Every release lives in its own directory below /opt/box/releases, and
+# /opt/box/current is a symlink to the live one. The Nomad client configuration
+# names the plugin paths through that symlink, so a rollback is:
+#
+#   * the symlink of every node, and one restart of its client (KillMode=process
+#     on Linux, AbandonProcessGroup on macOS: the boxes keep running),
+#   * the symlink of every coordinator (the CLI is a single process, no restart).
+#
+# It does NOT touch, on purpose:
+#   * the client configuration (/etc/nomad.d): the paths are the same,
+#   * the client's data_dir (the node ID),
+#   * the Lima home, the image cache and every volume directory (the boxes),
+#   * /etc/box/volume.json (the node's settings, not the release's),
+#   * the environment file and the skill of the coordinator.
+#
+# The release has to be on the host already: a rollback does not build or
+# download anything. `ls /opt/box/releases` says what is there, and running
+# site.yml with box_version=<version> installs another one next to the live one.
+- name: Roll the box plugins of every node back
+  hosts: box_nodes:box_nodes_mac
+  become: true
+  gather_facts: true
+  serial: 1
+  tasks:
+    - name: Switch the live release and restart the client once
+      ansible.builtin.import_role:
+        name: box_node
+        tasks_from: rollback
+
+    - name: Restart the client so it loads the plugins of that release
+      ansible.builtin.import_role:
+        name: nomad_client
+        tasks_from: restart
+
+- name: Roll the box CLI of every coordinator back
+  hosts: box_coordinators
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Switch the live release of the CLI
+      ansible.builtin.import_role:
+        name: box_coordinator
+        tasks_from: rollback

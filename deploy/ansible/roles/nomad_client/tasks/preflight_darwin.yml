@@ -1,0 +1,45 @@
+---
+# macOS prerequisites. The Mac is a Nomad client too, and this role renders the
+# same configuration for it; the service is a launchd LaunchDaemon instead of a
+# systemd unit.
+#
+# Why root, and not the runtime user: launchd is a system-wide daemon
+# (/Library/LaunchDaemons), and the client itself needs root - it writes the
+# plugin directory, the host volumes directory and the allocation directories
+# under data_dir. Lima does not need root: vz runs the VM inside the limactl
+# hostagent, which the driver starts as box_runtime_user (its uid, its HOME, its
+# LIMA_HOME). So the client is root and every VM is the unprivileged user: the
+# same split as on Linux.
+
+- name: Darwin | Look for launchctl
+  ansible.builtin.command:
+    argv: ['which', 'launchctl']
+  register: nomad_launchctl_which
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: nomad_launchd_load | bool
+
+- name: Darwin | Require launchctl
+  ansible.builtin.assert:
+    that:
+      - nomad_launchctl_which.rc | default(1) == 0
+    fail_msg: >-
+      launchctl is not in PATH. It is part of macOS; on a Linux host this role
+      uses systemd instead, so check the node's system.
+    quiet: true
+  when: nomad_launchd_load | bool
+
+- name: Darwin | Report the service this role writes
+  ansible.builtin.debug:
+    msg:
+      - >-
+        launchd: {{ nomad_launchd_plist }} ({{ nomad_launchd_label }}, a system
+        LaunchDaemon, runs as root), loaded with
+        `launchctl bootstrap system {{ nomad_launchd_plist }}` when
+        nomad_launchd_load is true
+      - >-
+        a restart of the daemon keeps the VMs: AbandonProcessGroup=
+        {{ nomad_launchd_abandon_process_group }} leaves the limactl hostagents and
+        the qemu/vz processes of the boxes running, and Nomad re-attaches to them
+        (the macOS form of KillMode=process)

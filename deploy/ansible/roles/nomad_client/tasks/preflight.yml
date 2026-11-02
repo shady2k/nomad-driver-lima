@@ -1,0 +1,139 @@
+---
+# Preflight: read-only. Every probe runs in check mode too (check_mode: false on
+# the commands), so `--check` prints what this node will run and where every file
+# comes from - without writing anything.
+
+- name: Preflight | Require the role inputs
+  ansible.builtin.assert:
+    that:
+      - nomad_version is match('^2\.[0-9]+\.[0-9]+$')
+      - nomad_config_dir is match('^/')
+      - nomad_data_dir is match('^/')
+      - nomad_host_volumes_dir is match('^/')
+      - nomad_binary is match('^/')
+      - nomad_config_dir != nomad_data_dir
+      - nomad_data_dir != nomad_host_volumes_dir
+      - nomad_servers | length > 0 or nomad_server_block | length > 0
+      - nomad_ports.http | int > 0
+      - nomad_ports.rpc | int > 0
+      - nomad_ports.serf | int > 0
+      - nomad_box_plugin_dir != nomad_box_volume_plugin_dir
+      - (not nomad_box_enabled | bool) or (nomad_box_allowlist_entries | length == 0) or ('box' in nomad_box_allowlist_entries)
+      - (not nomad_tls_enabled | bool) or (nomad_tls_ca_file | length > 0)
+      - (not nomad_tls_enabled | bool) or (nomad_tls_cert_file | length > 0)
+      - (not nomad_tls_enabled | bool) or (nomad_tls_key_file | length > 0)
+    fail_msg: >-
+      The role needs Nomad 2.x (the box driver is built against the Nomad 2 plugin
+      API - currently {{ nomad_version }}), absolute paths, at least one Nomad
+      server (nomad_servers: ["nomad.example:4647"]) unless the node is a server
+      itself, and three port numbers. The driver plugin directory and the host
+      volume plugin directory must differ: Nomad runs every executable in
+      host_volume_plugin_dir as a volume plugin. A driver allowlist must include
+      "box" - Nomad refuses a third-party driver that is not allowlisted. mTLS
+      needs all three files.
+    quiet: true
+
+- name: Preflight | Look for the NixOS marker
+  ansible.builtin.stat:
+    path: /etc/NIXOS
+  register: nomad_nixos_marker
+  check_mode: false
+
+- name: Preflight | Refuse a NixOS node whose /etc belongs to Nix
+  ansible.builtin.assert:
+    that:
+      - (not (nomad_is_nixos | bool or nomad_nixos_marker.stat.exists | default(false))) or (not (nomad_writes_etc | bool)) or (nomad_allow_nixos | bool)
+    fail_msg: >-
+      This node is NixOS and this role would write
+      {{ nomad_config_dir if nomad_config_dir is match('^/etc/') else nomad_unit_path }}
+      - a path Nix owns, so the file is lost at the next nixos-rebuild switch. Add
+      the client configuration to the machine's Nix configuration instead: the keys
+      are the same and deploy/README.md, "NixOS nodes", shows the block to copy. If
+      those paths really are yours (a rehearsal into a prefix, or /etc/systemd/system
+      managed by hand), set nomad_allow_nixos: true. Nothing was changed.
+    quiet: true
+
+- name: Preflight | Look for the Nomad binary
+  ansible.builtin.stat:
+    path: '{{ nomad_binary }}'
+  register: nomad_bin_stat
+
+- name: Preflight | Read the version of the installed Nomad
+  ansible.builtin.command:
+    argv: ['{{ nomad_binary }}', 'version']
+  register: nomad_bin_version_raw
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  when: nomad_bin_stat.stat.exists
+
+- name: Preflight | Remember the installed version
+  ansible.builtin.set_fact:
+    nomad_installed_version: >-
+      {{ (nomad_bin_version_raw.stdout | default('')
+          | regex_search('[0-9]+\.[0-9]+\.[0-9]+')) | default('', true) }}
+
+- name: Preflight | Work out whether the pinned release has to be installed
+  ansible.builtin.set_fact:
+    nomad_install_needed: >-
+      {{ (not nomad_bin_stat.stat.exists)
+         or (nomad_installed_version != nomad_version) }}
+
+- name: Preflight | Check the prerequisites of this operating system
+  ansible.builtin.include_tasks: 'preflight_{{ nomad_os }}.yml'
+
+# The box driver starts every Lima process as this user, so the user has to exist
+# before the client starts: a plugin whose runtime user is unknown reports itself
+# unhealthy, and every box fails at its first start.
+- name: Preflight | Read the local user database for the runtime user
+  ansible.builtin.getent:
+    database: passwd
+    key: '{{ nomad_box_runtime_user }}'
+  check_mode: false
+  when:
+    - nomad_box_enabled | bool
+    - nomad_box_runtime_user | length > 0
+
+- name: Preflight | Require a runtime user that exists
+  ansible.builtin.assert:
+    that:
+      - nomad_box_runtime_user in ansible_facts.getent_passwd
+    fail_msg: >-
+      nomad_box_runtime_user is "{{ nomad_box_runtime_user }}", which is not a
+      local user. This role writes the user the box driver runs limactl and qemu
+      as; the box_node role requires it too and never creates it.
+    quiet: true
+  when:
+    - nomad_box_enabled | bool
+    - nomad_box_runtime_user | length > 0
+
+- name: Preflight | Remember the runtime user's uid and home
+  ansible.builtin.set_fact:
+    # getent_passwd is [password, uid, gid, gecos, home, shell]: the home is 4.
+    nomad_box_runtime_uid: '{{ ansible_facts.getent_passwd[nomad_box_runtime_user][1] }}'
+    nomad_box_runtime_home: '{{ ansible_facts.getent_passwd[nomad_box_runtime_user][4] }}'
+  when:
+    - nomad_box_enabled | bool
+    - nomad_box_runtime_user | length > 0
+
+- name: Preflight | Report what this node will run
+  ansible.builtin.debug:
+    msg:
+      - >-
+        node {{ inventory_hostname }} ({{ ansible_facts.system }} {{ ansible_facts.architecture }}):
+        {{ ('Nomad ' ~ nomad_installed_version ~ ' at ' ~ nomad_binary) if (nomad_bin_stat.stat.exists and not nomad_install_needed | bool)
+           else ('Nomad ' ~ nomad_version ~ ' is installed by this role at ' ~ nomad_binary) }}
+      - >-
+        this role writes {{ nomad_base_config_file }}
+        {{ 'and ' ~ nomad_box_config_file if nomad_box_enabled | bool else '(no box plugin block)' }}
+        {{ 'and ' ~ nomad_env_file if ansible_facts.system == 'Linux' else 'and ' ~ nomad_launchd_plist }}
+      - >-
+        loaded by {{ nomad_unit_path if ansible_facts.system == 'Linux' else nomad_launchd_plist }} as
+        {{ nomad_agent_argv | join(' ') }}
+      - >-
+        servers {{ nomad_servers | join(', ') if nomad_servers | length > 0 else '(this node is a server: nomad_server_block)' }},
+        data_dir {{ nomad_data_dir }}, host volumes {{ nomad_host_volumes_dir }}
+      - >-
+        box driver {{ 'enabled' if nomad_box_enabled | bool else 'disabled' }},
+        plugins {{ nomad_box_plugin_dir }} and {{ nomad_box_volume_plugin_dir }},
+        boxes run as {{ nomad_box_runtime_user }} (uid {{ nomad_box_runtime_uid | default('?') }}, home {{ nomad_box_runtime_home | default('?') }})

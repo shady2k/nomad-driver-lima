@@ -1,0 +1,95 @@
+---
+# Defaults for the box_coordinator role: the host that runs the agent and the
+# `box` CLI.
+#
+# The CLI keeps no local state: it reads and writes the box job and its volume
+# through the Nomad API. Everything the role installs is therefore small - one
+# binary in a release directory, one symlink, one skill directory, one
+# environment file.
+
+# ----------------------------------------------------------------- what to install
+# The release to install: one directory name under dist/ built by deploy/build.sh.
+# Required; the role refuses to run without it.
+box_version: ''
+# Worked out from the role, so a playbook in any directory finds the same release.
+box_dist_dir: '{{ role_path }}/../../../../dist/{{ box_version }}'
+
+# The coordinator is linux/amd64 or darwin/arm64; both are built, so an operator
+# who runs the CLI from the Mac laptop gets the same symlink.
+box_cli_artifact: 'box_{{ box_cli_os }}_{{ box_cli_arch }}'
+box_cli_os: >-
+  {{ 'darwin' if ansible_facts.system == 'Darwin'
+     else 'linux' }}
+box_cli_arch: >-
+  {{ 'arm64' if ansible_facts.architecture in ['aarch64', 'arm64'] else 'amd64' }}
+
+# The release layout, the same shape as on a node (box_node): one directory per
+# version, one symlink that says which is live. A rollback is one symlink:
+#   deploy/ansible/rollback.yml -e box_version=<previous>
+box_release_root: /opt/box
+box_releases_dir: '{{ box_release_root }}/releases'
+box_release_dir: '{{ box_releases_dir }}/{{ box_version }}'
+box_current_link: '{{ box_release_root }}/current'
+# The CLI on PATH, a symlink into the live release.
+box_cli_path: /usr/local/bin/box
+
+# --------------------------------------------------------------- who and where
+# The user that runs the agent and the CLI. The role does not create the user.
+box_coordinator_user: root
+box_coordinator_group: '{{ box_coordinator_user }}'
+# getent_passwd is [password, uid, gid, gecos, home, shell]: the home is 4.
+box_coordinator_home: '{{ ansible_facts.getent_passwd[box_coordinator_user][4] }}'
+
+# The skill itself lives in the Claude Code plugin of this repository
+# (claude-plugin/skills/box/SKILL.md): one file, installed for every agent rather
+# than copied from place to place.
+box_skill_src: '{{ (role_path ~ "/../../../../claude-plugin/skills/box") | realpath }}'
+# The skills directory of the Prime Agent on this host (~/.agents/skills is the
+# per-user skills directory it also reads).
+box_skill_dir: '{{ box_coordinator_home }}/.agents/skills'
+box_skill_dirs:
+  - '{{ box_skill_dir }}'
+
+# How Claude Code gets the same skill:
+#   plugin - install the Claude Code plugin of this repository (the default):
+#            Claude Code owns the copy, the version and the removal, and the
+#            plugin carries the skill only - no hook, no MCP server, no binary.
+#   copy   - copy SKILL.md into box_claude_skill_dir, for a Claude Code that
+#            cannot add a marketplace.
+box_claude_skill_mode: plugin
+# Claude Code reads its personal skills from ~/.claude/skills: this is where the
+# copy mode writes, and where a stale copy is removed once the plugin carries the
+# skill.
+box_claude_skill_dir: '{{ box_coordinator_home }}/.claude/skills'
+
+# The plugin and the marketplace it is published through, both in this
+# repository: .claude-plugin/marketplace.json points at ./claude-plugin.
+box_claude_plugin_dir: '{{ (role_path ~ "/../../../../claude-plugin") | realpath }}'
+box_claude_marketplace_dir: '{{ (role_path ~ "/../../../..") | realpath }}'
+box_claude_marketplace_name: nomad-driver-lima
+box_claude_plugin_name: box
+box_claude_plugin_id: '{{ box_claude_plugin_name }}@{{ box_claude_marketplace_name }}'
+# The Claude Code CLI the plugin mode runs. A bare name is found on PATH; an
+# absolute path is safer when the role runs under sudo.
+box_claude_cli: claude
+# Empty keeps the CLI's own directory (~/.claude). The role's own checks set it
+# to a throwaway directory, so no check touches the real Claude Code settings.
+box_claude_config_dir: ''
+# What Claude Code reported the last time this role asked; empty means nothing is
+# installed and nothing has been read yet.
+box_claude_marketplace_names: []
+box_claude_plugin_ids: []
+
+# The environment the CLI needs. Nomad reads NOMAD_ADDR, NOMAD_TOKEN,
+# NOMAD_CACERT, NOMAD_CLIENT_CERT and NOMAD_CLIENT_KEY; the CLI adds
+# BOX_IMAGE_INDEX for the base image index. No secret from this file is ever
+# printed: it is written 0600 and the role keeps it that way.
+box_env_file: '{{ box_coordinator_home }}/.config/box/env'
+box_nomad_addr: ''          # e.g. https://nomad.example:4646
+box_nomad_token: ''
+box_nomad_cacert: ''
+box_nomad_client_cert: ''
+box_nomad_client_key: ''
+# The base image index the CLI reads. Empty keeps the CLI's own public default;
+# a site that mirrors the images sets this to its own index.
+box_image_index: ''
