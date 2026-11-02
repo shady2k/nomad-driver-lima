@@ -41,20 +41,19 @@ So the image has to be:
   authorized keys, no passwords, no `/var/lib/cloud/instances`. `cloud-init clean
   --logs --machine-id` plus `truncate -s 0 /etc/machine-id` is what the reference
   recipe did before capture.
-- **reachable over ssh**, with **systemd** as init: `limactl shell` is an ssh
-  session as Lima's user, and that user needs `sudo -n` (the driver installs task
-  files as root and reads `journalctl -u boxd` that way).
-- **carrying `bash` and coreutils** (`install`, `mktemp`, `cp`, `chmod`, `chown`,
-  `rm`): the driver's guest commands are `bash -euo pipefail -c '...'` scripts.
+- **reachable over ssh, with systemd as init, and with `bash` and coreutils**:
+  `limactl shell` is an ssh session as Lima's user, that user needs `sudo -n`
+  (the driver installs task files as root and reads `journalctl -u boxd`), and
+  every guest command is a `bash -euo pipefail -c` script.
 - **as large as the boxes will be, at least.** Lima grows a disk and refuses to
   shrink one, so the image's virtual size is the floor for `disk_gib`; a box
   asking for less fails at create. Growing the partition into a bigger disk is the
   image's job (below).
 
-The reference recipe also installed `qemu-guest-agent`, `openssh-server`,
-`docker.io` with buildx and compose, git, curl, jq, ripgrep, build-essential,
-python3 and a few editors. None of that is required by the driver or boxd; a box
-is more useful with a toolchain, but which one is the operator's choice.
+Beyond that the reference recipe installed `qemu-guest-agent`, `openssh-server`,
+docker with buildx and compose, git, curl, jq, ripgrep, build-essential and
+python3. None of it is required; a box is more useful with a toolchain, but which
+one is the operator's choice.
 
 ## What boxd needs in the image
 
@@ -66,8 +65,8 @@ is more useful with a toolchain, but which one is the operator's choice.
   event per line) is the feed the driver streams into the Nomad task log.
   `RuntimeDirectory` puts `/run/boxd` on `/run`, so **`/run` must be a tmpfs** —
   the default on any systemd guest. Install the `boxd` of the same release as the
-  driver and the CLI: `boxctl` and the driver pass JSON to it, and one release is
-  one contract.
+  driver and the CLI: both reach it through `boxctl`, and one release is one
+  contract.
 - **`/run/box/secrets`** is written by the driver after boot (root, mode 0700,
   one directory per executor) and never exists in the image. `boxd` reads it and
   derives every executor home and configuration below `/run/boxd`. Neither path
@@ -153,11 +152,10 @@ each artifact holding `url`, `sha256` (`size` and `built_at` are shown by
 
 What the reader accepts, besides that:
 
-- `"images"` may also be a list of objects each with a `version` key, and a
-  version may nest its artifacts under `"arches"`; `"versions"` is accepted in
-  place of `"images"`.
-- architecture keys are normalised, so `x86_64`, `x64` and `amd64` are one
-  architecture, and so are `aarch64` and `arm64`.
+- `"images"` may also be a list of objects each with a `version` key, a version
+  may nest its artifacts under `"arches"`, and `"versions"` works in place of
+  `"images"`. Architecture keys are normalised: `x86_64`, `x64` and `amd64` are
+  one architecture, and so are `aarch64` and `arm64`.
 - `--image latest` (and an empty version) means the newest version that has the
   architecture; versions compare numerically, so `1.10.0` is newer than `1.9.0`.
 - `sha256` must be 64 hex characters and may carry a `sha256:` prefix. The
