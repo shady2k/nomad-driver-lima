@@ -92,7 +92,7 @@
       - box_qemu_path | length > 0
     fail_msg: >-
       {{ box_qemu_binary }} is not in PATH. lima runs the boxes with qemu: install
-      it (Debian/Ubuntu: apt-get install qemu-system-x86 qemu-utils) or set
+      it (Debian/Ubuntu: apt-get install qemu-system-x86 qemu-utils ovmf) or set
       box_install_deps: true to let this role install box_qemu_packages
       ({{ box_qemu_packages | join(', ') }}).
     quiet: true

@@ -117,9 +117,11 @@ box_disk_free_warn_mib: 10240
 # box_install_deps the role installs qemu from the distribution packages
 # (Debian/Ubuntu) and lima from a pinned upstream tarball that you must name.
 box_install_deps: false
+# ovmf is the UEFI firmware lima boots an x86_64 guest with.
 box_qemu_packages:
   - qemu-system-x86
   - qemu-utils
+  - ovmf
 box_lima_tarball_url: ''
 box_lima_tarball_sha256: ''
 box_lima_prefix: /opt/lima

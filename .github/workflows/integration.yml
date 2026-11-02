@@ -91,11 +91,13 @@ jobs:
           unzip -q "$RUNNER_TEMP/nomad.zip" nomad -d "$RUNNER_TEMP/bin"
           "$RUNNER_TEMP/bin/nomad" version
 
+      # ovmf is the UEFI firmware lima boots an x86_64 guest with; apt only
+      # recommends it, and --no-install-recommends leaves it out.
       - name: Install qemu
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            qemu-system-x86 qemu-utils cloud-image-utils
+            qemu-system-x86 qemu-utils ovmf cloud-image-utils
 
       # lima's guest agents live next to the binary in share/lima, so the
       # tarball is unpacked into a prefix, not just its bin/.
