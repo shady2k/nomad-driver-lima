@@ -121,7 +121,7 @@ printf '\n== the guest\n'
 BOOT_ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)
 info "kernel       $(uname -r)"
 info "boot id      $BOOT_ID"
-info "accounts     $(getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 {printf "%s(%s) ", $1, $3}')"
+info "accounts     $(getent passwd | awk -F: '$3 >= 500 && $3 < 60000 {printf "%s(%s) ", $1, $3}')"
 
 CLOUD_INIT=$(cloud-init status 2>/dev/null | head -1 | tr -d '\r')
 check "cloud-init finished on this boot" "status: done" "$CLOUD_INIT"
@@ -306,9 +306,14 @@ check "boxd reports the executor it was given a credential for" "prime configure
 RUNTIME_ENV=$RUNTIME/executors/prime/env
 check "boxd copied the credential onto the tmpfs" "$TEST_TOKEN" "$(sed -n 's/^BOX_CHECK_TOKEN=//p' "$RUNTIME_ENV" 2>/dev/null | head -1)"
 
-# Not readable by the box's default user: an account with uid 1000-59999, which
-# is what cloud-init creates for whoever made the box.
-DEFAULT_USER=$(getent passwd | awk -F: '$3 >= 1000 && $3 < 60000 {print $1; exit}')
+# Not readable by the box's default user: the account Lima's cloud-init creates
+# for whoever made the box. Lima names it in its cidata; its uid is the host
+# user's, 1000 and up on Linux but 501 and up on a Mac, so the uid range is only
+# the fallback for a guest started without Lima's cidata.
+DEFAULT_USER=$(sed -n 's/^LIMA_CIDATA_USER=//p' /mnt/lima-cidata/param.env 2>/dev/null | head -1)
+if [[ -z $DEFAULT_USER ]] || ! getent passwd "$DEFAULT_USER" >/dev/null; then
+  DEFAULT_USER=$(getent passwd | awk -F: '$3 >= 500 && $3 < 60000 && $1 != "builder" {print $1; exit}')
+fi
 if [[ -n $DEFAULT_USER ]]; then
   if sudo -u "$DEFAULT_USER" cat "$SECRETS/prime/env" >/dev/null 2>&1; then
     fail "the default user cannot read the credential" "permission denied" "read it"
@@ -321,7 +326,7 @@ if [[ -n $DEFAULT_USER ]]; then
     pass "the default user cannot list $SECRETS" "permission denied" "permission denied"
   fi
 else
-  fail "the box has a default user" "an account with uid 1000-59999" "none"
+  fail "the box has a default user" "Lima's user, or an account with uid 500-59999" "none"
 fi
 
 # Nowhere on the disk: the credential is in the tmpfs and in nothing that

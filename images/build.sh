@@ -416,9 +416,11 @@ fi
 
 log "flattening $(basename "$DISK_FILE") into $(basename "$IMAGE_OUT")"
 "$QEMU_IMG" info --output json "$DISK_FILE" > "$WORK/disk-info.json"
-# zstd compression: the same guest, about 40 MiB smaller than zlib, which keeps
-# the qcow2 below the 1 GiB body limit some HTTP stores apply.
-"$QEMU_IMG" convert -c -O qcow2 -o compat=1.1,compression_type=zstd "$DISK_FILE" "$IMAGE_OUT.tmp"
+# zlib compression, qcow2's default. zstd made the image about 40 MiB smaller,
+# but Lima cannot read a zstd-compressed qcow2 when it converts the image into
+# the raw disk Apple Virtualization (vz) boots: an arm64 image in zstd did not
+# start on a Mac.
+"$QEMU_IMG" convert -c -O qcow2 -o compat=1.1 "$DISK_FILE" "$IMAGE_OUT.tmp"
 mv "$IMAGE_OUT.tmp" "$IMAGE_OUT"
 ( cd "$OUT" && sha256sum "$(basename "$IMAGE_OUT")" > "$(basename "$SHA_OUT")" )
 SHA256=$(cut -d' ' -f1 "$SHA_OUT")
