@@ -85,11 +85,11 @@
 # The box driver starts every Lima process as this user, so the user has to exist
 # before the client starts: a plugin whose runtime user is unknown reports itself
 # unhealthy, and every box fails at its first start.
-- name: Preflight | Read the local user database for the runtime user
-  ansible.builtin.getent:
-    database: passwd
-    key: '{{ nomad_box_runtime_user }}'
-  check_mode: false
+# One way to read a user on both platforms: see common/user-identity.yml.
+- name: Preflight | Read the identity of the runtime user
+  ansible.builtin.import_tasks: '{{ role_path }}/../../common/user-identity.yml'
+  vars:
+    identity_user: '{{ nomad_box_runtime_user }}'
   when:
     - nomad_box_enabled | bool
     - nomad_box_runtime_user | length > 0
@@ -97,7 +97,7 @@
 - name: Preflight | Require a runtime user that exists
   ansible.builtin.assert:
     that:
-      - nomad_box_runtime_user in ansible_facts.getent_passwd
+      - runtime_identity.uid is defined
     fail_msg: >-
       nomad_box_runtime_user is "{{ nomad_box_runtime_user }}", which is not a
       local user. This role writes the user the box driver runs limactl and qemu
@@ -109,9 +109,8 @@
 
 - name: Preflight | Remember the runtime user's uid and home
   ansible.builtin.set_fact:
-    # getent_passwd is [password, uid, gid, gecos, home, shell]: the home is 4.
-    nomad_box_runtime_uid: '{{ ansible_facts.getent_passwd[nomad_box_runtime_user][1] }}'
-    nomad_box_runtime_home: '{{ ansible_facts.getent_passwd[nomad_box_runtime_user][4] }}'
+    nomad_box_runtime_uid: '{{ runtime_identity.uid }}'
+    nomad_box_runtime_home: '{{ runtime_identity.home }}'
   when:
     - nomad_box_enabled | bool
     - nomad_box_runtime_user | length > 0

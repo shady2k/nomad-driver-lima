@@ -1,0 +1,105 @@
+---
+# The identity of one user, read one way on both platforms.
+#
+# Ansible's getent module shells out to `getent`, which macOS does not have: a Mac
+# run stopped in preflight with "getent: command not found" before anything was
+# checked - the system profile as well as the user profile. Linux keeps getent;
+# macOS reads the same records with Python's pwd and grp, through the interpreter
+# Ansible is already using.
+#
+# The two roles that run the boxes import this file (box_node, nomad_client), each
+# with identity_user set to the user it runs them as. It sets one fact,
+# runtime_identity, and it never writes ansible_facts: getent_passwd and
+# getent_group belong to the getent module, and a role that fills them in by hand
+# looks like a real lookup to every other task that reads them.
+#
+#   runtime_identity.uid      the numeric uid, as the text getent would print
+#   runtime_identity.gid      the user's primary gid
+#   runtime_identity.home     the home directory
+#   runtime_identity.group    the name of the primary group
+#   runtime_identity.groups   every group the user is in, by name
+#
+# A user that does not exist leaves runtime_identity empty, and the importing role
+# says so in its own words: the failure means something different in each of them.
+
+- name: Identity | Start from no identity
+  ansible.builtin.set_fact:
+    runtime_identity: {}
+
+- name: Identity | Read the user database (Linux)
+  ansible.builtin.getent:
+    database: passwd
+    key: '{{ identity_user }}'
+  check_mode: false
+  when: ansible_facts.system != 'Darwin'
+
+- name: Identity | Read the group database (Linux)
+  ansible.builtin.getent:
+    database: group
+    split: ':'
+  check_mode: false
+  when: ansible_facts.system != 'Darwin'
+
+# getent_passwd is [password, uid, gid, gecos, home, shell]; a user the database
+# does not know is an empty list here, not an undefined key.
+- name: Identity | Look up the user's record (Linux)
+  ansible.builtin.set_fact:
+    identity_record: '{{ (ansible_facts.getent_passwd | default({})).get(identity_user, []) }}'
+  when: ansible_facts.system != 'Darwin'
+
+# The same four answers on a Mac, where there is no getent. A user that does not
+# exist makes pwd raise, so the task answers with a failed status and no output,
+# and runtime_identity stays empty.
+- name: Identity | Read the user and its groups (macOS)
+  ansible.builtin.command:
+    argv:
+      - '{{ ansible_facts.python.executable }}'
+      - '-c'
+      - |
+        import grp, json, pwd, sys
+
+        user = pwd.getpwnam(sys.argv[1])
+        primary = grp.getgrgid(user.pw_gid)
+        groups = {primary.gr_name}
+        groups |= {group.gr_name for group in grp.getgrall() if user.pw_name in group.gr_mem}
+        print(json.dumps({'uid': str(user.pw_uid), 'gid': str(user.pw_gid),
+                          'home': user.pw_dir,
+                          'group': primary.gr_name, 'groups': sorted(groups)}))
+      - '{{ identity_user }}'
+  register: identity_darwin
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: ansible_facts.system == 'Darwin'
+
+# The group records name the primary group and list the memberships; the uid of
+# getent_passwd is the gid they carry.
+- name: Identity | Remember the identity of the user (Linux)
+  ansible.builtin.set_fact:
+    runtime_identity:
+      # As text, the way getent_passwd holds them: the templates compare these
+      # with `| length` as well as with `| int`.
+      uid: '{{ identity_record[1] }}'
+      gid: '{{ identity_record[2] }}'
+      home: '{{ identity_record[4] }}'
+      group: >-
+        {{ (ansible_facts.getent_group | default({}) | dict2items
+            | selectattr('value.1', 'equalto', identity_record[2])
+            | map(attribute='key') | list | first) | default(identity_user, true) }}
+      groups: >-
+        {{ ((ansible_facts.getent_group | default({}) | dict2items
+             | selectattr('value.1', 'equalto', identity_record[2])
+             | map(attribute='key') | list)
+            + (ansible_facts.getent_group | default({}) | dict2items
+               | selectattr('value.2', 'search', '(^|,)[ ]*' ~ identity_user ~ '[ ]*(,|$)')
+               | map(attribute='key') | list)) | unique | sort }}
+  when:
+    - ansible_facts.system != 'Darwin'
+    - identity_record | length == 6
+
+- name: Identity | Remember the identity of the user (macOS)
+  ansible.builtin.set_fact:
+    runtime_identity: '{{ identity_darwin.stdout | trim | from_json }}'
+  when:
+    - ansible_facts.system == 'Darwin'
+    - identity_darwin.rc | default(1) == 0

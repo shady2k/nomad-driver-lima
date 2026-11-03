@@ -63,17 +63,17 @@
     quiet: true
   when: box_release_source == 'local'
 
-- name: Preflight | Read the local user database for the runtime user
-  ansible.builtin.getent:
-    database: passwd
-    key: '{{ box_runtime_user }}'
-  check_mode: false
+# One way to read a user on both platforms: see common/user-identity.yml.
+- name: Preflight | Read the identity of the runtime user
+  ansible.builtin.import_tasks: '{{ role_path }}/../../common/user-identity.yml'
+  vars:
+    identity_user: '{{ box_runtime_user }}'
 
 - name: Preflight | Require a runtime user that exists and is not root
   ansible.builtin.assert:
     that:
-      - box_runtime_user in ansible_facts.getent_passwd
-      - ansible_facts.getent_passwd[box_runtime_user][1] | int > 0
+      - runtime_identity.uid is defined
+      - runtime_identity.uid | int > 0
     fail_msg: >-
       box_runtime_user is "{{ box_runtime_user }}", which is not an existing
       unprivileged local user. Lima refuses to run as root, so the boxes run as an
@@ -81,22 +81,15 @@
       example "dev"). The role does not create users.
     quiet: true
 
-- name: Preflight | Read the local group database
-  ansible.builtin.getent:
-    database: group
-    split: ':'
-  check_mode: false
-
+# The rest of the role reads these four, so the role has one shape on both
+# platforms whatever the lookup behind them was.
 - name: Preflight | Remember the runtime user's uid, home and group
   ansible.builtin.set_fact:
-    # getent_passwd is [password, uid, gid, gecos, home, shell]: the home is 4.
-    box_runtime_uid: '{{ ansible_facts.getent_passwd[box_runtime_user][1] }}'
-    box_runtime_gid: '{{ ansible_facts.getent_passwd[box_runtime_user][2] }}'
-    box_runtime_home: '{{ ansible_facts.getent_passwd[box_runtime_user][4] }}'
-    box_runtime_group: >-
-      {{ (ansible_facts.getent_group | default({}) | dict2items
-          | selectattr('value.1', 'equalto', ansible_facts.getent_passwd[box_runtime_user][2])
-          | map(attribute='key') | list | first) | default(box_runtime_user, true) }}
+    box_runtime_uid: '{{ runtime_identity.uid }}'
+    box_runtime_gid: '{{ runtime_identity.gid }}'
+    box_runtime_home: '{{ runtime_identity.home }}'
+    box_runtime_group: '{{ runtime_identity.group | default(box_runtime_user, true) }}'
+    box_runtime_groups: '{{ runtime_identity.groups | default([], true) }}'
 
 - name: Preflight | Check the prerequisites of this operating system
   ansible.builtin.include_tasks: 'preflight_{{ box_os }}.yml'
@@ -154,6 +147,9 @@
       - 'plugin_dir {{ box_plugin_dir }}, host_volume_plugin_dir {{ box_volume_plugin_dir }}'
       - 'lima {{ box_lima_semver | default("n/a") }} at {{ box_limactl }}{{ (", qemu " ~ box_qemu_path) if box_qemu_path | default("") | length > 0 else "" }}'
       - 'lima_home {{ box_lima_home }}, image cache {{ box_image_cache_dir }}, {{ box_free_mib }} MiB free'
-      - 'boxes run as {{ box_runtime_user }} (uid {{ box_runtime_uid }}, group {{ box_runtime_group }}, home {{ box_runtime_home }})'
+      - >-
+        boxes run as {{ box_runtime_user }} (uid {{ box_runtime_uid }}, group
+        {{ box_runtime_group }}, home {{ box_runtime_home }}, groups
+        {{ box_runtime_groups | join(', ') }})
       - 'the driver gets runtime_user = {{ box_runtime_user }}, and so does {{ box_volume_config_file }}'
       - 'client configuration and service: written by the nomad_client role of this play'

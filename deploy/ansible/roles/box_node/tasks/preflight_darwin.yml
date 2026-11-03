@@ -15,7 +15,9 @@
 - name: Darwin | Read the lima version
   ansible.builtin.command:
     argv: ['{{ box_limactl }}', '--version']
-  become: true
+  # The user profile connects as the runtime user itself, and there is nothing to
+  # escalate to: sudo would only ask for a password it must not need.
+  become: '{{ ansible_facts.user_id != box_runtime_user }}'
   become_user: '{{ box_runtime_user }}'
   environment:
     LIMA_HOME: '{{ box_lima_home }}'
