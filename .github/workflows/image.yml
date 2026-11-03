@@ -1,0 +1,216 @@
+# The guest image: the recipe in images/ builds an image for both guest
+# architectures, and images/verify.sh boots it and runs its checks.
+#
+# This repository publishes no image. Nothing here uploads to a release, writes an
+# index, or contacts a store: an image is the operator's, built with images/build.sh
+# and published with images/publish.sh to their own store. What a run of this
+# workflow proves is that the recipe in the tree builds an image that boots and
+# passes images/guest-checks.sh.
+#
+# Runs on pull requests that touch the recipe, the guest tools boxd is installed
+# with, or boxd itself, and on demand with a version and a boxd source.
+name: Image
+
+on:
+  pull_request:
+    paths:
+      - "images/**"
+      - "guest/**"
+      - "cmd/boxd/**"
+      - "internal/boxd/**"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: image version to build, for example 1.0.3
+        required: true
+        type: string
+      boxd_source:
+        description: where boxd comes from (head = the checked-out commit)
+        required: false
+        default: head
+        type: choice
+        options: [head, release, commit]
+      boxd_ref:
+        description: the release tag (vX.Y.Z) or the commit, when boxd_source is not head
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned, with the digest from the project's own SHA256SUMS.
+  LIMA_VERSION: "2.2.0"
+
+jobs:
+  image:
+    name: ${{ matrix.arch }} image
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-latest
+            lima_arch: x86_64
+            lima_sha256: a0ea1ccf6b7335a900adb5f8d2b8384457965fecb1ba72f09b4e3e46d12f424a
+            # --no-install-recommends drops the firmware, so it is named.
+            qemu_packages: qemu-system-x86 qemu-utils ovmf
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+            lima_arch: aarch64
+            lima_sha256: 7c6a09c6844f55f811e9b7b2b60a6070a512c696c8ec752dfdb3c8ed50ed0364
+            qemu_packages: qemu-system-arm qemu-utils qemu-efi-aarch64
+    steps:
+      # Full history: a BOXD_COMMIT build and the version stamp both read git.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # One place decides what is built: the manual inputs, or the defaults of a
+      # pull request run (this commit's boxd, version 0.0.0-ci).
+      - name: Resolve the version and the boxd source
+        id: image
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_SOURCE: ${{ inputs.boxd_source }}
+          INPUT_REF: ${{ inputs.boxd_ref }}
+        run: |
+          version=${INPUT_VERSION:-0.0.0-ci}
+          source=${INPUT_SOURCE:-head}
+          ref=${INPUT_REF:-}
+          [[ $version =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]] || {
+            echo "version '$version' is not a safe image version" >&2; exit 1; }
+          case $source in
+            head) ;;
+            release)
+              [[ $ref == v* ]] || { echo "boxd_source=release needs boxd_ref=vX.Y.Z" >&2; exit 1; }
+              ;;
+            commit)
+              [[ -n $ref ]] || { echo "boxd_source=commit needs boxd_ref=<sha or ref>" >&2; exit 1; }
+              ;;
+            *) echo "boxd_source must be head, release or commit" >&2; exit 1 ;;
+          esac
+          {
+            printf 'version=%s\n' "$version"
+            printf 'source=%s\n' "$source"
+            printf 'ref=%s\n' "$ref"
+          } >> "$GITHUB_OUTPUT"
+          echo "building image $version (${{ matrix.arch }}) with boxd from $source ${ref}"
+
+      - name: Make room
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
+
+      # GitHub's documented way to give an unprivileged user /dev/kvm. A runner
+      # without KVM is not fatal: qemu runs the guest with TCG then, which is
+      # the same guest, only slower.
+      - name: Enable /dev/kvm when the runner has it
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          if [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
+            echo "::notice::/dev/kvm is available: the guest runs with KVM acceleration"
+            ls -l /dev/kvm
+          else
+            echo "::notice::this runner has no usable /dev/kvm: qemu runs the guest with TCG, so the build and the checks take longer"
+          fi
+
+      # The firmware is a separate package on both architectures.
+      - name: Install qemu and its firmware
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.qemu_packages }}
+          qemu-img --version | head -1
+
+      - name: Install lima ${{ env.LIMA_VERSION }}
+        env:
+          LIMA_SHA256: ${{ matrix.lima_sha256 }}
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/lima.tgz" \
+            "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-${{ matrix.lima_arch }}.tar.gz"
+          echo "${LIMA_SHA256}  $RUNNER_TEMP/lima.tgz" | sha256sum -c -
+          sudo tar -C /usr/local -xzf "$RUNNER_TEMP/lima.tgz"
+          limactl --version
+
+      # Short work directories: lima puts a socket at <lima home>/<instance>/serial
+      # paths and refuses a long one, so nothing under $GITHUB_WORKSPACE is used
+      # for the build.
+      - name: Build the image
+        env:
+          VERSION: ${{ steps.image.outputs.version }}
+          SOURCE: ${{ steps.image.outputs.source }}
+          REF: ${{ steps.image.outputs.ref }}
+          ARCH: ${{ matrix.arch }}
+        timeout-minutes: 90
+        run: |
+          sudo mkdir -p /tmp/im && sudo chown "$(id -u):$(id -g)" /tmp/im
+          case $SOURCE in
+            release) export BOXD_RELEASE="$REF" ;;
+            commit) export BOXD_COMMIT="$REF" ;;
+            head) ;;
+          esac
+          # OUT and WORK are short on purpose; the recipe's defaults are in the
+          # repository, and no mirror is set here: this build uses the public
+          # upstreams the recipe pins.
+          OUT=/tmp/im/out WORK=/tmp/im/work images/build.sh "$ARCH" "$VERSION"
+          ls -l /tmp/im/out
+
+      - name: Boot the image and run the guest checks
+        env:
+          VERSION: ${{ steps.image.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        timeout-minutes: 45
+        run: |
+          IMAGE_PATH=/tmp/im/out/box-base-$VERSION-$ARCH.qcow2 \
+          OUT=/tmp/im/out WORK=/tmp/im/work \
+            images/verify.sh "$ARCH" "$VERSION"
+
+      # The artifact is the image, its digest and its manifest -- evidence for
+      # this run, not something to publish. It expires in three days.
+      - name: Collect the image, its digest and its manifest
+        env:
+          VERSION: ${{ steps.image.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p /tmp/im/artifact
+          cp /tmp/im/out/box-base-"$VERSION"-"$ARCH".qcow2 \
+             /tmp/im/out/box-base-"$VERSION"-"$ARCH".qcow2.sha256 \
+             /tmp/im/out/box-base-"$VERSION"-"$ARCH".json \
+             /tmp/im/out/box-base-"$VERSION"-"$ARCH".guest-checks.txt \
+             /tmp/im/artifact/
+          (cd /tmp/im/artifact && sha256sum --check ./*.qcow2.sha256)
+          ls -l /tmp/im/artifact
+          {
+            echo "### Image $VERSION ($ARCH)"
+            echo
+            echo "boxd: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["boxd"]; print(d["kind"], d["tag"] or d["resolved_commit"], "sha256", d["sha256"][:16])' /tmp/im/out/box-base-"$VERSION"-"$ARCH".json)"
+            echo
+            echo "Nothing was published: images/publish.sh uploads to the operator's own store."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: box-image-${{ matrix.arch }}-${{ steps.image.outputs.version }}
+          path: /tmp/im/artifact/*
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Remove the work directory
+        if: always()
+        run: |
+          limactl list || true
+          rm -rf /tmp/im

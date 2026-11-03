@@ -1,6 +1,7 @@
 # What every push and pull request must keep true: the Go code is formatted,
 # vets and passes the race detector, the shell scripts and the Ansible kit pass
-# their linters, and the release artifacts still build for every target.
+# their linters, the release artifacts still build for every target, and the image
+# recipe's publish tooling passes its own test against a fake store.
 #
 # The integration suite (real VMs) is separate: integration.yml.
 name: CI
@@ -48,6 +49,19 @@ jobs:
 
       - name: go test -race
         run: go test -race ./...
+
+  image-tools:
+    name: Image tools (publish.sh against a fake store)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Nothing is published: a stdlib HTTP server in the test plays the store
+      # (PUT, GET, HEAD, a body limit that answers 413, no DELETE), and every
+      # publish run in it goes to a temporary directory.
+      - name: python3 images/publish_test.py
+        run: python3 images/publish_test.py
 
   shellcheck:
     name: shellcheck
