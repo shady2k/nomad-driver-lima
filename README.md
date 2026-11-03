@@ -51,7 +51,7 @@ The nodes run boxes. Each needs, before `site.yml` touches it:
 
 | what | why, and where it is checked |
 | --- | --- |
-| **amd64 or arm64** Linux | the published release carries `box-driver_linux_<arch>` and `box-volume_linux_<arch>` for both (`deploy/build.sh`); the role picks the node's own. arm64 is built and its qemu set is the one the arm64 image build uses, but no arm64 Linux node has run boxes in CI (`docs/known-limits.md`). |
+| **amd64 or arm64** Linux | the published release carries `box-driver_linux_<arch>` and `box-volume_linux_<arch>` for both (`deploy/build.sh`); the role picks the node's own. No arm64 Linux node has run boxes in CI (`docs/known-limits.md`). |
 | **`/dev/kvm`** | it is a qemu VM: hardware virtualisation on, the `kvm` module loaded, and the node not itself a VM without nested virtualisation. `box_node` preflight requires the device and read/write access for the runtime user. |
 | **cgroup v2, systemd, and a user manager for the runtime user** | the memory cap of a box is a transient *user* scope (`memory.max`, `memory.swap.max=0`). `box_node` enables linger (`loginctl enable-linger`), starts `user@<uid>.service`, and proves that `systemd-run --user` starts a scope; it stops the play if it cannot. `box_cgroup_enabled: false` installs anyway and accepts uncapped memory. |
 | **an unprivileged local user** | Lima refuses to run as root, and the client runs as root, so the driver starts every `limactl`, qemu and `systemd-run` child as this user (`box_runtime_user`, for example `dev`). The role adds it to the `kvm` group (when the node has that group), gives it the Lima home and the image cache — it does **not** create the user. |
@@ -102,8 +102,9 @@ packages sets `nomad_install_binary: false` and points `nomad_binary` at it.
 ### The guest image — where it is built, and where it is served
 
 - **A host that can build it**: lima 2.2+ and `qemu-img`, and `/dev/kvm` for
-  speed (without KVM qemu runs the guest with TCG — the same image, only slower;
-  the arm64 CI runner has no KVM at all, see `.github/workflows/image.yml`).
+  speed (without KVM qemu runs the guest with TCG — the same image, only much
+  slower). Build each architecture on a host of that architecture: CI builds
+  and checks amd64 only.
 - **Network to the upstreams the recipe pins** — Ubuntu's archive, nodejs.org,
   go.dev, PyPI, npm, GitHub, Docker Hub — or your own mirrors (`BOX_MIRROR_*`).
   Every download is version-pinned and checksummed, so a mirror serves the same

@@ -1,5 +1,8 @@
-# The guest image: the recipe in images/ builds an image for both guest
-# architectures, and images/verify.sh boots it and runs its checks.
+# The guest image: the recipe in images/ builds an amd64 image, and
+# images/verify.sh boots it and runs its checks. arm64 is not built here: the
+# GitHub arm64 runners have no /dev/kvm, and an emulated build takes hours to
+# prove what the amd64 one already proves. An arm64 image is built by the
+# operator on an arm64 host (images/build.sh arm64 <version>).
 #
 # This repository publishes no image. Nothing here uploads to a release, writes an
 # index, or contacts a store: an image is the operator's, built with images/build.sh
@@ -52,8 +55,7 @@ jobs:
   image:
     name: ${{ matrix.arch }} image
     runs-on: ${{ matrix.runs-on }}
-    # arm64 runs under TCG (no /dev/kvm on the arm runners): hours, not minutes.
-    timeout-minutes: 350
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -64,11 +66,6 @@ jobs:
             lima_sha256: a0ea1ccf6b7335a900adb5f8d2b8384457965fecb1ba72f09b4e3e46d12f424a
             # --no-install-recommends drops the firmware, so it is named.
             qemu_packages: qemu-system-x86 qemu-utils ovmf
-          - arch: arm64
-            runs-on: ubuntu-24.04-arm
-            lima_arch: aarch64
-            lima_sha256: 7c6a09c6844f55f811e9b7b2b60a6070a512c696c8ec752dfdb3c8ed50ed0364
-            qemu_packages: qemu-system-arm qemu-utils qemu-efi-aarch64 ipxe-qemu
     steps:
       # Full history: a BOXD_COMMIT build and the version stamp both read git.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -125,28 +122,16 @@ jobs:
             exit 1
           fi
 
-      # GitHub's documented way to give an unprivileged user /dev/kvm. A runner
-      # without KVM is not fatal: qemu runs the guest with TCG then, which is
-      # the same guest, only slower.
-      - name: Enable /dev/kvm when the runner has it
+      # GitHub's documented way to give an unprivileged user /dev/kvm.
+      - name: Enable /dev/kvm
         run: |
-          # The arm64 runner has no /dev/kvm at all, and udevadm fails on a
-          # device that does not exist.
-          if [[ -e /dev/kvm ]]; then
-            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-              | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
-            sudo udevadm control --reload-rules
-            sudo udevadm trigger --name-match=kvm
-          fi
-          if [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]]; then
-            echo "::notice::/dev/kvm is available: the guest runs with KVM acceleration"
-            ls -l /dev/kvm
-          else
-            echo "::notice::this runner has no usable /dev/kvm: qemu runs the guest with TCG, so the build and the checks take longer"
-          fi
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
 
-      # The firmware is a separate package on both architectures, and on arm64
-      # so are the network card ROMs (ipxe-qemu: efi-virtio.rom).
+      # --no-install-recommends drops the firmware, so the matrix names it.
       - name: Install qemu and its firmware
         run: |
           sudo apt-get update
@@ -172,7 +157,7 @@ jobs:
           SOURCE: ${{ steps.image.outputs.source }}
           REF: ${{ steps.image.outputs.ref }}
           ARCH: ${{ matrix.arch }}
-        timeout-minutes: 240
+        timeout-minutes: 60
         run: |
           sudo mkdir -p /tmp/im && sudo chown "$(id -u):$(id -g)" /tmp/im
           case $SOURCE in
@@ -190,7 +175,7 @@ jobs:
         env:
           VERSION: ${{ steps.image.outputs.version }}
           ARCH: ${{ matrix.arch }}
-        timeout-minutes: 90
+        timeout-minutes: 30
         run: |
           IMAGE_PATH=/tmp/im/out/box-base-$VERSION-$ARCH.qcow2 \
           OUT=/tmp/im/out WORK=/tmp/im/work \
