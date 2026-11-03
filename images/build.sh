@@ -245,6 +245,13 @@ sed -e "s|__LIMA_ARCH__|$LIMA_ARCH|g" \
     -e "s|__DISK__|$DISK|g" \
     -e "s|__PROVISION__|$PROVISION|g" \
     "$ROOT/images/box-build.yaml" > "$YAML"
+# Without a usable /dev/kvm qemu runs the guest under TCG, where lima's
+# default CPU model for a guest of the host's own architecture ("host") does not
+# exist; "max" is the TCG equivalent.
+if [[ ! -w /dev/kvm ]]; then
+  printf 'cpuType:\n  %s: max\n' "$LIMA_ARCH" >> "$YAML"
+  log "no usable /dev/kvm: the guest runs under TCG with cpuType $LIMA_ARCH=max"
+fi
 
 # --- boxd --------------------------------------------------------------------
 # boxd comes from exactly one recorded source (images/boxd-source.sh): a
@@ -265,6 +272,12 @@ BOXD_JSON=$BOXD_DIR/boxd.json
 STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 log "starting the build VM $NAME (this runs the whole recipe; it takes a while)"
 if ! lima start --name "$NAME" --tty=false --timeout "$TIMEOUT" "$YAML"; then
+  # qemu's own complaint is in the hostagent's stderr, which the instance
+  # takes with it when it is deleted: show it now.
+  if [[ -s $LIMA_HOME/$NAME/ha.stderr.log ]]; then
+    log "the last lines of $LIMA_HOME/$NAME/ha.stderr.log"
+    tail -n 30 "$LIMA_HOME/$NAME/ha.stderr.log" | sed 's/^/    /' >&2
+  fi
   # Lima gives its "boot scripts must have finished" readiness probe a deadline
   # of its own, which a slow guest (an emulated aarch64 VM) can miss while the
   # provision script is still running. The VM is up and reachable in that case;

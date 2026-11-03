@@ -216,6 +216,13 @@ fi
 YAML=$WORK/scripts/box-boot-$ARCH.yaml
 sed -e "s|__LIMA_ARCH__|$LIMA_ARCH|g" -e "s|__IMAGE_PATH__|$IMAGE|g" \
   "$ROOT/images/box-boot.yaml" > "$YAML"
+# Without a usable /dev/kvm qemu runs the guest under TCG, where lima's
+# default CPU model for a guest of the host's own architecture ("host") does not
+# exist; "max" is the TCG equivalent.
+if [[ ! -w /dev/kvm ]]; then
+  printf 'cpuType:\n  %s: max\n' "$LIMA_ARCH" >> "$YAML"
+  log "no usable /dev/kvm: the guest runs under TCG with cpuType $LIMA_ARCH=max"
+fi
 
 log "booting $IMAGE_NAME (cpus $CPUS, memory $MEMORY, disk $DISK)"
 if lima start --name "$NAME" --tty=false --timeout 60m "$YAML" > "$WORK/boot.log" 2>&1; then
