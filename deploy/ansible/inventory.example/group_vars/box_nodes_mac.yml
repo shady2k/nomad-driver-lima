@@ -16,6 +16,14 @@ nomad_meta:
   box: 'true'
   vm_type: vz
 
+# The CPU this Mac offers. Nomad 2.0.7 fingerprinted a 14-core M4 as 48 MHz of
+# total CPU, and with the default reservation the node then offered no CPU at all:
+# nothing could be placed on it. Nomad cannot read the real clock of the machine,
+# so declare what you want to sell. Pick the number yourself: cores x a per-core
+# MHz you are willing to offer (a share of the core, not its peak).
+# nomad_client_extra:
+#   cpu_total_compute: 7000        # 14 cores x 500 MHz
+
 # The launchd daemon: written to /Library/LaunchDaemons/com.hashicorp.nomad.plist
 # and loaded by the play. Set nomad_launchd_load: false to stage the plist and load
 # it yourself - that is what the kit's own checks do on a Linux host.

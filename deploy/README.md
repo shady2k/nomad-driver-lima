@@ -279,6 +279,14 @@ user's uid, `HOME` and `LIMA_HOME`. So the split is exactly the Linux one: the
 client is root, every VM process is the unprivileged user, and the Lima home and the
 image cache belong to that user.
 
+**The CPU on Apple Silicon has to be declared.** Nomad 2.0.7 fingerprinted a
+14-core M4 as 48 MHz in total, so with the default reservation the node offered no
+CPU and nothing could be placed on it. Nomad cannot read the machine's real clock,
+so give the node the number you are willing to offer, in the Mac's group vars:
+`nomad_client_extra: {cpu_total_compute: <MHz>}`, cores × a per-core MHz you
+choose - `inventory.example/group_vars/box_nodes_mac.yml` has the commented
+example.
+
 **A restart that keeps the VMs.** The plist sets
 
 ```xml

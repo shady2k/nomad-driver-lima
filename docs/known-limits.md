@@ -141,6 +141,12 @@ where one is known, what would close it. Nothing here is a promise to fix it.
 - **The deploy tests do not restart a service.** They assert the rendered unit,
   the rendered plist and that `nomad config validate` accepts the configuration;
   a real restart is what `deploy/accept.sh` does on a real node.
+- **A Mac's CPU has to be declared by hand.** Nomad 2.0.7 fingerprinted a 14-core
+  M4 as 48 MHz in total, so a Mac with the default reservation offered no CPU and
+  nothing could be placed on it. Nomad cannot read the real clock, and the kit does
+  not guess: set `nomad_client_extra: {cpu_total_compute: <MHz>}` for the Mac
+  (`deploy/ansible/inventory.example/group_vars/box_nodes_mac.yml` shows the shape,
+  with how to pick the number).
 - **The acceptance run needs a real cluster.** `deploy/accept.sh --dry-run`
   prints its ten steps without a cluster, but the run itself needs nodes, an
   image and executor credentials.
