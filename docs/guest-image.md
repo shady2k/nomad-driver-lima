@@ -1,17 +1,59 @@
 # The guest image
 
-A box boots a qcow2 image that **you** build and publish. This repository builds
-no image and publishes none: it ships `boxd` (the guest daemon) and `boxctl` (the
-same binary), the installer that puts them into an image, and this page, which is
-the contract between them. Any image that boots under Lima, runs `boxd` and meets
-the requirements below works; how it was built is yours to choose. Where this
-page says *the reference image*, it means the image that the recipe this
-repository used to ship built.
+A box boots a qcow2 image. There are two ways to get one:
 
-The release carries `boxd_linux_amd64`, `boxd_linux_arm64` and `boxd-install.sh`
-(`deploy/build.sh`, `SHA256SUMS` covers all three). Both binaries are built with
-`CGO_ENABLED=0`, so they are static and need no C library in the image.
-`guest/boxd-install.sh` is the tool that puts boxd into an image of your own:
+1. **Build it from the recipe in `images/`.** It is the image this project tests
+   against: Ubuntu 24.04 with a toolchain, `boxd` installed and its unit enabled,
+   every download pinned, and `images/verify.sh` to prove the result boots and
+   passes its checks. `images/README.md` is the one-screen version of this page.
+2. **Bring your own image**, provided it meets the contract below. `boxd` and
+   `guest/` are what it needs from this repository; how you build it is yours.
+
+**This repository publishes no image.** It keeps the recipe and its build
+automation; the binary image is never part of it. Versioned images are published
+by the operator, separately, to their own registry or store -- `images/publish.sh`
+writes one to any HTTP PUT store, and `BOX_IMAGE_INDEX` (or `--image-index`) is
+how a CLI is pointed at an index of them. Site addresses -- mirrors, the store,
+and how its token is obtained -- are deployment settings the operator passes in;
+none of them is part of this repository or of an image it builds.
+
+## Building from the recipe
+
+```sh
+images/build.sh amd64 1.0.0        # out/box-base-1.0.0-amd64.qcow2, .sha256, .json
+IMAGE_PATH=out/box-base-1.0.0-amd64.qcow2 OUT=out images/verify.sh amd64 1.0.0
+images/publish.sh amd64 1.0.0      # to BOX_STORE_URL, your store
+```
+
+`images/build.sh` runs the recipe (`images/provision.sh`) inside a Lima instance
+of the Ubuntu cloud image, installs `boxd` through `guest/boxd-install.sh`, runs
+`guest/no-secrets.sh` before the disk is captured, and writes the manifest that
+`images/verify.sh` and `images/publish.sh` read. `images/verify.sh` boots the
+image the way the driver does and runs `images/guest-checks.sh` inside it.
+
+### Which boxd the image carries
+
+`boxd` comes from exactly one recorded source, and the build refuses an ambiguous
+one:
+
+| setting | source |
+| --- | --- |
+| `BOXD_RELEASE=vX.Y.Z` | `boxd_linux_<arch>` and `SHA256SUMS` from `https://github.com/<BOXD_REPO>/releases/download/<tag>/` (repo from `BOXD_REPO`, default `shady2k/nomad-driver-lima`); the sha256 is checked against the release's `SHA256SUMS`, and nothing is built |
+| `BOXD_COMMIT=<sha or ref>` | `cmd/boxd` built from exactly that commit (the tree is taken with `git archive`, `CGO_ENABLED=0`, `-trimpath`, and the version stamping of `deploy/build.sh`) |
+| neither | `cmd/boxd` built from this checkout's HEAD commit; the build refuses a tree with uncommitted changes under `cmd/` or `internal/` (`BOXD_ALLOW_DIRTY=1` overrides, and the image is recorded as dirty) |
+
+The chosen source is recorded twice: in the build manifest (`"boxd"`: kind, tag or
+ref, resolved commit, binary sha256, version, dirty) and in the image itself at
+`/etc/box/image.json`, next to the image version, the base image and the tool
+versions. A booted box can therefore answer "which boxd is in me" on its own, and
+`images/verify.sh` checks the installed binary against that record.
+
+## Bringing your own image
+
+The release carries `boxd_linux_amd64`, `boxd_linux_arm64` and
+`guest/boxd-install.sh` (`deploy/build.sh`, and `SHA256SUMS` covers all three).
+Both binaries are built with `CGO_ENABLED=0`, so they are static and need no C
+library in the image.
 
 ```sh
 # into an image being built (a chroot or a mounted image, no systemd running)
@@ -40,9 +82,9 @@ So the image has to be:
 - **cloud-init enabled, and a first boot for every box.** Lima creates its user
   with cloud-init at boot and gives it passwordless sudo. The image must therefore
   not carry an identity of its own: no machine-id, no ssh host keys, no
-  authorized keys, no passwords, no `/var/lib/cloud/instances`. `cloud-init clean
-  --logs --machine-id` plus `truncate -s 0 /etc/machine-id` is what the reference
-  recipe did before capture.
+  authorized keys, no passwords, no `/var/lib/cloud/instances`. The recipe runs
+  `cloud-init clean --logs --machine-id` and empties `/etc/machine-id` before it
+  captures the disk.
 - **reachable over ssh, with systemd as init, and with `bash` and coreutils**:
   `limactl shell` is an ssh session as Lima's user, that user needs `sudo -n`
   (the driver installs task files as root and reads `journalctl -u boxd`), and
@@ -52,10 +94,10 @@ So the image has to be:
   asking for less fails at create. Growing the partition into a bigger disk is the
   image's job (below).
 
-Beyond that the reference recipe installed `qemu-guest-agent`, `openssh-server`,
-docker with buildx and compose, git, curl, jq, ripgrep, build-essential and
-python3. None of it is required; a box is more useful with a toolchain, but which
-one is the operator's choice.
+Beyond that the recipe installs `qemu-guest-agent`, `openssh-server`, docker with
+buildx and compose, git, curl, jq, ripgrep, build-essential and python3. None of
+it is required; a box is more useful with a toolchain, but which one is the
+operator's choice.
 
 ## What boxd needs in the image
 
@@ -76,7 +118,7 @@ one is the operator's choice.
 - **the executors on `PATH`** — `boxd` probes each one and reports what it finds
   in `boxctl info`:
 
-  | executor | binary | version the reference image was tested with |
+  | executor | binary | version the recipe installs |
   | --- | --- | --- |
   | `prime` | `prime-agent` (`--mode acp`) | 0.10.2 |
   | `opencode` | `opencode` (`acp`) | 2.2.5 |
@@ -98,9 +140,9 @@ one is the operator's choice.
 
 A box can be resized larger and the driver only stops, edits and starts the VM:
 the guest has to grow its own root partition and filesystem on boot. cloud-init's
-`growpart`/`resizefs` is not enough on the reference image (its EFI and boot
+`growpart`/`resizefs` is not enough on the recipe's image (its EFI and boot
 partitions are numbered 14–16, so root is not the highest partition and `growpart`
-refuses it), so the reference image carried a `box-grow-rootfs.service` that runs
+refuses it), so the recipe installs a `box-grow-rootfs.service` that runs
 after the root is mounted read-write: `parted -s -f <disk> resizepart <n> 100%`,
 `partx -u <disk>`, `resize2fs <root>`. An image without that keeps its first
 size, whatever `disk_gib` asks for.
@@ -117,7 +159,62 @@ sudo guest/no-secrets.sh 1.0.0      # one line per location, non-zero on a hit
 
 It fails on a non-empty executor directory, on an `auth.json`, `credentials.json`
 or `.credentials.json` below an account or the box directories, and on a
-`/run/box/secrets` or `/run/boxd` that is not a tmpfs.
+`/run/box/secrets` or `/run/boxd` that is not a tmpfs. `images/build.sh` runs it
+in the build VM before the disk is captured, and `images/verify.sh` runs it in a
+booted image.
+
+## What `images/verify.sh` checks
+
+`images/verify.sh <arch> <version>` takes a local build (`IMAGE_PATH`) or a
+published one (`BOX_STORE_URL`, with `BOX_STORE_TOKEN` or
+`BOX_STORE_TOKEN_FILE` when the store needs a token), verifies the image's
+sha256, boots it with `images/box-boot.yaml`, and prints one line per check: PASS
+or FAIL, expected against actual, and a non-zero exit when anything failed.
+
+| check | expected |
+| --- | --- |
+| the image's sha256 | the digest in its `.sha256` file, published or local |
+| the image boots under Lima, and the instance is running | a running instance |
+| cloud-init finished on this boot | `status: done` |
+| `boxd.service` is enabled and active, `boxctl info` answers | enabled, active, a JSON document |
+| the executors the image installs are available | `prime` and `opencode` |
+| the boxd binary is the one the image records | the manifest's `boxd.sha256`, and its `boxd.version` from `boxd --version` |
+| the tool versions are the ones the image records | every entry of the manifest's `tools`, each checked with the command that recorded it |
+| apt talks only to the sources the image configures | no fetch from any other host |
+| `/run/box/secrets` and `/run/boxd` are tmpfs | `tmpfs` for both |
+| a credential written into `/run/box/secrets` the way the driver delivers it | readable by `boxd`, root and 0600, nowhere on the disk (`find / -xdev`) |
+| the same credential, as the box's default user | permission denied |
+| a rotated credential, then `boxctl reload` | the executor listed as configured and the new value in `/run/boxd/executors/<executor>/` |
+| `guest/no-secrets.sh` in the booted image | no credential in the image |
+| the root filesystem after boot | it fills its partition (the image grows it) |
+| the box's identity | ssh host keys and the machine-id of this boot, not of the image |
+
+## Deployment settings
+
+Every source has a public upstream default, and a `BOX_MIRROR_*` variable moves
+it for one build (a closed network, a caching proxy). The versions and their
+sha256 pins stay in force either way: a mirror serves the same bytes or the build
+stops. `images/README.md` lists the variables; `provision.sh` is where the
+defaults are written down.
+
+| variable | what it moves |
+| --- | --- |
+| `BOX_MIRROR_APT`, `BOX_MIRROR_APT_SECURITY` | the Ubuntu archive and its security suite |
+| `BOX_MIRROR_NPM`, `BOX_MIRROR_PYPI` | the npm registry, the pip and uv index |
+| `BOX_MIRROR_GO`, `BOX_MIRROR_GO_DIST` | the Go module proxy, the Go release tarballs |
+| `BOX_MIRROR_GITHUB`, `BOX_MIRROR_NODE` | GitHub release assets, the Node.js release files |
+| `BOX_MIRROR_DOCKER` | a Docker Hub registry mirror in `/etc/docker/daemon.json` |
+| `BOX_MIRROR_CLOUDIMAGE` | the base cloud image (`images/build.sh` only) |
+| `BOX_STORE_URL`, `BOX_STORE_TOKEN`, `BOX_STORE_TOKEN_FILE`, `BOX_STORE_TOKEN_HEADER`, `BOX_STORE_TOKEN_SCHEME` | the operator's store, and the token `images/publish.sh` and `images/verify.sh` send it |
+
+One difference reaches the box: `GOSUMDB`. The public Go proxy serves the
+checksum database, so a box verifies module sums against `sum.golang.org`; a
+mirror usually does not serve it, so `GOSUMDB=off` exactly when `BOX_MIRROR_GO`
+is set.
+
+A token is never an argument and never on stdout: it goes into a 0600 header file
+that `curl` reads. Whether it comes from a vault, a secret manager or a mounted
+file is the operator's business.
 
 ## Publishing: the image index
 
@@ -125,6 +222,12 @@ or `.credentials.json` below an account or the box directories, and on a
 by `BOX_IMAGE_INDEX` or `--image-index`. There is no built-in default. The CLI
 fetches it with a 30 second timeout and reads at most 8 MiB; a 404 means "no
 images are published yet" and is reported as such.
+
+`images/publish.sh` writes that document for its store, and it is the only thing
+here that writes one: it refuses a version that already exists (a published
+version never changes), uploads the image, its `.sha256` and its manifest, reads
+them back, and only then merges the version into `index.json` under a lock.
+`images/publish_test.py` exercises all of that against a local fake store.
 
 The canonical shape is `schema`, `updated_at` and `images[<version>][<arch>]`,
 each artifact holding `url`, `sha256` (`size` and `built_at` are shown by

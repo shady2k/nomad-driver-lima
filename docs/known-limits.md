@@ -62,13 +62,20 @@ where one is known, what would close it. Nothing here is a promise to fix it.
 
 ## Images
 
-- **This project builds and publishes no images.** The release carries `boxd` for
-  both guest architectures and `boxd-install.sh`; the image, its package sources
-  and its index are the operator's. `docs/guest-image.md` is the contract.
-- **Nothing here checks an operator's image.** `guest/no-secrets.sh` proves that
-  the image it runs in carries no credential, and `boxctl info` reports which
-  executors an image has; whether the image grows its root filesystem after a
-  resize or keeps cloud-init working is proven only when a box is booted.
+- **This project publishes no image, and never carries an image binary.** It keeps
+  the recipe (`images/`) and the automation that builds, checks and uploads one;
+  the image, its store and its index are the operator's, and the recipe's build
+  takes the operator's site addresses (mirrors, store, token) as settings.
+- **An image of your own is checked only by what you run against it.**
+  `images/verify.sh` boots a built or published image and checks it end to end --
+  boot, cloud-init, `boxd.service`, `boxctl info`, the recorded tool versions, the
+  tmpfs credentials, a reload, no baked secret, the grown root filesystem -- and
+  `guest/no-secrets.sh` plus `boxctl info` are the two things to run against an
+  image that was not built from the recipe. Neither proves what an image does
+  under a workload: that is what booting a box shows.
+- **The recipe is one shape of image.** It pins Ubuntu 24.04 and its tool versions
+  (`images/provision.sh`); an image that needs another distribution, another
+  kernel or a smaller tool set is the operator's own build against the contract.
 - **An image is trusted by sha256 pin only.** No signature, no transparency log:
   whoever can write the index decides what every box boots.
 - **An image that is too small is found at create, not before.** Lima refuses to

@@ -153,7 +153,7 @@ and versions named in "What was measured".
   turn restarts it when the turn ends. The VM, the allocation and the transcripts
   are untouched.
 - **The image grows the root filesystem itself.** cloud-init's growpart refuses
-  a root partition that is not the highest one (the reference image numbers its
+  a root partition that is not the highest one (the recipe's image numbers its
   EFI and boot partitions 14 to 16), so the image is expected to carry a small
   service that grows the partition and the filesystem after the root is mounted
   read-write. A 10 GiB box then has 8.7 GiB usable instead of 6.
@@ -217,12 +217,25 @@ and versions named in "What was measured".
   one digest per architecture, and a box boots the digest it was created from.
   Whoever publishes an index is responsible for a version continuing to mean one
   image; a mistake is fixed by publishing the next version.
-- **The image is the operator's, and the repository ships only what it must.**
-  The release carries `boxd` for both guest architectures and `boxd-install.sh`;
-  what else an image contains is the operator's decision, recorded as a contract
-  in `docs/guest-image.md` rather than as a recipe here. A recipe in this
-  repository would have to be the one shape everyone gets, and it published
-  images the maintainer had to host.
+- **The repository keeps the recipe, never the image.** `images/` builds an image
+  (`provision.sh` is the recipe, `build.sh` the automation), `images/verify.sh`
+  proves the result boots and passes its checks, and `images/publish.sh` uploads
+  it to the operator's own store. Keeping the binary out of the repository and out
+  of CI is the point: an image goes to whoever the operator serves, versions are
+  theirs to publish, and the maintainer hosts nothing. What an image contains is
+  still the operator's decision -- `docs/guest-image.md` is the contract, and an
+  image of your own that meets it needs nothing from the recipe.
+- **An image names the boxd it carries.** `BOXD_RELEASE` takes a release asset
+  (digest checked against the release's `SHA256SUMS`), `BOXD_COMMIT` builds one
+  commit, and with neither the checkout's HEAD is the source and a dirty tree
+  under `cmd/` or `internal/` is refused. The choice is recorded in the build
+  manifest and in the image at `/etc/box/image.json`, so "which boxd is in this
+  box" has one answer, from the image itself.
+- **Site addresses are deployment settings.** Mirrors, the store and its token are
+  `BOX_MIRROR_*` and `BOX_STORE_*` in the operator's environment; the recipe's
+  public upstream defaults are written down once, in `provision.sh`, and no
+  private host, mirror or secret manager is named anywhere. The versions and
+  their sha256 pins stay in force through any mirror.
 - **The image carries no secret and no key.** No ssh host keys, no authorized
   keys, no passwords, no machine-id, no shell history, no journal: cloud-init
   generates them on the first boot of every box. `guest/no-secrets.sh` is the
