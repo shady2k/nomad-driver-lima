@@ -48,6 +48,50 @@ ref, resolved commit, binary sha256, version, dirty) and in the image itself at
 versions. A booted box can therefore answer "which boxd is in me" on its own, and
 `images/verify.sh` checks the installed binary against that record.
 
+### Extra files the image carries: `IMAGE_ADDONS`
+
+Sometimes the toolchain is not enough: the guest software needs extra files in
+every box, such as a program's plugin or extension package. A directory on the
+build host installs them at one fixed path:
+
+```sh
+IMAGE_ADDONS=~/box-addons images/build.sh amd64 1.0.0
+# ~/box-addons/foo/index.js  ->  /opt/box/addons/foo/index.js in the image
+```
+
+`images/addons-pack.sh` packs that directory into one deterministic tar -- sorted
+entries, owner 0, mtime 0, directories 0755, files 0644, and 0755 for a file that
+had any execute bit -- and refuses anything that is not a regular file or a
+directory (a symlink, socket, fifo or device), and an empty directory. The same
+tree always gives the same archive, and the script prints
+`{"files": N, "bytes": B, "sha256": "<digest of the sorted file listing>"}`.
+
+These are code and data, never credentials. The files are in every copy of the
+image, and `guest/no-secrets.sh` covers `/opt/box/addons` like the rest of the
+image: before the disk is captured, and again in a booted box. A credential
+belongs in the box's executor configuration, which reaches the guest after boot
+on `/run/box/secrets`.
+
+The build records what it installed, in the manifest and in `/etc/box/image.json`:
+
+```json
+"addons": {"path": "/opt/box/addons", "files": 12, "bytes": 90210, "sha256": "3f1a...9c"}
+```
+
+Without `IMAGE_ADDONS` both say `"addons": null` and the image has no
+`/opt/box/addons`. `images/guest-checks.sh` checks a booted box: everything below
+`/opt/box/addons` owned by root, nothing group- or world-writable, and the file
+count the image records -- or, when there is no such directory, the line "no
+add-ons", which is not a failure.
+
+The recipe, boxd and the driver never look inside these files, and no path in
+them is named after a particular program. A program that loads plugins from a
+local path is pointed at `/opt/box/addons/<name>` in its own settings, which the
+operator supplies with the box's executor configuration; prime-agent's
+`settings.json`, for one, takes an absolute path in its `packages` list. Keeping
+the program's configuration out of the image is the point: the same image serves
+a box with add-ons and one without.
+
 ## Bringing your own image
 
 The release carries `boxd_linux_amd64`, `boxd_linux_arm64` and
@@ -180,6 +224,7 @@ or FAIL, expected against actual, and a non-zero exit when anything failed.
 | the executors the image installs are available | `prime` and `opencode` |
 | the boxd binary is the one the image records | the manifest's `boxd.sha256`, and its `boxd.version` from `boxd --version` |
 | the tool versions are the ones the image records | every entry of the manifest's `tools`, each checked with the command that recorded it |
+| the add-ons at `/opt/box/addons` (when the image was built with `IMAGE_ADDONS`) | owned by root, nothing group- or world-writable, and the file count the manifest records; without the directory, "no add-ons" |
 | apt talks only to the sources the image configures | no fetch from any other host |
 | `/run/box/secrets` and `/run/boxd` are tmpfs | `tmpfs` for both |
 | a credential written into `/run/box/secrets` the way the driver delivers it | readable by `boxd`, root and 0600, nowhere on the disk (`find / -xdev`) |
@@ -205,6 +250,7 @@ defaults are written down.
 | `BOX_MIRROR_GITHUB`, `BOX_MIRROR_NODE` | GitHub release assets, the Node.js release files |
 | `BOX_MIRROR_DOCKER` | a Docker Hub registry mirror in `/etc/docker/daemon.json` |
 | `BOX_MIRROR_CLOUDIMAGE` | the base cloud image (`images/build.sh` only) |
+| `IMAGE_ADDONS` | extra files installed at `/opt/box/addons` in the image (`images/build.sh` only; see above) |
 | `BOXD_REPO`, `BOXD_RELEASE_BASE_URL`, `BOXD_ALLOW_DIRTY` | which repository a `BOXD_RELEASE` asset comes from (`shady2k/nomad-driver-lima` by default), where its release assets are served (`https://github.com`), and whether a dirty tree may be built into an image (no, unless it is set to `1` and then recorded) |
 | `BOX_STORE_URL`, `BOX_STORE_TOKEN`, `BOX_STORE_TOKEN_FILE`, `BOX_STORE_TOKEN_HEADER`, `BOX_STORE_TOKEN_SCHEME` | the operator's store, and the token `images/publish.sh` and `images/verify.sh` send it |
 

@@ -10,8 +10,9 @@
 #                                              8 GiB virtual disk by default)
 #   box-base-<version>-<arch>.sha256           its sha256, in sha256sum format
 #   box-base-<version>-<arch>.json             build manifest: the tool versions,
-#                                              every source the build used, and
-#                                              the boxd the image carries
+#                                              every source the build used, the
+#                                              boxd the image carries, and the
+#                                              add-ons it installs
 #   box-base-<version>-<arch>.report.txt       the provisioning report
 #   box-base-<version>-<arch>.guest-checks.txt the in-guest checks and their output
 #
@@ -57,6 +58,16 @@
 #                     refused. See images/boxd-source.sh.
 #   BOXD_REPO         repository whose releases carry boxd
 #   BOXD_RELEASE_BASE_URL  where release assets are served (for a mirror)
+#   IMAGE_ADDONS      a directory on this host whose CONTENTS are installed at
+#                     /opt/box/addons in the image: extra files the guest
+#                     software loads from a local path, packed by
+#                     images/addons-pack.sh into one deterministic tar. Only
+#                     files are packed -- no symlink, no socket -- and only code
+#                     and data belong here, never a credential (the secret check
+#                     runs over them). The manifest and /etc/box/image.json
+#                     record the path, the file count, the bytes and the sha256,
+#                     and guest-checks.sh checks the owner and the modes in a
+#                     booted box. Unset: the image has no /opt/box/addons.
 #   BASE_IMAGE_URL    base cloud image (default: the public Ubuntu release image
 #                     at cloud-images.ubuntu.com)
 #   BASE_IMAGE_SHA256 its sha256 (default: the pinned noble release value; set
@@ -216,6 +227,40 @@ printf '%s  %s\n' "$BASE_IMAGE_SHA256" "$BASE_IMAGE" | sha256sum -c --status - \
   || die "the base image $BASE_IMAGE does not match $BASE_IMAGE_SHA256"
 log "base image sha256 verified"
 
+# --- add-ons -----------------------------------------------------------------
+# The operator's extra files for the image, packed before the VM is started: a
+# tree that cannot be packed (it is empty, or it holds a symlink) fails here
+# instead of after an hour of provisioning. What is inside is the operator's --
+# nothing here reads a path in it, and nothing names a particular program's
+# layout.
+ADDONS_TAR=$WORK/addons.tar
+ADDONS_JSON=$WORK/addons.json
+rm -f "$ADDONS_TAR" "$ADDONS_JSON"
+if [[ -n ${IMAGE_ADDONS:-} ]]; then
+  log "packing the add-ons from $IMAGE_ADDONS"
+  ADDONS_PACKED=$("$ROOT/images/addons-pack.sh" "$IMAGE_ADDONS" "$ADDONS_TAR") \
+    || die "images/addons-pack.sh could not pack IMAGE_ADDONS=$IMAGE_ADDONS"
+  # The record the manifests and the image carry: the fixed path in the guest,
+  # and what was installed there.
+  python3 - "$ADDONS_PACKED" "$ADDONS_JSON" <<'PY' || die "cannot record the add-ons"
+import json, sys
+
+packed = json.loads(sys.argv[1])
+doc = {
+    "path": "/opt/box/addons",
+    "files": packed["files"],
+    "bytes": packed["bytes"],
+    "sha256": packed["sha256"],
+}
+json.dump(doc, open(sys.argv[2], "w"), indent=2)
+open(sys.argv[2], "a").write("\n")
+PY
+  log "add-ons packed: $ADDONS_PACKED"
+else
+  log "no add-ons: IMAGE_ADDONS is not set, the image gets no /opt/box/addons"
+  printf 'null\n' > "$ADDONS_JSON"
+fi
+
 # --- provisioning input ------------------------------------------------------
 # images/provision.sh is the whole recipe; build.sh only prepends the parameters,
 # so the script itself stays runnable by hand inside a guest. The mirrors are
@@ -329,6 +374,38 @@ lima shell "$NAME" sudo rm -f /tmp/boxd /tmp/boxd-install.sh
 lima shell "$NAME" sudo systemctl -q is-enabled boxd.service >/dev/null 2>&1 \
   || log "note: systemctl is-enabled did not confirm boxd.service; images/verify.sh checks it in a booted image"
 
+# --- the add-ons -------------------------------------------------------------
+# They go in before /etc/box/image.json is written, so the image's own record
+# names what it carries, and before the secret check, so that check covers these
+# files too. Nothing runs from here: they are files at a fixed path, and the
+# guest software that reads them is pointed at that path by its own
+# configuration, which this build never sees.
+if [[ -n ${IMAGE_ADDONS:-} ]]; then
+  log "installing the add-ons at /opt/box/addons"
+  lima cp "$ADDONS_TAR" "$NAME:/tmp/addons.tar" || die "cannot copy the add-ons into the build VM"
+  lima shell "$NAME" sudo bash -c '
+    set -e
+    install -d -m 0755 -o root -g root /opt/box/addons
+    tar -xpf /tmp/addons.tar -C /opt/box/addons
+    rm -f /tmp/addons.tar
+  ' || die "cannot install the add-ons in the build VM"
+  # What landed is what was packed: a copy that lost files fails here, not in a
+  # booted box. Only sizes are read, so no file name is ever parsed.
+  lima shell "$NAME" sudo bash -c 'find /opt/box/addons -type f -printf "%s\n"' > "$WORK/addons-got.txt" \
+    || die "cannot read the installed add-ons in the build VM"
+  ADDONS_GOT=$(python3 - "$WORK/addons-got.txt" <<'PY'
+import sys
+
+sizes = [int(line) for line in open(sys.argv[1]) if line.strip()]
+print(f"{len(sizes)} {sum(sizes)}")
+PY
+)
+  ADDONS_WANT=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["files"], d["bytes"])' "$ADDONS_JSON")
+  [[ $ADDONS_GOT == "$ADDONS_WANT" ]] \
+    || die "the add-ons in the build VM are not the packed ones: $ADDONS_GOT (files bytes) installed, $ADDONS_WANT packed"
+  log "the add-ons are installed: $ADDONS_GOT (files bytes)"
+fi
+
 log "reading the build outputs out of the guest"
 lima shell "$NAME" sudo cat /var/lib/box-image-build/report.txt > "$REPORT_OUT"
 lima shell "$NAME" sudo cat /var/lib/box-image-build/guest-checks.txt > "$CHECKS_OUT"
@@ -341,16 +418,19 @@ python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$WORK/manifest.json"
 # --- the image records its own build ------------------------------------------
 # /etc/box/image.json goes into the image before it is captured: the version and
 # arch, the base image it was grown from, the tool versions the recipe installed,
-# and the boxd source -- the same three things the manifest names. A booted box
-# can then answer "what am I" without the manifest at hand, and images/verify.sh
-# checks the tools against it.
+# the boxd source, and the add-ons the build installed -- the same things the
+# manifest names. A booted box can then answer "what am I" without the manifest at
+# hand, and images/verify.sh checks the tools against it.
 log "writing /etc/box/image.json into the guest"
-python3 - "$WORK/manifest.json" "$BOXD_JSON" "$WORK/image.json" <<'PY' \
+python3 - "$WORK/manifest.json" "$BOXD_JSON" "$WORK/image.json" "$ADDONS_JSON" <<'PY' \
   || die "cannot build the image record"
 import json, sys
 
 guest = json.load(open(sys.argv[1]))
 boxd = json.load(open(sys.argv[2]))
+# What the build installed at /opt/box/addons (path, files, bytes, sha256), or
+# null when IMAGE_ADDONS was not set and the image has no add-ons.
+addons = json.load(open(sys.argv[4]))
 doc = {
     "schema": 1,
     "version": guest["version"],
@@ -359,6 +439,7 @@ doc = {
     "base_image": {"name": guest["base_image"]},
     "kernel": guest["kernel"],
     "boxd": boxd,
+    "addons": addons,
     "tools": guest["tools"],
 }
 json.dump(doc, open(sys.argv[3], "w"), indent=2, sort_keys=False)
@@ -428,10 +509,11 @@ SIZE=$(stat -c %s "$IMAGE_OUT")
 GUEST_VIRTUAL=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['virtual-size'])" "$WORK/disk-info.json")
 
 # --- manifest ----------------------------------------------------------------
-python3 - "$WORK/manifest.json" "$JSON_OUT" "$BOXD_JSON" <<PY
+python3 - "$WORK/manifest.json" "$JSON_OUT" "$BOXD_JSON" "$ADDONS_JSON" <<PY
 import json, sys
 guest = json.load(open(sys.argv[1]))
 boxd = json.load(open(sys.argv[3]))
+addons = json.load(open(sys.argv[4]))
 manifest = {
     "version": guest["version"],
     "arch": guest["arch"],
@@ -456,6 +538,9 @@ manifest = {
     # "commit" or "head", and the record names the tag or ref, the commit it
     # resolved to, the binary's sha256 and the version stamped into it.
     "boxd": boxd,
+    # The add-ons the image carries at a fixed path, or null: the same record the
+    # image holds, so the manifest and the box agree about what was installed.
+    "addons": addons,
     "image_manifest": "/etc/box/image.json",
     "tools": guest["tools"],
     "sources": guest["sources"],

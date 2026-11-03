@@ -196,6 +196,33 @@ done
 rmdir /run/box-checks-home 2>/dev/null || true
 [[ $TOOLS_CHECKED -gt 0 ]] || fail "the manifest names at least one tool version" "at least one" "none"
 
+# --- the add-ons the image carries -------------------------------------------
+printf '\n== the add-ons\n'
+# /opt/box/addons is where the build puts the operator's extra files, and it is
+# only there when the image was built with them. They are files at a fixed path:
+# which guest program reads them, and how it is told the path, is that program's
+# own configuration, so the checks here stop at who owns them, whether they are
+# writable, and how many there are.
+ADDONS=/opt/box/addons
+if [[ -e $ADDONS ]]; then
+  ADDONS_SHA=$(jget addons.sha256)
+  [[ -n $ADDONS_SHA ]] && info "add-ons      sha256 $ADDONS_SHA"
+  ADDONS_NOT_ROOT=$(find "$ADDONS" \( ! -uid 0 -o ! -gid 0 \) -printf '%U:%G %p\n' 2>/dev/null | head -3 | tr '\n' ' ')
+  check_none "everything in $ADDONS is owned by root" "$ADDONS_NOT_ROOT"
+  ADDONS_WRITABLE=$(find "$ADDONS" -perm /022 -printf '%m %p\n' 2>/dev/null | head -3 | tr '\n' ' ')
+  check_none "nothing in $ADDONS is group- or world-writable" "$ADDONS_WRITABLE"
+  ADDONS_FILES=$(find "$ADDONS" -type f | wc -l | tr -d ' ')
+  info "add-ons      $ADDONS_FILES file(s) in $ADDONS"
+  ADDONS_WANT_FILES=$(jget addons.files)
+  if [[ -n $ADDONS_WANT_FILES ]]; then
+    check "the add-ons are the ones the image records" "$ADDONS_WANT_FILES file(s)" "$ADDONS_FILES file(s)"
+  else
+    info "the image records no add-on count, so $ADDONS_FILES file(s) are reported as found"
+  fi
+else
+  info "no add-ons: $ADDONS does not exist"
+fi
+
 # --- apt only talks to the sources the image configures -----------------------
 printf '\n== apt sources\n'
 APT_HOSTS=$(python3 - <<'PY'

@@ -1,7 +1,8 @@
 # What every push and pull request must keep true: the Go code is formatted,
 # vets and passes the race detector, the shell scripts and the Ansible kit pass
 # their linters, the release artifacts still build for every target, and the image
-# recipe's publish tooling passes its own test against a fake store.
+# recipe's own tools pass their tests: publish.sh against a fake store, and
+# addons-pack.sh against small trees.
 #
 # The integration suite (real VMs) is separate: integration.yml.
 name: CI
@@ -51,7 +52,7 @@ jobs:
         run: go test -race ./...
 
   image-tools:
-    name: Image tools (publish.sh against a fake store)
+    name: Image tools (publish.sh against a fake store, addons-pack.sh)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -62,6 +63,11 @@ jobs:
       # publish run in it goes to a temporary directory.
       - name: python3 images/publish_test.py
         run: python3 images/publish_test.py
+
+      # The add-ons packer, tested the same way: small trees in a temporary
+      # directory, no Lima, no image, nothing installed anywhere.
+      - name: images/addons_pack_test.sh
+        run: images/addons_pack_test.sh
 
   shellcheck:
     name: shellcheck
