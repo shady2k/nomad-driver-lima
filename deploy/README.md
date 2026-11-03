@@ -6,6 +6,11 @@ driver and the volume plugin, lima and qemu, the runtime user, the cgroup
 prerequisites, **the whole Nomad client configuration and its service** (a systemd
 unit on Linux, a launchd daemon on macOS), and the CLI with its skill.
 
+The box binaries come from a **published release** by default: the machine that
+runs Ansible downloads them once, verifies them against the release's `SHA256SUMS`
+and copies them to the hosts, so nothing has to be built and no node needs a route
+to the release host (see "Where the release comes from" below).
+
 The only things you supply are secrets and per-site values: an inventory, the
 `group_vars` next to it, and the tokens (vaulted or from the environment). No
 private hostname, mirror or registry of any particular site is in this repository:
@@ -17,14 +22,16 @@ See "The Nomad servers" below for a one-host lab.
 ## From nothing, in one screen
 
 ```bash
-# 0. Prerequisites: Nomad servers the nodes can reach, a base image the CLI can
-#    find (`box_image_index`, see "Images" below), and on the machine that runs
-#    Ansible: ansible-core, go, and the release of the box binaries.
-./deploy/build.sh --version 0.1.0        # -> dist/0.1.0/ + SHA256SUMS (semver!)
+# 0. Prerequisites on the machine that runs Ansible (README.md has the whole
+#    list): ansible-core 2.22.0 - the version CI runs -, a route to the release
+#    host or your own mirror, and Nomad servers the nodes can reach. The box
+#    binaries of box_version come from the published release; nothing is built.
+#    A release of your own is ./deploy/build.sh --version 0.1.0 and
+#    box_release_source: local ("Where the release comes from" below).
 
 cd deploy/ansible
 cp -r inventory.example inventory        # then fill in hosts and group_vars
-$EDITOR inventory/hosts.ini inventory/group_vars/*.yml
+$EDITOR inventory/hosts.ini inventory/group_vars/*.yml    # box_version, nomad_servers, ...
 $EDITOR inventory/group_vars/all/vault.yml   # ansible-vault create ... (secrets)
 
 # 1. look first: every change on every host, and nothing changed
@@ -37,7 +44,9 @@ ansible-playbook -i inventory site.yml
 # 3. a cluster with ACLs: the policies, once, with a management token
 ansible-playbook -i inventory acl.yml
 
-# 4. the executor credentials the boxes run their agents with (once per cluster)
+# 4. the executor credentials the boxes run their agents with (once per cluster);
+#    the script is in deploy/, so this step runs from the repository root
+cd ../..
 ./deploy/executors-from-prime.sh --out /tmp/box-executors \
     --provider <provider> --base-url <https://api.example.com/v1>
 box executors set --from-dir /tmp/box-executors --provider <provider>
@@ -53,6 +62,47 @@ set -a; . ~/.config/box/env; set +a
 `--limit box_coordinators` runs only the coordinator play, `--limit node-01` only
 one node. `deploy/accept.sh --dry-run` prints the ten steps of the acceptance run
 and the commands, and runs nothing.
+
+README.md is the guide from an empty machine - prerequisites, the guest image,
+these steps and day 2 - and this file is the kit's reference.
+
+## Where the release comes from
+
+Both roles install the box binaries of `box_version`, and `box_release_source`
+says where they come from.
+
+**`download` (the default): the published release.** The machine that runs Ansible
+fetches `box_release_base_url/SHA256SUMS` and the artifacts each host needs - a
+node gets `box-driver_<os>_<arch>` and `box-volume_<os>_<arch>`, the coordinator
+gets `box_<os>_<arch>` - into `box_release_cache_dir`, checks every one of them
+against the digest `SHA256SUMS` gives it, and copies them to the hosts over the
+Ansible connection.
+
+- The fetch is delegated to `localhost` and run once, so **no node needs a route
+  to the release host**.
+- A cached artifact whose digest is still right is not fetched again, so a second
+  node of the same architecture, and every later run, reads the cache.
+- `--check` fetches too, into the controller's cache and never onto a host, so
+  what it reports is checked against the real bytes. A run with the release host
+  unreachable still installs from a warm cache.
+- A digest that does not match stops the play before anything reaches a host, and
+  so does a release that does not carry an artifact the host installs.
+
+**`local`: a build of your own.** `box_dist_dir` (default `dist/<box_version>` at
+the repository root) holds what `deploy/build.sh` wrote. Same verification, no
+network, and the Go toolchain on that machine.
+
+```yaml
+box_version: '0.1.0'
+# box_release_source: download
+# box_release_base_url: 'https://github.com/shady2k/nomad-driver-lima/releases/download/v{{ box_version }}'
+# box_release_cache_dir: '{{ lookup("env", "HOME") }}/.cache/nomad-driver-lima/releases/{{ box_version }}'
+```
+
+A site with its own mirror sets `box_release_base_url`; the assets and their
+`SHA256SUMS` are the same bytes. A release's assets never change, which is what
+makes the cache safe: `rm -rf {{ box_release_cache_dir }}` is the way back from a
+cache that no longer matches - the checksums catch it, they never install it.
 
 ## The release layout: one directory per version, one symlink
 
@@ -349,10 +399,12 @@ image of your own. `docs/guest-image.md` is what such an image must contain, the
 ## The release version must be semver
 
 Nomad parses the version a plugin reports and refuses a plugin whose version is not
-semver: `failed to parse plugin "box": malformed version`. `deploy/build.sh` takes
-its version from `git describe`, which gives `0.1.0-3-gabc123` for a tagged release
-but something like `linux-prototype-0.1.29-20-gedb8206-dirty` when the tag carries a
-prefix. Pass `--version 0.1.0` (or tag `v0.1.0`) for a release that a node must load.
+semver: `failed to parse plugin "box": malformed version`. A published release is
+always `vX.Y.Z`, so this bites a `box_release_source: local` build: `deploy/build.sh`
+takes its version from `git describe`, which gives `0.1.0-3-gabc123` for a tagged
+release but something like `linux-prototype-0.1.29-20-gedb8206-dirty` when the tag
+carries a prefix. Pass `--version 0.1.0` (or tag `v0.1.0`) for a release that a node
+must load.
 
 ## The checks this kit runs on itself
 
@@ -362,7 +414,11 @@ prefix. Pass `--version 0.1.0` (or tag `v0.1.0`) for a release that a node must 
 
 No VM and no root: the roles are applied into throwaway prefixes under the
 repository (`.test/`, gitignored). The script lints the roles, parses the four
-playbooks, builds two releases, and then: applies a release into a prefix and checks
+playbooks, builds two releases, and then: serves those releases from a local HTTP
+server and installs one over `box_release_source: download` (the digest check, a
+second run from the cache with the server gone, `--check` on an empty cache, and a
+wrong checksum and a release without the node's artifacts both refused); applies a
+release into a prefix and checks
 the layout, the symlink, `nomad config validate`, the unit, the secrets file, the
 volume settings file and the launchd plist; switches between the two releases with
 `rollback.yml` and checks that the configuration, the Lima home, the volumes and the
