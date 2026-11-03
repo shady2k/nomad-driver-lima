@@ -59,8 +59,9 @@ type Client struct {
 	// the complete environment it sees. A Nomad client that runs as root needs
 	// it, because Lima refuses to run as root.
 	Identity *identity.Identity
-	// Timeout bounds a single short call (list, version, edit); long calls
-	// (create, start) are bounded by the caller's context only.
+	// Timeout bounds a single call made with Run (list, version, edit, shell,
+	// copy); create, start and stop go through RunLong and are bounded by the
+	// caller's context only.
 	Timeout time.Duration
 }
 
@@ -101,13 +102,22 @@ func (c *Client) Command(ctx context.Context, args ...string) *exec.Cmd {
 	return cmd
 }
 
-// Run executes limactl with the given arguments.
+// Run executes a short limactl call, bounded by Timeout.
 func (c *Client) Run(ctx context.Context, args ...string) (string, string, error) {
 	if c.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
 		defer cancel()
 	}
+	return c.RunLong(ctx, args...)
+}
+
+// RunLong executes a limactl call that is bounded by the caller's context
+// only: create converts the image into the disk, start waits for the guest's
+// first boot, stop waits for its shutdown. Timeout would cut those short - on a
+// first boot under vz it cut `limactl start` at two minutes while the guest was
+// still coming up.
+func (c *Client) RunLong(ctx context.Context, args ...string) (string, string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := c.Command(ctx, args...)
 	cmd.Stdout = &stdout
@@ -179,7 +189,7 @@ func (c *Client) Create(ctx context.Context, name, yamlPath string, extra ...str
 	args := []string{"create", "--name", name, "--tty=false"}
 	args = append(args, extra...)
 	args = append(args, yamlPath)
-	_, _, err := c.Run(ctx, args...)
+	_, _, err := c.RunLong(ctx, args...)
 	return err
 }
 
@@ -188,7 +198,7 @@ func (c *Client) Start(ctx context.Context, name string, extra ...string) error 
 	args := []string{"start", "--tty=false"}
 	args = append(args, extra...)
 	args = append(args, name)
-	_, _, err := c.Run(ctx, args...)
+	_, _, err := c.RunLong(ctx, args...)
 	return err
 }
 
@@ -200,7 +210,7 @@ func (c *Client) StartCmd(ctx context.Context, name string) *exec.Cmd {
 
 // Stop asks the guest to shut down and returns when limactl exits.
 func (c *Client) Stop(ctx context.Context, name string) error {
-	_, _, err := c.Run(ctx, "stop", name)
+	_, _, err := c.RunLong(ctx, "stop", name)
 	return err
 }
 

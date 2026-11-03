@@ -1066,7 +1066,7 @@ func (m *Manager) moveFile(src, dst string) error {
 // startDirect boots the instance in the caller's context, with no memory cap.
 func (m *Manager) startDirect(ctx context.Context, b *Box) (string, error) {
 	b.event("start", fmt.Sprintf("Starting box %s (%d vCPU, %d MiB RAM)", b.spec.BoxID, b.spec.CPUs, b.spec.MemoryMiB))
-	if _, stderr, err := m.lima.Run(ctx, "start", "--tty=false", b.spec.BoxID); err != nil {
+	if _, stderr, err := m.lima.RunLong(ctx, "start", "--tty=false", b.spec.BoxID); err != nil {
 		return "none", fmt.Errorf("start box %s: %w%s", b.spec.BoxID, err, suffix(stderr))
 	}
 	return "none", nil

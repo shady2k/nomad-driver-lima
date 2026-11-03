@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -89,4 +90,26 @@ func TestRunUsesTheChildEnvironment(t *testing.T) {
 	require.Equal(t, "/var/lib/box/lima", lines[0])
 	require.Equal(t, "/home/box", lines[1])
 	require.Contains(t, lines[2], "/usr/bin")
+}
+
+// TestLongCallsOutliveTimeout keeps create, start and stop out of Timeout: a
+// first boot under vz takes longer than a short call may, and `limactl start`
+// cut at Timeout left a box that never started.
+func TestLongCallsOutliveTimeout(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "limactl")
+	require.NoError(t, os.WriteFile(bin, []byte("#!/bin/sh\nsleep 0.5\n"), 0o755))
+	c := New(bin, filepath.Join(dir, "home"))
+	c.Env = []string{"PATH=" + os.Getenv("PATH")}
+	c.Timeout = 100 * time.Millisecond
+
+	ctx := context.Background()
+	require.NoError(t, c.Start(ctx, "b1"))
+	require.NoError(t, c.Create(ctx, "b1", filepath.Join(dir, "b1.yaml")))
+	require.NoError(t, c.Stop(ctx, "b1"))
+	_, _, err := c.RunLong(ctx, "start", "--tty=false", "b1")
+	require.NoError(t, err)
+
+	_, err = c.Version(ctx)
+	require.Error(t, err, "a short call is still bounded by Timeout")
 }
