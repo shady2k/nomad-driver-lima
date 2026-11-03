@@ -39,7 +39,7 @@ const (
 	diskFileSuffix = ".qcow2"
 )
 
-var boxIDPattern = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
+var boxIDPattern = regexp.MustCompile(fmt.Sprintf(`^[a-z0-9-]{1,%d}$`, MaxBoxIDLen))
 
 // ErrInvalidSpec marks a task configuration the driver must reject before it
 // touches the host.
@@ -220,6 +220,9 @@ func (m *Manager) Box(spec Spec, rep Reporter) (*Box, error) {
 	}
 	if err := spec.Validate(); err != nil {
 		return nil, err
+	}
+	if err := CheckSocketPath(m.opts.LimaHome, spec.BoxID); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidSpec, err)
 	}
 	spec.VolumeDir = filepath.Clean(spec.VolumeDir)
 	return &Box{m: m, spec: spec, rep: rep}, nil

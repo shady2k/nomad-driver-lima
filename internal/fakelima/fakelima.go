@@ -26,7 +26,13 @@ type Fake struct {
 // New installs the fake limactl in a fresh temp directory.
 func New(t testing.TB) *Fake {
 	t.Helper()
-	root := t.TempDir()
+	// Not t.TempDir: its path carries the test's name, and the box manager
+	// refuses a lima home too long for Lima's sockets, as it would on a node.
+	root, err := os.MkdirTemp("", "fl")
+	if err != nil {
+		t.Fatalf("create fake lima root: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	binDir := filepath.Join(root, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatalf("create fake limactl directory: %v", err)

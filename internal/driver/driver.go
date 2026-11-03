@@ -228,6 +228,22 @@ func (d *Driver) buildFingerprint(ctx context.Context) *drivers.Fingerprint {
 		return fp
 	}
 
+	// A lima_home too long for Lima's sockets lets a box boot and then hang in
+	// Lima's readiness checks until the start times out. The node says how long
+	// a box id may be, a start refuses a longer one, and a node where no box id
+	// fits is unhealthy.
+	maxID := box.MaxBoxIDFor(d.boxm.Options().LimaHome)
+	set("driver.box.max_box_id_length", strconv.Itoa(maxID))
+	if maxID == 0 {
+		fp.Health = drivers.HealthStateUnhealthy
+		fp.HealthDescription = box.CheckSocketPath(d.boxm.Options().LimaHome, "x").Error()
+		set("driver.box.lima_version", "unknown")
+		set("driver.box.instances", "0")
+		set("driver.box.orphans", "")
+		setDiskUsage(fp, nil)
+		return fp
+	}
+
 	limaVersion, err := d.limaVersionCached(ctx)
 	if err != nil {
 		fp.Health = drivers.HealthStateUnhealthy
