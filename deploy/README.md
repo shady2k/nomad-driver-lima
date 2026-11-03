@@ -356,6 +356,9 @@ services.nomad = {
       lima_home = "/var/lib/box/lima";
       image_cache_dir = "/var/lib/box/images";
       memory_overhead_mib = 150;
+      # "enforce" on Linux, "off" on macOS: the v0.1.0 driver needs it written out,
+      # newer ones default to the platform's answer.
+      memory_limit = "enforce";
       runtime_user = "dev";
     };
   };

@@ -288,7 +288,8 @@
       - >-
         the nomad_client role of this play renders the plugin block: limactl {{ box_limactl }},
         lima_home {{ box_lima_home }}, image_cache_dir {{ box_image_cache_dir }},
-        memory_overhead_mib {{ box_memory_overhead_mib }}, runtime_user {{ box_runtime_user }}
+        memory_overhead_mib {{ box_memory_overhead_mib }}, memory_limit
+        {{ 'off' if ansible_facts.system == 'Darwin' else 'enforce' }}, runtime_user {{ box_runtime_user }}
         (uid {{ box_runtime_uid }}, group {{ box_runtime_group }}, kvm group
         {{ "present" if box_kvm_group_exists | default(false) | bool else "absent" }})
       - >-

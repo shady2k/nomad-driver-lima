@@ -151,6 +151,11 @@ nomad_box_limactl: '{{ box_limactl | default("/usr/local/bin/limactl") }}'
 nomad_box_lima_home: '{{ box_lima_home | default("/var/lib/box/lima") }}'
 nomad_box_image_cache_dir: '{{ box_image_cache_dir | default("/var/lib/box/images") }}'
 nomad_box_memory_overhead_mib: '{{ box_memory_overhead_mib | default(150) }}'
+# The memory cap of a box: "enforce" fails a box whose cgroup scope cannot be made,
+# "off" runs it uncapped - the only possible value on macOS, which has no cgroup
+# v2. The driver works this default out by itself (aba99dc), but the v0.1.0
+# binaries do not, so the role writes it into 50-box.json either way.
+nomad_box_memory_limit: '{{ box_memory_limit | default("off" if ansible_facts.system == "Darwin" else "enforce") }}'
 nomad_box_vm_type: '{{ box_vm_type | default("") }}'
 # The user the driver starts limactl, qemu and the memory scope as. Empty is the
 # driver's own default (the user the client runs as).

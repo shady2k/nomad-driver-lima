@@ -53,7 +53,8 @@
       {{ {'limactl': nomad_box_limactl,
           'lima_home': nomad_box_lima_home,
           'image_cache_dir': nomad_box_image_cache_dir,
-          'memory_overhead_mib': nomad_box_memory_overhead_mib | int}
+          'memory_overhead_mib': nomad_box_memory_overhead_mib | int,
+          'memory_limit': nomad_box_memory_limit}
          | combine({'runtime_user': nomad_box_runtime_user}
                    if nomad_box_runtime_user | length > 0 else {})
          | combine({'vm_type': nomad_box_vm_type}
