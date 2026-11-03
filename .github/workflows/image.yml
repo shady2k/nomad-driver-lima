@@ -66,7 +66,7 @@ jobs:
             runs-on: ubuntu-24.04-arm
             lima_arch: aarch64
             lima_sha256: 7c6a09c6844f55f811e9b7b2b60a6070a512c696c8ec752dfdb3c8ed50ed0364
-            qemu_packages: qemu-system-arm qemu-utils qemu-efi-aarch64
+            qemu_packages: qemu-system-arm qemu-utils qemu-efi-aarch64 ipxe-qemu
     steps:
       # Full history: a BOXD_COMMIT build and the version stamp both read git.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -134,7 +134,8 @@ jobs:
             echo "::notice::this runner has no usable /dev/kvm: qemu runs the guest with TCG, so the build and the checks take longer"
           fi
 
-      # The firmware is a separate package on both architectures.
+      # The firmware is a separate package on both architectures, and on arm64
+      # so are the network card ROMs (ipxe-qemu: efi-virtio.rom).
       - name: Install qemu and its firmware
         run: |
           sudo apt-get update
