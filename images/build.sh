@@ -257,6 +257,45 @@ BOXD_JSON=$BOXD_DIR/boxd.json
 [[ -x $BOXD ]] || die "images/boxd-source.sh wrote no binary at $BOXD"
 [[ -s $BOXD_JSON ]] || die "images/boxd-source.sh wrote no record at $BOXD_JSON"
 
+# --- build -------------------------------------------------------------------
+STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+log "starting the build VM $NAME (this runs the whole recipe; it takes a while)"
+if ! lima start --name "$NAME" --tty=false --timeout "$TIMEOUT" "$YAML"; then
+  # Lima gives its "boot scripts must have finished" readiness probe a deadline
+  # of its own, which a slow guest (an emulated aarch64 VM) can miss while the
+  # provision script is still running. The VM is up and reachable in that case;
+  # the recipe's own state file below is what the build really waits for.
+  lima shell "$NAME" sudo true >/dev/null 2>&1 \
+    || die "limactl start failed and the guest does not answer"
+  log "limactl start did not report the instance ready; the guest answers, so the build waits for the recipe instead"
+fi
+
+log "waiting for the provision script to finish"
+# 'limactl start' returns when the instance is running, which is before the
+# provision script has finished and says nothing about whether it succeeded.
+# The recipe writes its own verdict to /var/lib/box-image-build/state, so the
+# build waits for that file instead of for the VM.
+STATE_FILE=/var/lib/box-image-build/state
+guest_tail_report() {
+  lima shell "$NAME" sudo tail -n 60 /var/lib/box-image-build/report.txt 2>/dev/null | sed 's/^/    /' >&2 || true
+}
+DEADLINE=$(( $(date +%s) + PROVISION_TIMEOUT ))
+while :; do
+  STATE=$(lima shell "$NAME" sudo cat "$STATE_FILE" 2>/dev/null | head -1 || true)
+  case $STATE in
+    DONE*) log "provisioning finished: $STATE"; break ;;
+    FAILED*)
+      guest_tail_report
+      die "the provision script failed: $STATE"
+      ;;
+  esac
+  if (( $(date +%s) > DEADLINE )); then
+    guest_tail_report
+    die "the provision script did not finish within ${PROVISION_TIMEOUT}s (state: ${STATE:-none})"
+  fi
+  sleep 5
+done
+
 log "installing boxd in the guest"
 # --no-start: the build VM is not a box. A daemon started here would create its
 # runtime state and probe the executors as root, and a probe runs the executor's
