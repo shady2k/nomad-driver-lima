@@ -29,6 +29,8 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	memoryMiB := fs.Int("memory-mib", 1024, "guest RAM in MiB")
 	diskGiB := fs.Int("disk-gib", 8, "box disk size in GiB (on a dynamic host volume)")
 	nodeName := fs.String("node", "", "pin the box to this node")
+	vaultRole := fs.String("vault-role", a.VaultRole(), "the Vault role the box reads its secrets with "+
+		"(default: $BOX_VAULT_ROLE, else the cluster's default role)")
 	timeout := fs.Duration("timeout", defaultWaitTimeout, "how long to wait for the box to run")
 	wait := fs.Bool("wait", true, "wait until the box is running")
 	if err := parseFlags(fs, args, 1); err != nil {
@@ -142,7 +144,8 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		DiskGiB:      *diskGiB,
 		NodeID:       node.NodeID,
 	}
-	spec.ExecutorItems = a.executorItemKeys(ctx)
+	spec.ExecutorItems = a.executorItems(ctx)
+	spec.VaultRole = strings.TrimSpace(*vaultRole)
 	job, err := RenderJob(spec)
 	if err != nil {
 		return err

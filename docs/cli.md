@@ -23,6 +23,7 @@ The environment the CLI reads:
 | --- | --- |
 | `NOMAD_ADDR`, `NOMAD_TOKEN`, `NOMAD_CACERT`, `NOMAD_CLIENT_CERT`, `NOMAD_CLIENT_KEY`, `NOMAD_NAMESPACE` | the usual Nomad API settings |
 | `BOX_IMAGE_INDEX` | where the base image index lives; there is no built-in default, and without it (or `--image-index`) `box images` and `box create` say so and stop |
+| `BOX_VAULT_ROLE` | the Vault role a box reads its secrets with; it is the default of `box create --vault-role`, and empty means the cluster's default role |
 
 ## Nodes, images, boxes
 
@@ -51,6 +52,7 @@ waits until the box is running.
 | `--memory-mib N` | 1024 | guest RAM |
 | `--disk-gib N` | 8 | disk size (it can only grow later) |
 | `--node NAME` | – | pin the box to this node |
+| `--vault-role ROLE` | `BOX_VAULT_ROLE`, else the cluster's default role | the Vault role the box reads its secrets with, used when the executors hold a template item (see "Executor credentials") |
 | `--timeout D` | 10m | how long to wait for it to run |
 | `--wait` | true | wait until it is running |
 
@@ -147,6 +149,32 @@ never a value. The files live in the Nomad variable `nomad/jobs/box-executors`
 and are rendered into each box's `secrets/` directory, which the driver writes
 to the guest's tmpfs at `/run/box/secrets/<executor>/`.
 
+**An item whose name ends in `.tmpl` is a template, not a file.** Its text is
+Nomad template text that reads the secret itself, for example
+`prime/auth.json.tmpl`:
+
+```
+{"<provider>": {"type": "api_key", "key": {{ with secret "kv/data/box/llm" }}{{ .Data.data.key | toJSON }}{{ end }}}}
+```
+
+`box create` embeds that text in the box job and renders it to
+`secrets/prime/auth.json`, the name without the suffix. The credential is
+therefore read from Vault by Nomad, on the node, with the box's own workload
+identity: it is in no host's files, not in the variable, and not in the job spec
+— which holds the path. A template item must never contain the secret, and
+`box executors set` refuses one that has no `{{` in it, or a `.tmpl` item next to
+a plain item that renders to the same file.
+
+A job with at least one template item gets a Nomad `Vault` block, with
+`change_mode = "noop"` (a renewed or revoked token must not restart the VM) and
+the role from `box create --vault-role` or `BOX_VAULT_ROLE`; without a template
+item the job carries no Vault block at all. Nomad does not write its token files
+into `secrets/` (`disable_file`), because the driver copies that whole directory
+into the guest. `deploy/README.md` sets the Vault side up.
+
+A required file is satisfied by either form: an `auth.json.tmpl` item is enough
+for `prime`, which asks for `settings.json` and `auth.json`.
+
 **Rotation needs no new box.** After `box executors set`, Nomad re-renders the
 box's templates within seconds; the driver notices the changed task files, copies
 them into the guest again and runs `boxctl reload`. boxd re-reads the credentials
@@ -157,7 +185,10 @@ was stopped picks the new files up at its next start.
 
 ### `box executors show`
 
-File names, sizes and executors, never a value.
+File names, sizes and executors, never a value. A template item is shown with
+`(template)` next to its name, and as `template: Nomad reads the secret at render
+time`, so what the variable holds is visible as a path. A required file counts as
+present in either form: `prime/auth.json.tmpl` is the `auth.json` of `prime`.
 
 ### `box executors delete [--yes]`
 

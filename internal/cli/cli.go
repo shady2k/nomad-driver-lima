@@ -40,6 +40,10 @@ type App struct {
 	// indexURL is the image index location; main sets it from the
 	// environment, the tests set it directly.
 	indexURL string
+	// vaultRole is the Vault role a box reads its secrets with; main sets it from
+	// BOX_VAULT_ROLE, the tests set it directly. Empty means the cluster's default
+	// role, which is what a job with no role gets.
+	vaultRole string
 }
 
 // New returns an App with the production defaults filled in.
@@ -90,6 +94,34 @@ func (a *App) requireImageIndexURL() (string, error) {
 	return "", errorf("the image index is not configured: set BOX_IMAGE_INDEX, or pass --image-index URL, " +
 		"to the index.json of a store that publishes box images (`box images` reads it; this project " +
 		"publishes none)")
+}
+
+// VaultRole reports the Vault role the CLI gives a box job, or "" for the
+// cluster's default role.
+func (a *App) VaultRole() string {
+	return a.vaultRole
+}
+
+// SetVaultRole sets the Vault role; an empty value is ignored, like the image
+// index, so an unset variable leaves the cluster's default role in place.
+func (a *App) SetVaultRole(role string) {
+	if role = strings.TrimSpace(role); role != "" {
+		a.vaultRole = role
+	}
+}
+
+// vaultRoleFor returns the role a rebuilt box job should carry: the one the job
+// already has, else the configured default.
+//
+// A start or a resize must not drop the role its box was created with, and a box
+// created before the cluster had a template item (or before BOX_VAULT_ROLE was
+// set) picks the role up here, which is the same moment it picks up a newly
+// staged credential.
+func (a *App) vaultRoleFor(current string) string {
+	if current = strings.TrimSpace(current); current != "" {
+		return current
+	}
+	return a.VaultRole()
 }
 
 func (a *App) now() time.Time {

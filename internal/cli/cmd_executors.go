@@ -55,7 +55,13 @@ func (a *App) cmdExecutors(ctx context.Context, args []string) error {
 			"(prime/, opencode/), or is one executor's own directory with --executor.\n\n"+
 			"--provider keeps one provider only: prime/auth.json is reduced to that provider's\n"+
 			"credential, and prime/models.json and opencode/opencode.json to its definition.\n"+
-			"The command prints the keys it stores, never a value.\n", boxExecutorsVariable)
+			"The command prints the keys it stores, never a value.\n\n"+
+			"An item whose name ends in .tmpl is a template instead of a file: its text is\n"+
+			"Nomad template text that reads the secret itself, for example\n"+
+			`  {"myprovider": {"type": "api_key", "key": {{ with secret "kv/data/box/llm" }}{{ .Data.data.key | toJSON }}{{ end }}}}`+"\n"+
+			"and it is rendered to the same name without .tmpl. Such an item must never hold a\n"+
+			"secret, only the path it is read from: the box job carries the template and a Vault\n"+
+			"block, and Nomad reads the value at render time.\n", boxExecutorsVariable)
 		return nil
 	default:
 		return usagef("unknown subcommand %q: use set, show or delete", args[0])
@@ -96,6 +102,12 @@ func (a *App) cmdExecutorsSet(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// A template item is not parsed or reduced, but it has to be renderable: it
+	// must hold template text, and it must be the only item that fills its file.
+	if err := validateExecutorTemplates(files); err != nil {
+		return err
+	}
+	kept = append(kept, templateItemKeys(files)...)
 	if err := checkExecutorsSize(files); err != nil {
 		return err
 	}
@@ -157,6 +169,8 @@ func (a *App) printExecutorKeys(files []ExecutorFile, keys []ExecutorKey, droppe
 				a.note("    credential %s: %s", key.Name, orNone(key.Fields))
 			case "provider":
 				a.note("    provider   %s", key.Name)
+			case "template":
+				a.note("    template   reads a secret at render time")
 			default:
 				a.note("    %s (not JSON)", key.Kind)
 			}
@@ -204,9 +218,16 @@ func (a *App) cmdExecutorsShow(ctx context.Context, args []string) error {
 	for _, name := range boxExecutorNames {
 		var have []string
 		for _, f := range out.Files {
-			if f.Executor == name {
-				have = append(have, f.Path)
+			if f.Executor != name {
+				continue
 			}
+			// A template item is marked: its name says it is rendered, and the
+			// operator has to see that the variable holds a path, not a value.
+			if f.Template {
+				have = append(have, f.Path+" (template)")
+				continue
+			}
+			have = append(have, f.Path)
 		}
 		if len(have) == 0 {
 			a.note("  %-9s no files", name)
@@ -220,6 +241,8 @@ func (a *App) cmdExecutorsShow(ctx context.Context, args []string) error {
 			a.note("  %-9s provider %s (%s)", key.File, key.Name, orNone(key.Fields))
 		case "provider":
 			a.note("  %-9s provider %s", key.File, key.Name)
+		case "template":
+			a.note("  %-9s template: Nomad reads the secret at render time", key.File)
 		default:
 			a.note("  %-9s not JSON", key.File)
 		}
@@ -291,14 +314,24 @@ func missingExecutorFiles(items map[string]string) []string {
 			continue
 		}
 		for _, required := range boxExecutorRequired[name] {
-			key := name + "/" + required
-			if _, ok := items[key]; !ok {
-				missing = append(missing, key)
+			if !hasExecutorFile(items, name+"/"+required) {
+				missing = append(missing, name+"/"+required)
 			}
 		}
 	}
 	sort.Strings(missing)
 	return missing
+}
+
+// hasExecutorFile reports whether the variable fills one file, either as the
+// file itself or as the template that renders to it: an "auth.json.tmpl" item
+// is all a box needs to get an auth.json.
+func hasExecutorFile(items map[string]string, key string) bool {
+	if _, ok := items[key]; ok {
+		return true
+	}
+	_, ok := items[key+executorTemplateSuffix]
+	return ok
 }
 
 // hasExecutorFiles reports whether the variable holds anything for executor.

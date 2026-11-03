@@ -85,11 +85,15 @@ type BoxSpec struct {
 	GuestLogCommand []string
 	// FilesDirInGuest is where the driver copies the task files.
 	FilesDirInGuest string
-	// ExecutorItems are the item keys of the executors Variable
-	// ("prime/auth.json"). Each one becomes a template that renders the file
-	// into the task's secrets directory; empty means the box starts without
-	// executor credentials.
-	ExecutorItems []string
+	// ExecutorItems are the items of the executors Variable a box renders.
+	// Each one becomes a template that writes a file into the task's secrets
+	// directory; empty means the box starts without executor credentials. An item
+	// whose key ends in .tmpl carries its own template text, which reads the
+	// secret from Vault, and is the reason the job has a Vault block.
+	ExecutorItems []ExecutorItem
+	// VaultRole is the Vault role the task reads its secrets with. Empty means
+	// the cluster's default role and the job carries no role at all.
+	VaultRole string
 }
 
 // BoxJobName returns the Nomad job name of a box.
@@ -222,9 +226,11 @@ func RenderJob(spec BoxSpec) (*api.Job, error) {
 		// Stopping a VM takes longer than Nomad's 5 second default; the
 		// driver's own stop timeout is 60 seconds.
 		KillTimeout: durPtr(boxStopTimeout),
-		// The executor credentials come from the Nomad Variable, one template
-		// per file, so the job never carries a secret value.
+		// The executor credentials arrive as task files, one template per item,
+		// so the job never carries a secret value: a plain item is read out of
+		// the Nomad Variable, a .tmpl item reads Vault at render time.
 		Templates: executorTemplates(spec.ExecutorItems),
+		Vault:     spec.vaultBlock(),
 	}
 
 	group := &api.TaskGroup{
@@ -284,6 +290,34 @@ func RenderJob(spec BoxSpec) (*api.Job, error) {
 		TaskGroups: []*api.TaskGroup{group},
 	}
 	return job, nil
+}
+
+// vaultBlock is the task's Vault block, or nil when the box reads no secret.
+//
+// A .tmpl item renders `secret "kv/data/..."`, which Nomad can only resolve for
+// a task with a Vault block: the block is what makes the client hand the task a
+// token from the workload identity. Without a template item the job carries no
+// block at all, so a box made of plain Variable items still runs on a cluster
+// that has no Vault.
+func (s BoxSpec) vaultBlock() *api.Vault {
+	if !hasExecutorTemplate(s.ExecutorItems) {
+		return nil
+	}
+	// noop: a renewed, expired or revoked token must not restart the VM. The
+	// driver copies a re-rendered file into the guest and calls boxctl reload,
+	// which is the same path a changed Variable takes.
+	mode := "noop"
+	return &api.Vault{
+		Role:       strings.TrimSpace(s.VaultRole),
+		ChangeMode: &mode,
+		// The rendered files are the only secret a box gets. The token files
+		// Nomad writes into secrets/ otherwise would land in the guest: the
+		// driver copies that whole directory to its tmpfs.
+		DisableFile: boolPtr(true),
+		// The task process is the VM, not an executor, so no VAULT_* variable
+		// has a reason to be in its environment.
+		Env: boolPtr(false),
+	}
 }
 
 func (s BoxSpec) guestLogCommand() []string {
@@ -375,6 +409,12 @@ func SpecFromJob(job *api.Job) (BoxSpec, error) {
 	}
 	if v, ok := cfg["files_dir_in_guest"].(string); ok {
 		spec.FilesDirInGuest = v
+	}
+	// The role is read back so a start or a resize keeps the role the box was
+	// created with: re-rendering the job with another role would hand the box a
+	// different identity than its creator chose.
+	if task.Vault != nil {
+		spec.VaultRole = task.Vault.Role
 	}
 	if list, ok := cfg["guest_log_command"].([]any); ok {
 		cmd := make([]string, 0, len(list))

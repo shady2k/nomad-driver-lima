@@ -17,6 +17,12 @@ box_nomad_addr: https://nomad.example:4646
 # at one you trust.
 box_image_index: 'https://images.example.com/box-base/index.json'
 
+# The Vault role a box reads its executor credentials with (BOX_VAULT_ROLE, the
+# default of `box create --vault-role`). It must be the role whose policy reads
+# the box paths, e.g. kv/data/box/*; deploy/README.md sets the Vault side up.
+# Leave it empty for the cluster's default role.
+box_vault_role: 'box-workloads'
+
 # The CLI lives in the same release layout as the node plugins: the live release
 # through /opt/box/current, and /usr/local/bin/box is a symlink into it.
 # box_release_root: /opt/box

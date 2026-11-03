@@ -1,27 +1,37 @@
 #!/usr/bin/env bash
 #
-# deploy/executors-from-prime.sh -- stage the executor files a box needs, from
-# this host's own prime-agent configuration.
+# deploy/executors-from-prime.sh -- stage the executor files a box needs, with
+# the provider credential read from Vault by Nomad and never from any host.
 #
-# A box runs prime-agent and opencode inside the guest. Their credentials and
-# configuration do not belong in the image and must not be in the box job, so
-# they travel as one Nomad Variable (nomad/jobs/box-executors) and are copied
-# into /run/box/secrets/<executor>/ in the guest (a tmpfs). This script builds the
+# A box runs prime-agent and opencode inside the guest. Their configuration does
+# not belong in the image and must not be in the box job, so it travels as one
+# Nomad Variable (nomad/jobs/box-executors) and is copied into
+# /run/box/secrets/<executor>/ in the guest (a tmpfs). This script builds the
 # directory that `box executors set --from-dir` reads:
 #
-#   OUT/prime/auth.json        ONE credential: {"<provider>": <its entry>}
-#   OUT/prime/models.json      ONE provider definition: baseUrl, api, models
-#   OUT/prime/settings.json    default provider/model; `packages` only when
-#                              --package names one
-#   OUT/opencode/opencode.json the same provider for opencode
-#   OUT/opencode/env           its credential as KEY=VALUE
+#   OUT/prime/auth.json.tmpl    ONE provider entry whose key is a Vault template
+#   OUT/prime/models.json       ONE provider definition: baseUrl, api, models
+#   OUT/prime/settings.json     default provider/model; `packages` only when
+#                               --package names one
+#   OUT/opencode/opencode.json  the same provider for opencode
+#   OUT/opencode/env.tmpl       its key as KEY=<Vault template>
 #
-# Only the chosen provider is staged. This host's ~/.prime/agent/auth.json holds
-# one entry per provider it ever logged in to, and models.json holds every
-# provider definition; neither the whole auth.json nor the other providers have
-# any reason to reach the cluster, so both files are reduced to --provider here
-# (and `box executors set` reduces them again, so a hand-made directory cannot
-# smuggle the rest in).
+# THE KEY IS NEVER STAGED. A `.tmpl` item is not a file: `box executors set`
+# stores its text in the Variable, `box create` embeds that text in the box job,
+# and Nomad renders it on the client with the Vault token of the task's workload
+# identity. So the key is read from Vault at render time and reaches only the
+# box's tmpfs -- it is not in this host's files, not in the Variable, not in the
+# job spec, and not in this staging directory. That is why the file is named
+# auth.json.tmpl: an item with the plain name would have to carry the key itself.
+#
+# Nothing is read from this host except its models.json definition of the
+# provider (and its settings.json, which says what the box's default is not yet).
+# The one secret this script names is the Vault path, so it needs no login here.
+#
+# Only the chosen provider is staged. models.json on this host holds every
+# provider definition, and the other providers have no reason to reach the
+# cluster, so the file is reduced to --provider here (and `box executors set`
+# reduces it again, so a hand-made directory cannot smuggle the rest in).
 #
 # Why models.json and not the provider extension: prime-agent 0.10.2 (the
 # version in the box image) does not register a provider from a git package
@@ -31,10 +41,9 @@
 # versions, and it is a few lines instead of a whole checkout (a Nomad variable
 # is limited to 64 KiB in total).
 #
-# Nothing here prints, echoes or logs a token: the values only ever go from the
-# source file into the staging directory (mode 0600) and from there into Nomad.
-# What is printed is the shape: which provider, and which key names its entry
-# has (`access`, `refresh`, `expires`, ...).
+# Nothing here prints a credential, because there is none here to print: the only
+# secret named is a path. What is printed is the shape -- which provider, which
+# Vault path, and which models.
 #
 # `packages` is where prime-agent is told which packages to load, and a git
 # package cannot travel in a 64 KiB variable, so it is dropped by default. Files
@@ -43,19 +52,28 @@
 # is: it is a path inside the box, not on this host, so the image has to have put
 # something there.
 #
+# The Vault side, once per cluster (see deploy/README.md): a JWT auth backend fed
+# by Nomad's JWKS URL, a role for the box jobs whose policy reads only the box
+# paths, and the key stored from stdin so it is never in a file or an argv:
+#
+#   bao kv put kv/box/llm key=-
+#
 # Usage:
-#   deploy/executors-from-prime.sh --provider NAME --base-url URL [options]
+#   deploy/executors-from-prime.sh --provider NAME --base-url URL \
+#       --vault-secret PATH [options]
 #
 #   --out DIR            staging directory (default: a new mktemp -d)
 #   --prime-dir DIR      prime-agent config directory
 #                        (default: $PRIME_AGENT_CODING_AGENT_DIR, else ~/.prime/agent)
-#   --provider NAME      the provider id, e.g. myprovider (its credential
-#                        must be in auth.json: run `prime-agent` and /login once)
+#   --provider NAME      the provider id, e.g. myprovider
 #   --base-url URL       its OpenAI-compatible base URL, e.g. https://llm.example/v1
+#   --vault-secret PATH  the KV v2 API path that holds the key, e.g.
+#                        kv/data/box/llm (required: the box renders it, this
+#                        script never reads it)
+#   --vault-field NAME   the field of that path that holds the key (default: key)
 #   --model ID           a model of that provider; repeatable. Without it: the
-#                        models of this host's own definition of the provider
-#                        in models.json, else <base-url>/models asked with the
-#                        credential.
+#                        models of this host's own definition of the provider in
+#                        models.json, else a usage error that asks for --model.
 #   --package PATH       a path INSIDE the box that prime-agent loads a package
 #                        from, e.g. /opt/box/addons/foo; repeatable, and each
 #                        one must be absolute. The values become the `packages`
@@ -63,10 +81,10 @@
 #                        all, which is what a box with no add-ons needs.
 #   --no-opencode        stage prime only
 #
-# Then:
+# Then, where the CLI can reach the cluster:
 #   box executors set --from-dir "$OUT" --provider NAME
 #   box executors show
-#   box create dev1 --image 1.0.1 ...
+#   box create dev1 --image 1.0.1 ... --vault-role box-workloads
 set -euo pipefail
 
 PROG=${0##*/}
@@ -77,6 +95,8 @@ prime_dir=${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prime/agent}
 out=''
 provider=''
 base_url=''
+vault_secret=''
+vault_field=key
 with_opencode=true
 models=()
 packages=()
@@ -87,6 +107,8 @@ while (($# > 0)); do
     --prime-dir) (($# >= 2)) || die "--prime-dir needs a directory"; prime_dir=$2; shift 2 ;;
     --provider) (($# >= 2)) || die "--provider needs a name"; provider=$2; shift 2 ;;
     --base-url) (($# >= 2)) || die "--base-url needs a URL"; base_url=$2; shift 2 ;;
+    --vault-secret) (($# >= 2)) || die "--vault-secret needs a path"; vault_secret=$2; shift 2 ;;
+    --vault-field) (($# >= 2)) || die "--vault-field needs a field name"; vault_field=$2; shift 2 ;;
     --model) (($# >= 2)) || die "--model needs a model id"; models+=("$2"); shift 2 ;;
     --package)
       (($# >= 2)) || die "--package needs a path"
@@ -95,7 +117,7 @@ while (($# > 0)); do
       shift 2
       ;;
     --no-opencode) with_opencode=false; shift ;;
-    -h | --help) sed -n '2,69p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,87p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
 done
@@ -104,9 +126,15 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; 
 need python3
 [[ -n $provider ]] || die "--provider is required (the provider id to configure in the box)"
 [[ -n $base_url ]] || die "--base-url is required (that provider's OpenAI-compatible base URL)"
+[[ -n $vault_secret ]] || die "--vault-secret is required (the KV v2 API path of the key, e.g. kv/data/box/llm)"
+# The path and the field go into Nomad template text: a quote would end the
+# string the secret call is read from, and }} would end the call itself.
+[[ $vault_secret != *'"'* ]] || die "--vault-secret must not contain a double quote: it goes into a template string"
+[[ $vault_secret != *'}}'* ]] || die "--vault-secret must not contain }}: it would close the template call"
+[[ $vault_secret != *'{{'* ]] || die "--vault-secret must not contain {{: it would open a second template call"
+[[ $vault_field =~ ^[A-Za-z0-9_-]+$ ]] || die "--vault-field '$vault_field' is not a field name: use letters, digits, _ and -"
 [[ -d $prime_dir ]] || die "no prime-agent configuration in $prime_dir"
 [[ -f $prime_dir/settings.json ]] || die "$prime_dir/settings.json is missing: is this a prime-agent config directory?"
-[[ -f $prime_dir/auth.json ]] || die "$prime_dir/auth.json is missing: run prime-agent and /login $provider once"
 
 if [[ -z $out ]]; then
   out=$(mktemp -d "${TMPDIR:-/tmp}/box-executors-XXXXXX")
@@ -114,17 +142,18 @@ fi
 mkdir -p "$out/prime"
 chmod 0700 "$out"
 
-# --- auth.json, models.json, settings.json, opencode ---------------------------
-# python writes every document and never prints a value: the only output is the
-# provider and the key names of the reduced files.
-python3 - "$prime_dir" "$out" "$provider" "$base_url" "$with_opencode" "${packages[@]}" -- "${models[@]}" <<'PY'
-import json, os, re, sys, urllib.request
+# --- auth.json.tmpl, models.json, settings.json, opencode ----------------------
+# python writes every document and never prints a value: this host has none to
+# print. The one credential reference is the Vault path, which is not a secret.
+python3 - "$prime_dir" "$out" "$provider" "$base_url" "$vault_secret" "$vault_field" \
+  "$with_opencode" "${packages[@]}" -- "${models[@]}" <<'PY'
+import json, os, re, sys
 
-prime_dir, out, provider, base_url, with_opencode = sys.argv[1:6]
+prime_dir, out, provider, base_url, vault_secret, vault_field, with_opencode = sys.argv[1:8]
 # The two lists travel in one argument vector, split by the "--" the shell puts
 # between them: a package path and a model id are both free-form strings, and
 # without a marker one list cannot be told from the other.
-rest = sys.argv[6:]
+rest = sys.argv[8:]
 if "--" in rest:
     cut = rest.index("--")
     packages, wanted_models = rest[:cut], rest[cut + 1:]
@@ -141,27 +170,27 @@ def keys_of(value):
     return sorted(value) if isinstance(value, dict) else []
 
 
-# --- the one credential this box gets --------------------------------------
-auth_path = os.path.join(prime_dir, "auth.json")
-try:
-    auth = json.load(open(auth_path))
-except ValueError as err:
-    fail(f"{auth_path} is not valid JSON: {err}")
-credential = auth.get(provider)
-if not isinstance(credential, dict):
-    fail(f"auth.json has no credential for {provider}: it holds {', '.join(keys_of(auth)) or 'nothing'}; run prime-agent and /login {provider}")
-token = credential.get("access") or credential.get("key")
-if not token:
-    fail(f"the {provider} credential has no access token or key")
-
-auth_out = os.path.join(out, "prime", "auth.json")
-with open(auth_out, "w") as f:
-    json.dump({provider: credential}, f, indent=2)
-    f.write("\n")
-os.chmod(auth_out, 0o600)
-print(f"prime        auth.json: one credential for {provider} ({', '.join(keys_of(credential))})")
+# The provider id is a JSON key in auth.json.tmpl and part of the model id in
+# settings.json and opencode.json, so it may not carry quotes or spaces.
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", provider):
+    fail(f"--provider {provider!r} is not a provider id: use letters, digits, '.', '_' and '-'")
 
 env_name = re.sub(r"[^A-Z0-9]+", "_", provider.upper()).strip("_") + "_API_KEY"
+
+# --- the one credential reference this box gets -------------------------------
+# The templates are Nomad template text, read by consul-template's `secret` on
+# the client with the box's own Vault token: .Data.data.<field> is a KV v2
+# secret, and `toJSON` quotes and escapes the value so the rendered file is JSON.
+opening = '{{ with secret "' + vault_secret + '" }}'
+closing = "{{ end }}"
+json_value = "{{ .Data.data." + vault_field + " | toJSON }}"
+plain_value = "{{ .Data.data." + vault_field + " }}"
+
+auth_out = os.path.join(out, "prime", "auth.json.tmpl")
+with open(auth_out, "w") as f:
+    f.write('{"' + provider + '": {"type": "api_key", "key": ' + opening + json_value + closing + "}}\n")
+os.chmod(auth_out, 0o600)
+print(f"prime        auth.json.tmpl: one api_key entry for {provider}, read from {vault_secret}.{vault_field}")
 
 # This host's own definition of the provider, when it has one: its models carry
 # what prime-agent needs to use them well (reasoning, input, contextWindow,
@@ -185,17 +214,11 @@ if wanted_models:
 elif source_entries:
     model_ids = list(source_entries)
 else:
-    # Ask the provider which models it serves, with the credential, and never
-    # print the answer's headers.
-    request = urllib.request.Request(
-        base_url.rstrip("/") + "/models",
-        headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
-    )
-    with urllib.request.urlopen(request, timeout=20) as response:
-        payload = json.load(response)
-    model_ids = [m["id"] for m in payload.get("data", []) if isinstance(m, dict) and m.get("id")]
-    if not model_ids:
-        fail(f"{base_url}/models listed no model ids; pass --model explicitly")
+    # Nothing on this host describes the provider, and its own model list cannot
+    # be asked for without the key -- which this script deliberately does not
+    # have. Say what to pass instead of inventing a model.
+    fail(f"no model for {provider}: {source_models} has no definition of it, and this script does not "
+         f"read the key from anywhere; pass --model ID (one or more)")
 
 # The provider definition prime-agent reads (0.9.8 and 0.10.2). The rest of the
 # source document (schema and so on) is kept; every other provider is dropped.
@@ -208,6 +231,8 @@ definition = dict(source_def)
 definition.setdefault("api", "openai-completions")
 definition.setdefault("authHeader", True)
 definition["baseUrl"] = base_url
+# The environment variable is only the fallback: the box gets the key as
+# prime/auth.json, rendered from Vault before the executor starts.
 definition["apiKey"] = env_name
 definition["models"] = [source_entries.get(model, {"id": model, "name": model}) for model in model_ids]
 doc["providers"] = {provider: definition}
@@ -258,18 +283,38 @@ if with_opencode:
         json.dump(config, f, indent=2)
         f.write("\n")
     os.chmod(os.path.join(opencode_dir, "opencode.json"), 0o600)
-    with open(os.path.join(opencode_dir, "env"), "w") as f:
-        f.write(f"{env_name}={token}\n")
-    os.chmod(os.path.join(opencode_dir, "env"), 0o600)
-    print(f"opencode     opencode.json + env ({env_name}) for {provider}, one provider")
+    # opencode reads its key from this variable, which the template fills in the
+    # guest: the file holds `ENV_NAME={{ with secret ... }}`, never the key.
+    with open(os.path.join(opencode_dir, "env.tmpl"), "w") as f:
+        f.write(env_name + "=" + opening + plain_value + closing + "\n")
+    os.chmod(os.path.join(opencode_dir, "env.tmpl"), 0o600)
+    print(f"opencode     opencode.json + env.tmpl ({env_name}) for {provider}, one provider")
 PY
 
 if ! $with_opencode; then
   rm -rf "$out/opencode"
 fi
 
-# Only the files this box needs may be in the staging directory; a leftover from
-# an earlier run (or a whole auth.json copied by hand) is refused, not shipped.
+# Only the files this box needs may be in the staging directory: a leftover of an
+# earlier run, or a credential copied by hand, is refused rather than shipped.
+expected=(prime/auth.json.tmpl prime/models.json prime/settings.json)
+if $with_opencode; then
+  expected+=(opencode/opencode.json opencode/env.tmpl)
+fi
+unexpected=0
+while IFS= read -r file; do
+  rel=${file#"$out"/}
+  for want in "${expected[@]}"; do
+    [[ $rel == "$want" ]] && continue 2
+  done
+  log "not expected in $out: $rel"
+  unexpected=$((unexpected + 1))
+done < <(find "$out" -type f | sort)
+if [[ $unexpected -gt 0 ]]; then
+  die "$out holds $unexpected file(s) this staging does not write: remove them (or use a new --out directory) " \
+    "and run again -- a credential must never be staged by hand, the box reads it from Vault"
+fi
+
 log "staged $(find "$out" -type f | wc -l) file(s) in $out:"
 find "$out" -type f | sort | while IFS= read -r file; do
   printf '  %-40s %6s bytes\n' "${file#"$out"/}" "$(wc -c <"$file")" >&2
@@ -277,4 +322,5 @@ done
 
 printf '\nnext:\n  box executors set --from-dir %q --provider %q\n  box executors show\n  rm -rf %q\n\n' \
   "$out" "$provider" "$out" >&2
+printf 'the box needs a Vault role that can read %s: pass --vault-role to %s\n' "$vault_secret" 'box create' >&2
 printf '%s\n' "$out"

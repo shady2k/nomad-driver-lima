@@ -45,10 +45,14 @@ ansible-playbook -i inventory site.yml
 ansible-playbook -i inventory acl.yml
 
 # 4. the executor credentials the boxes run their agents with (once per cluster);
-#    the script is in deploy/, so this step runs from the repository root
+#    the key itself stays in Vault and Nomad reads it at render time, so only the
+#    Vault path is staged. The script is in deploy/, so this step runs from the
+#    repository root. "Vault: where a box's credential comes from" below sets
+#    Vault up.
 cd ../..
 ./deploy/executors-from-prime.sh --out /tmp/box-executors \
-    --provider <provider> --base-url <https://api.example.com/v1>
+    --provider <provider> --base-url <https://api.example.com/v1> \
+    --vault-secret kv/data/box/llm
 box executors set --from-dir /tmp/box-executors --provider <provider>
 box executors show                       # file names and sizes, never a value
 rm -rf /tmp/box-executors
@@ -440,11 +444,101 @@ Anything bigger is a Nomad installation of its own (three servers,
 - `box create` does not touch ACLs on purpose (the CLI token has no ACL write), so a
   box created after `acl.yml` needs `box_acl_workload_jobs=[<id>]` once - or
   `deploy/acl/apply.sh workloads <id>`.
-- **The executor credentials never touch a disk.** `box executors set` writes them
-  into the Nomad variable `nomad/jobs/box-executors`; a box renders that variable
-  into its task `secrets/` directory, and the driver writes those files to the
-  guest's tmpfs at `/run/box/secrets/<executor>/` (root-only, mode 0700), not to the
-  box disk. `box executors show` prints file names and sizes, never a value.
+- **The executor credentials never touch a disk, and no host ever holds the key.**
+  `box executors set` writes the files of the variable
+  `nomad/jobs/box-executors`; a box renders that variable into its task
+  `secrets/` directory, and the driver writes those files to the guest's tmpfs at
+  `/run/box/secrets/<executor>/` (root-only, mode 0700), not to the box disk. The
+  provider key is not in the variable either: it is a template item
+  (`prime/auth.json.tmpl`), Nomad reads it from Vault with the box's own workload
+  identity, and the job spec holds the path. `box executors show` prints file
+  names and sizes, never a value.
+
+## Vault: where a box's credential comes from
+
+A box's provider key is a secret like any other: it lives in Vault (or OpenBao)
+and Nomad reads it. Nothing copies it from a host, into a variable or into a job
+spec. Three things make that work.
+
+**1. The Nomad agents can reach Vault.** Servers and clients both need a `vault`
+block. The node role writes the client configuration from `nomad_extra`, so the
+block goes in `inventory/group_vars/box_nodes.yml`:
+
+```yaml
+nomad_extra:
+  vault:
+    - name: default
+      enabled: true
+      address: 'https://vault.example.com:8200'
+      jwt_auth_backend_path: jwt-nomad
+      default_identity:
+        aud: ['vault.io']
+        ttl: '1h'
+```
+
+`default_identity` is what lets a task log in with its workload identity instead
+of a token written on the node. Nomad's own reference for the block, its fields
+and the Vault version it needs is Nomad's Vault integration documentation; the
+same block belongs on the servers, which is not this kit's job (see "The Nomad
+servers").
+
+**2. Vault trusts Nomad's workload identity.** A JWT auth backend verifies the
+task's token against Nomad's published keys, a role decides which jobs may use
+it, and a policy decides what they may read:
+
+```sh
+# Nomad publishes its signing keys at /.well-known/jwks.json
+bao auth enable jwt
+bao write auth/jwt-nomad/config \
+    jwks_url='https://nomad.example.com:4646/.well-known/jwks.json' \
+    default_role=box-workloads
+
+# Only the box paths, and only read
+bao policy write box-workloads - <<'EOF'
+path "kv/data/box/*" { capabilities = ["read"] }
+EOF
+
+# A box job is box-<id>: any of them may log in as this role
+bao write auth/jwt-nomad/role/box-workloads \
+    role_type=jwt \
+    bound_audiences='vault.io' \
+    bound_claims_type=glob \
+    bound_claims='{"nomad_job_id":"box-*"}' \
+    user_claim=nomad_job_id \
+    token_policies=box-workloads \
+    token_ttl=1h
+```
+
+The role name is what `box create --vault-role` (or `BOX_VAULT_ROLE`, which the
+coordinator role writes from `box_vault_role`) names. Leave both empty to use the
+backend's default role. Vault's JWT/OIDC auth documentation is the reference for
+the fields above.
+
+**3. The key is stored once, from stdin.** It must not pass through a file, a
+shell argument or a history entry:
+
+```sh
+bao kv put kv/box/llm key=-        # paste the key, then Ctrl-D
+```
+
+`kv/box/llm` is what you write; the API path Nomad reads is `kv/data/box/llm`
+(KV v2 puts `data` in it). That path is what `--vault-secret` takes, and it is the
+only thing about the key that is staged, printed or stored in the variable:
+
+```sh
+./deploy/executors-from-prime.sh --out /tmp/box-executors \
+    --provider <provider> --base-url <https://api.example.com/v1> \
+    --vault-secret kv/data/box/llm
+```
+
+It writes `prime/auth.json.tmpl` and `opencode/env.tmpl` — template text holding
+that path — plus `models.json`, `settings.json` and `opencode.json`. `box create`
+embeds the templates in the box job and renders them inside the task, so the key
+lands only on the box's tmpfs. `--vault-field` names the field of the secret
+(default `key`).
+
+A box created before the cluster had Vault picks the block up at its next
+`box start`: the executors variable is read again there, and so is the role.
 
 ## Images
 

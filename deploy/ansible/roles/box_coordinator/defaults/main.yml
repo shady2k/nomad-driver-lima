@@ -94,8 +94,9 @@ box_claude_plugin_ids: []
 
 # The environment the CLI needs. Nomad reads NOMAD_ADDR, NOMAD_TOKEN,
 # NOMAD_CACERT, NOMAD_CLIENT_CERT and NOMAD_CLIENT_KEY; the CLI adds
-# BOX_IMAGE_INDEX for the base image index. No secret from this file is ever
-# printed: it is written 0600 and the role keeps it that way.
+# BOX_IMAGE_INDEX for the base image index and BOX_VAULT_ROLE for the Vault role
+# a box reads its secrets with. No secret from this file is ever printed: it is
+# written 0600 and the role keeps it that way.
 box_env_file: '{{ box_coordinator_home }}/.config/box/env'
 box_nomad_addr: ''          # e.g. https://nomad.example:4646
 box_nomad_token: ''
@@ -105,3 +106,7 @@ box_nomad_client_key: ''
 # The base image index the CLI reads. Empty keeps the CLI's own public default;
 # a site that mirrors the images sets this to its own index.
 box_image_index: ''
+# The Vault role a box reads its secrets with (BOX_VAULT_ROLE, which `box create`
+# takes as --vault-role). Empty leaves the cluster's own default role in place,
+# which is what a cluster without such a role wants.
+box_vault_role: ''

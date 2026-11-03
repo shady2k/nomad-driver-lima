@@ -50,17 +50,59 @@ var boxExecutorRequired = map[string][]string{
 // guest, which is where boxd reads it.
 const boxSecretsDirInTask = "secrets"
 
+// executorTemplateSuffix marks an item of the executors Variable as a template
+// source instead of a file. "prime/auth.json.tmpl" holds Nomad template text --
+// `{{ with secret "kv/data/box/llm" }}...{{ end }}` -- and is rendered to
+// "secrets/prime/auth.json", so the credential is read from Vault by Nomad at
+// render time and never travels through the Variable, the job spec or any host.
+const executorTemplateSuffix = ".tmpl"
+
+// isTemplateKey reports whether an item key is a template source.
+func isTemplateKey(key string) bool { return strings.HasSuffix(key, executorTemplateSuffix) }
+
+// templateDestKey is the item key a template item renders to: the key without
+// the suffix, so "prime/auth.json.tmpl" and a plain "prime/auth.json" are two
+// ways to fill the same file.
+func templateDestKey(key string) string { return strings.TrimSuffix(key, executorTemplateSuffix) }
+
 // ExecutorFile describes one file of the executors variable, without its
 // content: the file names are not secret, the values are.
 type ExecutorFile struct {
-	// Key is the item key: "prime/auth.json".
+	// Key is the item key: "prime/auth.json", or "prime/auth.json.tmpl" for a
+	// template item.
 	Key string `json:"key"`
 	// Executor is the first path segment of the key.
 	Executor string `json:"executor"`
-	// Path is the path below the executor's directory: "auth.json".
+	// Path is the path below the executor's directory: "auth.json", or
+	// "auth.json.tmpl" for a template item, which renders to "auth.json".
 	Path string `json:"path"`
+	// Template is true when the item is template text that reads a secret at
+	// render time rather than the content of a file.
+	Template bool `json:"template,omitempty"`
 	// Size is the content length in bytes.
 	Size int `json:"size"`
+}
+
+// ExecutorItem is one item of the executors Variable as a box job renders it.
+type ExecutorItem struct {
+	// Key is the item key: "prime/auth.json" or "prime/auth.json.tmpl".
+	Key string
+	// Text is the item's own text when it is a template, and empty for a plain
+	// item. A template holds the path it reads and no value: the job carries the
+	// text, Nomad renders it, and the secret never leaves Vault until then.
+	Text string
+}
+
+// template reports whether the item is a template source.
+func (i ExecutorItem) template() bool { return isTemplateKey(i.Key) }
+
+// destKey is the item key the item renders to: the same key for a plain item,
+// the key without the suffix for a template ("prime/auth.json").
+func (i ExecutorItem) destKey() string {
+	if i.template() {
+		return templateDestKey(i.Key)
+	}
+	return i.Key
 }
 
 // isBoxExecutor reports whether name is an executor boxd knows.
@@ -93,25 +135,36 @@ func executorFilesOf(items map[string]string) []ExecutorFile {
 		if !ok {
 			continue
 		}
-		out = append(out, ExecutorFile{Key: key, Executor: executor, Path: file, Size: len(value)})
+		out = append(out, ExecutorFile{Key: key, Executor: executor, Path: file,
+			Template: isTemplateKey(key), Size: len(value)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
 }
 
-// executorKeysOf returns the sorted item keys of a variable. These are what a
-// box job template refers to.
-func executorKeysOf(items map[string]string) []string {
-	files := executorFilesOf(items)
-	keys := make([]string, 0, len(files))
-	for _, f := range files {
-		keys = append(keys, f.Key)
+// executorItemsOf returns the items of a variable that a box job renders,
+// sorted by key. A template item carries its own text, because the job embeds
+// it: reading the text here is what keeps the secret out of the job, since a
+// template item holds a Vault path where a plain item holds the value.
+func executorItemsOf(items map[string]string) []ExecutorItem {
+	out := make([]ExecutorItem, 0, len(items))
+	for _, f := range executorFilesOf(items) {
+		item := ExecutorItem{Key: f.Key}
+		if f.Template {
+			if _, _, ok := splitExecutorKey(templateDestKey(f.Key)); !ok {
+				continue
+			}
+			item.Text = items[f.Key]
+		}
+		out = append(out, item)
 	}
-	return keys
+	return out
 }
 
 // ReadExecutorDir reads one executor's directory (for example a copy of
-// ~/.prime/agent) into Variable items keyed <executor>/<relative path>.
+// ~/.prime/agent) into Variable items keyed <executor>/<relative path>. A file
+// named "<file>.tmpl" becomes a template item, so a staging directory can hold
+// the template of a credential instead of the credential.
 func ReadExecutorDir(executor, dir string) (map[string][]byte, error) {
 	if !isBoxExecutor(executor) {
 		return nil, usagef("%q is not an executor boxd knows: use one of %s", executor, strings.Join(boxExecutorNames, ", "))
@@ -202,33 +255,42 @@ func readFileTree(root string) (map[string][]byte, error) {
 	return out, nil
 }
 
-// executorTemplates turns item keys into one task template per file. The
-// template reads the item out of the Variable at render time, so a job spec
-// (which is readable by anyone with read-job) never contains a credential.
-func executorTemplates(keys []string) []*api.Template {
-	sorted := append([]string(nil), keys...)
-	sort.Strings(sorted)
+// executorTemplates turns the items of the executors Variable into one task
+// template per file.
+//
+// A plain item's template reads the item out of the Variable at render time, so
+// a job spec (which is readable by anyone with read-job) never contains a
+// credential. A template item is embedded as it is: Nomad renders its own text,
+// which reads the credential from Vault with the task's workload identity, so
+// neither the Variable nor the job holds a value.
+func executorTemplates(items []ExecutorItem) []*api.Template {
+	sorted := append([]ExecutorItem(nil), items...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Key < sorted[j].Key })
 	templates := make([]*api.Template, 0, len(sorted))
-	for _, key := range sorted {
-		if _, _, ok := splitExecutorKey(key); !ok {
+	for _, item := range sorted {
+		if _, _, ok := splitExecutorKey(item.destKey()); !ok {
 			continue
 		}
-		dest := boxSecretsDirInTask + "/" + key
+		dest := boxSecretsDirInTask + "/" + item.destKey()
 		mode := "noop"
 		perms := "0600"
-		// nomadVar returns the variable's items as a map of key to
-		// NomadVarItem, so one item is `index . "key"` and its text is
-		// `.Value`; the keys hold slashes and dots, which field syntax cannot
-		// express. nomadVarExists guards the read: without it the renderer
-		// blocks until the variable appears.
-		text := fmt.Sprintf(
-			`{{- if nomadVarExists %q -}}{{- with nomadVar %q -}}{{- (index . %q).Value -}}{{- end -}}{{- end -}}`,
-			boxExecutorsVariable, boxExecutorsVariable, key)
+		text := item.Text
+		if !item.template() {
+			// nomadVar returns the variable's items as a map of key to
+			// NomadVarItem, so one item is `index . "key"` and its text is
+			// `.Value`; the keys hold slashes and dots, which field syntax cannot
+			// express. nomadVarExists guards the read: without it the renderer
+			// blocks until the variable appears.
+			text = fmt.Sprintf(
+				`{{- if nomadVarExists %q -}}{{- with nomadVar %q -}}{{- (index . %q).Value -}}{{- end -}}{{- end -}}`,
+				boxExecutorsVariable, boxExecutorsVariable, item.Key)
+		}
 		templates = append(templates, &api.Template{
 			DestPath: &dest,
 			// A missing Variable writes an empty file instead of failing the
 			// task: a box without credentials still starts, and boxd says the
-			// executor is not configured.
+			// executor is not configured. A template item's Vault read is
+			// Nomad's own business: while it fails, the task is not started.
 			EmbeddedTmpl: &text,
 			// Reading a box must not restart its VM: the files are in the guest
 			// after the driver's own file copy, and the box is restarted only
@@ -238,6 +300,79 @@ func executorTemplates(keys []string) []*api.Template {
 		})
 	}
 	return templates
+}
+
+// templateItemKeys names the template items of a staged set, so `box executors
+// set` reports them as templates: an operator has to see that the variable holds
+// a path, not a value.
+func templateItemKeys(files map[string][]byte) []ExecutorKey {
+	keys := make([]string, 0, len(files))
+	for key := range files {
+		if isTemplateKey(key) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	out := make([]ExecutorKey, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, ExecutorKey{File: key, Kind: "template"})
+	}
+	return out
+}
+
+// hasExecutorTemplate reports whether any item reads a secret at render time.
+// Such a task needs a Vault block; a box made only of plain items does not, so
+// its job stays usable on a cluster without Vault.
+func hasExecutorTemplate(items []ExecutorItem) bool {
+	for _, item := range items {
+		if item.template() {
+			return true
+		}
+	}
+	return false
+}
+
+// validateExecutorTemplates checks the template items of a staged set.
+//
+// A template item must hold template text, and no two items may render to the
+// same file: the renderer would write both to one path and which one wins would
+// depend on the order Nomad happens to render them in.
+func validateExecutorTemplates(files map[string][]byte) error {
+	keys := make([]string, 0, len(files))
+	for key := range files {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !isTemplateKey(key) {
+			continue
+		}
+		if !strings.Contains(string(files[key]), "{{") {
+			return usagef("%s ends in %s but holds no template text: such an item is a Nomad template, "+
+				`for example {{ with secret "kv/data/box/llm" }}{{ .Data.data.key | toJSON }}{{ end }}, `+
+				"and it must never hold the secret itself (name it without %s to store a file)",
+				key, executorTemplateSuffix, executorTemplateSuffix)
+		}
+		if _, _, ok := splitExecutorKey(templateDestKey(key)); !ok {
+			return usagef("%s renders to %q, which is not <executor>/<file>", key, templateDestKey(key))
+		}
+	}
+	dest := make(map[string]string, len(keys))
+	for _, key := range keys {
+		if _, _, ok := splitExecutorKey(key); !ok {
+			continue
+		}
+		rendered := key
+		if isTemplateKey(key) {
+			rendered = templateDestKey(key)
+		}
+		if first, ok := dest[rendered]; ok {
+			return usagef("%s and %s both render to %s: keep one of them, "+
+				"because the renderer would write both to the same file", first, key, rendered)
+		}
+		dest[rendered] = key
+	}
+	return nil
 }
 
 // providerScopedFiles are the files that carry provider credentials or a
@@ -252,8 +387,9 @@ var providerScopedFiles = []string{"prime/auth.json", "prime/models.json", "open
 type ExecutorKey struct {
 	// File is the item key: "prime/auth.json".
 	File string `json:"file"`
-	// Kind is "credential" (a stored credential, keyed by provider) or
-	// "provider" (a provider definition).
+	// Kind is "credential" (a stored credential, keyed by provider),
+	// "provider" (a provider definition) or "template" (a template item, which
+	// holds a Vault path instead of a value).
 	Kind string `json:"kind"`
 	// Name is the provider the key belongs to.
 	Name string `json:"name"`
@@ -364,9 +500,15 @@ func selectProvider(files map[string][]byte, provider string) (map[string][]byte
 }
 
 // storedKeys reports the provider keys of the files that are stored, so `box
-// executors show` says which provider a box is configured for.
+// executors show` says which provider a box is configured for. Template items
+// are reported as templates: they are not JSON, and what they hold is a path.
 func storedKeys(items map[string]string) []ExecutorKey {
 	var report []ExecutorKey
+	for _, f := range executorFilesOf(items) {
+		if f.Template {
+			report = append(report, ExecutorKey{File: f.Key, Kind: "template"})
+		}
+	}
 	for _, key := range providerScopedFiles {
 		text, ok := items[key]
 		if !ok {
@@ -438,8 +580,10 @@ func orNone(keys []string) string {
 	return strings.Join(keys, ", ")
 }
 
-// executorKeysFromJob reads the executor item keys back out of a registered
-// box job, which is how `box status` shows what a box was given at creation.
+// executorKeysFromJob reads the executor file names back out of a registered box
+// job, which is how `box status` shows what a box was given at creation. The name
+// is the destination, so a template item appears as the file it rendered to
+// ("prime/auth.json"), whatever the item in the variable is called.
 func executorKeysFromJob(job *api.Job) []string {
 	task, err := boxTask(job)
 	if err != nil {
@@ -489,10 +633,10 @@ func (a *App) executorsVariable(ctx context.Context) (*api.Variable, error) {
 	return v, nil
 }
 
-// executorItemKeys returns the item keys a new box job should reference. A
-// cluster without the variable is not an error: the box starts and the guest
-// reports every executor as not configured.
-func (a *App) executorItemKeys(ctx context.Context) []string {
+// executorItems returns the items a new box job should render. A cluster
+// without the variable is not an error: the box starts and the guest reports
+// every executor as not configured.
+func (a *App) executorItems(ctx context.Context) []ExecutorItem {
 	v, err := a.executorsVariable(ctx)
 	if err != nil {
 		a.note("note   %s; the box starts without executor credentials", err)
@@ -501,5 +645,5 @@ func (a *App) executorItemKeys(ctx context.Context) []string {
 	if v == nil {
 		return nil
 	}
-	return executorKeysOf(v.Items)
+	return executorItemsOf(v.Items)
 }

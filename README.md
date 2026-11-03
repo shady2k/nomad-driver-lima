@@ -131,10 +131,12 @@ packages sets `nomad_install_binary: false` and points `nomad_binary` at it.
 
 ### Model provider credentials for the boxes
 
-The agents inside a box need one provider's credentials and configuration. They
-are stored once per cluster, in the Nomad variable `nomad/jobs/box-executors`, by
-`box executors set` — never in the image and never in the box job. Any provider
-prime-agent or opencode can talk to works.
+The agents inside a box need one provider's configuration and its key. The
+configuration is stored once per cluster, in the Nomad variable
+`nomad/jobs/box-executors`, by `box executors set` — never in the image and never
+in the box job. The key is not stored at all: it stays in Vault (or OpenBao), and
+the variable holds a template that names its path, which Nomad renders inside the
+box's own task. Any provider prime-agent or opencode can talk to works.
 
 ## Deploy, step by step
 
@@ -324,14 +326,43 @@ purpose.
 `box capacity` answers with that token and with it alone (its environment is
 step 9).
 
-### 8. The executor credentials
+### 8. The executor credentials, read from Vault
 
-The boxes run agents, and their credentials travel as one Nomad variable. Stage
-them from a host that has a prime-agent configuration (from the repository root):
+The boxes run agents. Their provider key is **read from Vault by Nomad**: no host
+copies it anywhere, the box job carries a Vault path instead of a key, and Nomad
+renders the file inside the box's own task. Two things come first.
+
+**Vault must trust Nomad.** Every Nomad agent (servers and clients) needs a
+`vault` block; the node role writes the client's from `nomad_extra` in
+`inventory/group_vars/box_nodes.yml`:
+
+```yaml
+nomad_extra:
+  vault:
+    - name: default
+      enabled: true
+      address: 'https://vault.example.com:8200'
+      jwt_auth_backend_path: jwt-nomad
+      default_identity:
+        aud: ['vault.io']
+        ttl: '1h'
+```
+
+Nomad's Vault integration docs are the reference for that block and for the
+server side. Then Vault needs one JWT auth backend fed by Nomad's JWKS URL, one
+role for the box jobs and one policy for the box paths — the four `bao` commands
+are in `deploy/README.md`, section "Vault: where a box's credential comes from",
+together with `bao kv put kv/box/llm key=-` (from stdin, never a file or an
+argv).
+
+**Then stage the rest of the files.** From the repository root, on a host with a
+prime-agent configuration (its `settings.json` and `models.json` say which models
+to configure; the key is not read here):
 
 ```sh
 ./deploy/executors-from-prime.sh --out /tmp/box-executors \
-    --provider <provider> --base-url https://api.example.com/v1
+    --provider <provider> --base-url https://api.example.com/v1 \
+    --vault-secret kv/data/box/llm
 ```
 
 then, where the CLI can reach the cluster — the coordinator, with the environment
@@ -343,14 +374,22 @@ box executors show                       # file names and sizes, never a value
 rm -rf /tmp/box-executors
 ```
 
-**Success:** `box executors show` lists the files of each executor and no
-credential value. Rotation needs no new box: Nomad re-renders the variable and
-the driver copies it into the guest's tmpfs.
+The staged `prime/auth.json.tmpl` holds a template, not a key: `box create`
+embeds it in the box job and Nomad renders it with the box's workload identity.
+The role is `box_vault_role` in `group_vars/box_coordinators.yml` (it becomes
+`BOX_VAULT_ROLE`, the default of `box create --vault-role`); empty means the
+cluster's default role.
+
+**Success:** `box executors show` lists the files of each executor, marks the
+template as a template, and prints no credential value. Rotation needs no new
+box: Nomad re-renders the template and the driver copies the file into the
+guest's tmpfs.
 
 ### 9. The coordinator: environment and skill
 
-The role wrote `~/.config/box/env` (mode 0600) with `NOMAD_ADDR`, the token and
-`BOX_IMAGE_INDEX`. Every shell that runs `box` reads it:
+The role wrote `~/.config/box/env` (mode 0600) with `NOMAD_ADDR`, the token,
+`BOX_IMAGE_INDEX` and (when `box_vault_role` is set) `BOX_VAULT_ROLE`. Every shell
+that runs `box` reads it:
 
 ```sh
 set -a; . ~/.config/box/env; set +a
@@ -529,7 +568,10 @@ What is true:
 - Each box runs as an unprivileged node user, in its own cgroup scope, with a
   memory cap (`memory.max` plus `memory.swap.max=0`).
 - Executor credentials are written to the guest's tmpfs (`/run/box/secrets`,
-  root-only, mode 0700) and are never on the box disk or in an image.
+  root-only, mode 0700) and are never on the box disk or in an image. The provider
+  key itself is read from Vault by Nomad at render time with the box's own
+  workload identity: it is not in the variable, not in the job spec, and no host
+  has to hold it.
 - The `box` CLI's Nomad token is scoped: jobs, host volumes, `alloc exec`, read
   logs, node read, and read/write of the one variable that holds the executor
   credentials. `deploy/acl/README.md` lists every capability and the command

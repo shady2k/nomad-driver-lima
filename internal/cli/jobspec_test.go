@@ -86,6 +86,50 @@ func TestRenderJobShape(t *testing.T) {
 	require.Equal(t, "disk", derefStr(task.VolumeMounts[0].Volume, ""))
 	require.Equal(t, "/disk", derefStr(task.VolumeMounts[0].Destination, ""))
 	require.Equal(t, boxStopTimeout, *task.KillTimeout)
+	require.Nil(t, task.Vault, "a box that reads only the executors Variable needs no Vault block")
+}
+
+func TestRenderJobVaultBlockOnlyForTemplateItems(t *testing.T) {
+	// A plain item is read out of the Nomad Variable, so the job carries no Vault
+	// block: a box on a cluster without Vault stays exactly as it was.
+	plain := goodSpec()
+	plain.ExecutorItems = []ExecutorItem{{Key: "prime/auth.json"}, {Key: "prime/settings.json"}}
+	plain.VaultRole = "box-workloads"
+	job, err := RenderJob(plain)
+	require.NoError(t, err)
+	task, err := boxTask(job)
+	require.NoError(t, err)
+	require.Nil(t, task.Vault, "a role alone does not add a Vault block")
+
+	templated := goodSpec()
+	templated.ExecutorItems = []ExecutorItem{{Key: "prime/auth.json.tmpl", Text: `{{ with secret "kv/data/box/llm" }}{{ end }}`}}
+	templated.VaultRole = "box-workloads"
+	job, err = RenderJob(templated)
+	require.NoError(t, err)
+	task, err = boxTask(job)
+	require.NoError(t, err)
+	require.NotNil(t, task.Vault)
+	require.Equal(t, "box-workloads", task.Vault.Role)
+	require.Equal(t, "noop", derefStr(task.Vault.ChangeMode, ""))
+	require.True(t, *task.Vault.DisableFile, "no token file in secrets/: the driver copies that directory into the guest")
+	require.False(t, *task.Vault.Env)
+
+	// An empty role is the cluster's default role: the job must not name one at
+	// all, because a role that does not exist would fail the allocation.
+	templated.VaultRole = ""
+	job, err = RenderJob(templated)
+	require.NoError(t, err)
+	task, err = boxTask(job)
+	require.NoError(t, err)
+	require.Equal(t, "", task.Vault.Role)
+
+	// The role survives the read-back: `box start` rebuilds the job from it.
+	templated.VaultRole = "box-workloads"
+	job, err = RenderJob(templated)
+	require.NoError(t, err)
+	back, err := SpecFromJob(job)
+	require.NoError(t, err)
+	require.Equal(t, "box-workloads", back.VaultRole)
 }
 
 func TestRenderJobArm64Constraint(t *testing.T) {

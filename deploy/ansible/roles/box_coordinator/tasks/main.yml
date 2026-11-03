@@ -151,7 +151,8 @@
          + (['NOMAD_CACERT=' ~ box_nomad_cacert] if box_nomad_cacert | length > 0 else [])
          + (['NOMAD_CLIENT_CERT=' ~ box_nomad_client_cert] if box_nomad_client_cert | length > 0 else [])
          + (['NOMAD_CLIENT_KEY=' ~ box_nomad_client_key] if box_nomad_client_key | length > 0 else [])
-         + (['BOX_IMAGE_INDEX=' ~ box_image_index] if box_image_index | length > 0 else []) }}
+         + (['BOX_IMAGE_INDEX=' ~ box_image_index] if box_image_index | length > 0 else [])
+         + (['BOX_VAULT_ROLE=' ~ box_vault_role] if box_vault_role | length > 0 else []) }}
   no_log: '{{ box_nomad_token | length > 0 }}'
 
 - name: Coordinator | Write the environment file the CLI reads

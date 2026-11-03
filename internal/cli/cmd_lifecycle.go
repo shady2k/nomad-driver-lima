@@ -76,7 +76,8 @@ func (a *App) cmdStart(ctx context.Context, args []string) error {
 	}
 	// The executors variable is read again: a start is the moment to pick up
 	// credentials that were added since the box was created.
-	spec.ExecutorItems = a.executorItemKeys(ctx)
+	spec.ExecutorItems = a.executorItems(ctx)
+	spec.VaultRole = a.vaultRoleFor(spec.VaultRole)
 	engineered, err := RenderJob(spec)
 	if err != nil {
 		return err
@@ -234,7 +235,8 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 		return a.printLifecycle(&out)
 	}
 
-	spec.ExecutorItems = a.executorItemKeys(ctx)
+	spec.ExecutorItems = a.executorItems(ctx)
+	spec.VaultRole = a.vaultRoleFor(spec.VaultRole)
 	engineered, err := RenderJob(spec)
 	if err != nil {
 		return err

@@ -32,5 +32,6 @@ func main() {
 	app.In = os.Stdin
 	app.Terminal = cli.NewOSTerminal(os.Stdin, os.Stdout)
 	app.SetImageIndexURL(os.Getenv("BOX_IMAGE_INDEX"))
+	app.SetVaultRole(os.Getenv("BOX_VAULT_ROLE"))
 	os.Exit(app.Run(ctx, os.Args[1:]))
 }

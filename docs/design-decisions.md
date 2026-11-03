@@ -142,6 +142,19 @@ and versions named in "What was measured".
   boxd derives everything it needs below `/run/boxd`. Sessions and transcripts
   stay on the disk; no secret does. The image build and the guest checks fail if
   any executor credential location is non-empty.
+- **The key is read from Vault, never copied from a host.** An item named
+  `prime/auth.json.tmpl` is Nomad template text holding a Vault path, not a key:
+  `box create` embeds the text in the job and Nomad renders the file on the node
+  with the box's own workload identity, so the variable and the job spec hold the
+  path. Rejected: staging the credential out of a host's `auth.json`, which is
+  what the staging script used to do -- it puts the key through a shell, a
+  staging directory and a Nomad variable, and it makes every host with a login a
+  source of the cluster's credentials. The block is `change_mode = "noop"` (a
+  renewed or revoked token must not restart a VM), `disable_file` (Nomad's token
+  files would otherwise be copied into the guest, because the driver copies the
+  whole `secrets/` directory) and no `env` (the task process is the VM, not an
+  executor). A job with no template item has no Vault block at all, so a cluster
+  without Vault keeps working exactly as before.
 - **One provider per box.** `box executors set --provider` keeps one provider's
   credential and definition out of `auth.json`, `models.json` and
   `opencode.json`, because a box runs one provider and the whole set does not fit

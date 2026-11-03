@@ -114,7 +114,10 @@ The CLI owns these conventions; the driver supports them.
 - dynamic host volume `box-<box-id>` (plugin `box-volume`), mounted as the
   volume `disk`
 - the executor credentials are one Nomad variable, `nomad/jobs/box-executors`,
-  rendered into the task's `secrets/` directory with one template per file
+  rendered into the task's `secrets/` directory with one template per file; an
+  item whose name ends in `.tmpl` is template text that reads its secret from
+  Vault, and the task then carries a `vault` block (`change_mode = "noop"`,
+  `disable_file = true`) with the role the CLI was given
 
 `examples/box.nomad.hcl` and `examples/box.volume.hcl` show the shape, and
 `docs/architecture.md` explains why it is this shape.

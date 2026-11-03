@@ -117,6 +117,15 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   would close it.
 - **The provider's model list is staged, not discovered live.** A model added to
   the provider later needs a new `box executors set` and a reload.
+- **A box whose executors hold a template item needs Vault on the node.** The task
+  carries a `vault` block and a template that reads it, so a client without a
+  `vault` block fails the allocation instead of starting the box. A variable with
+  plain items only is unaffected: those jobs carry no Vault block.
+- **A Vault that cannot answer delays a new box.** A template item reads Vault
+  before the task starts, so the box waits, and Nomad kills it at its healthy
+  deadline if Vault never answers. A box that is already running keeps the files
+  it has: `change_mode = "noop"` means a token it cannot renew does not restart
+  the VM.
 
 ## Lifecycle and operations
 

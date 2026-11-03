@@ -124,9 +124,12 @@ sessions inside the box:
   the Nomad task log) and to `sessions/<id>/events.jsonl`.
 
 The credentials an executor needs arrive as the task's `secrets/` directory and
-land on a tmpfs, `/run/box/secrets`, never on the box disk. An image therefore
-carries no credential, and a box that gets none still starts: it reports each
-executor as not configured instead of failing.
+land on a tmpfs, `/run/box/secrets`, never on the box disk. One task template
+writes each file: a plain item of the `nomad/jobs/box-executors` variable is read
+out of it, and a `.tmpl` item is template text that reads the key from Vault with
+the box's own workload identity, so the key is in no variable and no job spec.
+An image therefore carries no credential, and a box that gets none still starts:
+it reports each executor as not configured instead of failing.
 
 `docs/boxctl-contract.md` is the interface between the CLI and boxd: commands,
 JSON objects, error codes and the guest layout.
