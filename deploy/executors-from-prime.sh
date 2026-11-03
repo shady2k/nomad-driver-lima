@@ -25,7 +25,11 @@
 # auth.json.tmpl: an item with the plain name would have to carry the key itself.
 #
 # Nothing is read from this host except its models.json definition of the
-# provider (and its settings.json, which says what the box's default is not yet).
+# provider, and of that only the fields listed below (PROVIDER_FIELDS,
+# MODEL_FIELDS): a host's configuration also holds things that are not the box's
+# business -- MCP servers and their keys, request headers with a token in them --
+# and a field this script does not know is dropped, not copied. settings.json is
+# written from scratch for the same reason; this host's own one is not read.
 # The one secret this script names is the Vault path, so it needs no login here.
 #
 # Only the chosen provider is staged. models.json on this host holds every
@@ -117,7 +121,7 @@ while (($# > 0)); do
       shift 2
       ;;
     --no-opencode) with_opencode=false; shift ;;
-    -h | --help) sed -n '2,87p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,91p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
 done
@@ -134,7 +138,6 @@ need python3
 [[ $vault_secret != *'{{'* ]] || die "--vault-secret must not contain {{: it would open a second template call"
 [[ $vault_field =~ ^[A-Za-z0-9_-]+$ ]] || die "--vault-field '$vault_field' is not a field name: use letters, digits, _ and -"
 [[ -d $prime_dir ]] || die "no prime-agent configuration in $prime_dir"
-[[ -f $prime_dir/settings.json ]] || die "$prime_dir/settings.json is missing: is this a prime-agent config directory?"
 
 if [[ -z $out ]]; then
   out=$(mktemp -d "${TMPDIR:-/tmp}/box-executors-XXXXXX")
@@ -193,8 +196,11 @@ os.chmod(auth_out, 0o600)
 print(f"prime        auth.json.tmpl: one api_key entry for {provider}, read from {vault_secret}.{vault_field}")
 
 # This host's own definition of the provider, when it has one: its models carry
-# what prime-agent needs to use them well (reasoning, input, contextWindow,
-# maxTokens, cost, compat), and the provider may carry compat and headers.
+# what prime-agent needs to use them well. Only these fields are taken; headers
+# in particular are not, because a header is where a provider definition keeps a
+# token of its own.
+PROVIDER_FIELDS = ("api", "authHeader", "compat")
+MODEL_FIELDS = ("id", "name", "reasoning", "input", "contextWindow", "maxTokens", "cost", "compat")
 source_models = os.path.join(prime_dir, "models.json")
 doc = {"providers": {}}
 if os.path.isfile(source_models):
@@ -220,22 +226,31 @@ else:
     fail(f"no model for {provider}: {source_models} has no definition of it, and this script does not "
          f"read the key from anywhere; pass --model ID (one or more)")
 
-# The provider definition prime-agent reads (0.9.8 and 0.10.2). The rest of the
-# source document (schema and so on) is kept; every other provider is dropped.
-# This host's definition is kept whole, with its models' fields; only the base
-# URL and the key's variable are set here, and a model it does not describe
-# gets an id and a name.
+# The provider definition prime-agent reads (0.9.8 and 0.10.2): the one provider,
+# with the listed fields of this host's definition and of its models; the base
+# URL and the key's variable are set here, and a model it does not describe gets
+# an id and a name. Every other provider, and everything else in the source
+# document, is dropped.
 models_path = os.path.join(out, "prime", "models.json")
 dropped = [name for name in keys_of(doc.get("providers")) if name != provider]
-definition = dict(source_def)
+dropped_fields = sorted(set(source_def) - set(PROVIDER_FIELDS) - {"baseUrl", "apiKey", "models"})
+definition = {k: source_def[k] for k in PROVIDER_FIELDS if k in source_def}
 definition.setdefault("api", "openai-completions")
 definition.setdefault("authHeader", True)
 definition["baseUrl"] = base_url
 # The environment variable is only the fallback: the box gets the key as
 # prime/auth.json, rendered from Vault before the executor starts.
 definition["apiKey"] = env_name
-definition["models"] = [source_entries.get(model, {"id": model, "name": model}) for model in model_ids]
-doc["providers"] = {provider: definition}
+def model_entry(model):
+    source = source_entries.get(model)
+    if source is None:
+        return {"id": model, "name": model}
+    dropped_fields.extend(f"models[{model}].{k}" for k in sorted(set(source) - set(MODEL_FIELDS)))
+    return {k: source[k] for k in MODEL_FIELDS if k in source}
+
+
+definition["models"] = [model_entry(model) for model in model_ids]
+doc = {"providers": {provider: definition}}
 described = sum(1 for model in model_ids if model in source_entries)
 with open(models_path, "w") as f:
     json.dump(doc, f, indent=2)
@@ -243,18 +258,16 @@ with open(models_path, "w") as f:
 os.chmod(models_path, 0o600)
 print(f"prime        models.json: {provider} at {base_url}, {len(model_ids)} model(s), "
       f"{described} with this host's own description"
-      + (f"; dropped the definition(s) of {', '.join(dropped)}" if dropped else ""))
+      + (f"; dropped the definition(s) of {', '.join(dropped)}" if dropped else "")
+      + (f"; not copied: {', '.join(dropped_fields)}" if dropped_fields else ""))
 
-# settings.json without `packages`: a git package cannot travel in a 64 KiB
-# variable, and this box gets its provider from models.json. What the image does
-# carry -- files at /opt/box/addons -- is named here, and each path is written as
-# it is given: it is the path the guest sees, not one on this host.
-settings = json.load(open(os.path.join(prime_dir, "settings.json")))
-settings.pop("packages", None)
+# settings.json from scratch: the default provider and model, and the packages
+# the image carries -- files at /opt/box/addons, each path written as it is
+# given, since it is the path the guest sees. This host's settings are not read:
+# they hold its own MCP servers, packages and keys, none of which is the box's.
+settings = {"defaultProvider": provider, "defaultModel": model_ids[0]}
 if packages:
     settings["packages"] = packages
-settings["defaultProvider"] = provider
-settings["defaultModel"] = model_ids[0]
 settings_path = os.path.join(out, "prime", "settings.json")
 with open(settings_path, "w") as f:
     json.dump(settings, f, indent=2)
