@@ -111,6 +111,9 @@ box_volume_config_file: /etc/box/volume.json
 # instance below it, and the disk of a box lives on its Nomad volume and is
 # symlinked from here.
 box_lima_home: /var/lib/box/lima
+# Refuse a path too long for the unix sockets kept under it (see the preflight).
+# Only the kit's own checks, which install into a long throwaway prefix, turn it off.
+box_socket_path_check: true
 box_image_cache_dir: /var/lib/box/images
 
 # Added to the guest memory for the Linux memory cap (the qemu process holds more

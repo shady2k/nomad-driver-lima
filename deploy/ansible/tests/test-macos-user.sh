@@ -3,9 +3,9 @@
 # The Mac fixtures: the opt-in user profile and the launchd lifecycle of both
 # scopes, in isolated prefixes, without launchd, without a VM and without Nomad.
 #
-#   export BOX_MAC_FIXTURE=$(mktemp -d "$HOME/box-node.XXXXXX")
-#   export BOX_MAC_USER_LIFECYCLE_FIXTURE=$(mktemp -d "$HOME/box-user.XXXXXX")
-#   export BOX_MAC_SYSTEM_LIFECYCLE_FIXTURE=$(mktemp -d "$HOME/box-system.XXXXXX")
+#   export BOX_MAC_FIXTURE=$(mktemp -d "$HOME/bx.XXXXXX")
+#   export BOX_MAC_USER_LIFECYCLE_FIXTURE=$(mktemp -d "$HOME/bx.XXXXXX")
+#   export BOX_MAC_SYSTEM_LIFECYCLE_FIXTURE=$(mktemp -d "$HOME/bx.XXXXXX")
 #   export BOX_MAC_VERSION=0.0.0-fixture
 #   export BOX_MAC_DIST=$PWD/dist/0.0.0-fixture       # deploy/build.sh --version 0.0.0-fixture
 #   ./deploy/ansible/tests/test-macos-user.sh

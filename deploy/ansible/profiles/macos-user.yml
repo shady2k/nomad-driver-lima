@@ -20,10 +20,15 @@
 # The connection IS the user (ssh as that user, or a local connection): no sudo.
 ansible_become: false
 
-# Everything of the node lives under the login home, in one directory.
+# Everything of the node lives under the login home. Two directories hold unix
+# sockets and so live in a short one: a socket path on macOS is at most 103 bytes,
+# and Lima's ssh socket is <lima_home>/<box id>/ssh.sock.<16 characters>, Nomad's
+# task API socket <data_dir>/alloc/<alloc id>/box/secrets/api.sock. The preflight
+# checks both lengths.
 nomad_user_root: '{{ ansible_facts.user_dir }}/Library/Application Support/box'
+nomad_user_short_root: '{{ ansible_facts.user_dir }}/.box'
 box_release_root: '{{ nomad_user_root }}/releases'
-box_lima_home: '{{ nomad_user_root }}/lima'
+box_lima_home: '{{ nomad_user_short_root }}/lima'
 box_image_cache_dir: '{{ nomad_user_root }}/images'
 box_plugin_owner: '{{ ansible_facts.user_id }}'
 box_plugin_group: '{{ ansible_facts.user_gid }}'
@@ -41,7 +46,7 @@ nomad_binary: /opt/homebrew/bin/nomad
 nomad_file_owner: '{{ ansible_facts.user_id }}'
 nomad_file_group: '{{ ansible_facts.user_gid }}'
 nomad_config_dir: '{{ nomad_user_root }}/nomad/config'
-nomad_data_dir: '{{ nomad_user_root }}/nomad/data'
+nomad_data_dir: '{{ nomad_user_short_root }}/data'
 nomad_host_volumes_dir: '{{ nomad_user_root }}/nomad/volumes'
 
 # The job: a LaunchAgent of this user, in the gui domain of its uid.

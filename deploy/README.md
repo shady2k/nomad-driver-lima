@@ -342,7 +342,9 @@ do is run it:
 
 The default stays the system LaunchDaemon. `profiles/macos-user.yml` runs the same
 client as one login user instead: no root, everything under
-`~/Library/Application Support/box`, and launchd's `gui/<uid>` domain.
+`~/Library/Application Support/box` except the two directories that hold unix
+sockets - `lima_home` and Nomad's `data_dir` live in `~/.box`, because a socket path
+on macOS is at most 103 bytes - and launchd's `gui/<uid>` domain.
 
 ```bash
 cd deploy/ansible

@@ -33,6 +33,23 @@
       needs all three files.
     quiet: true
 
+# Nomad binds every task's API socket at
+# <data_dir>/alloc/<36-character alloc id>/box/secrets/api.sock, 64 bytes after
+# data_dir; a unix socket path is at most 103 bytes on macOS, 107 on Linux.
+- name: Preflight | Require a data_dir short enough for the task API socket
+  ansible.builtin.assert:
+    that:
+      - nomad_data_dir | length <= nomad_socket_path_max - 64
+    fail_msg: >-
+      nomad_data_dir {{ nomad_data_dir }} is {{ nomad_data_dir | length }} characters; on
+      {{ ansible_facts.system }} it may be at most {{ nomad_socket_path_max - 64 }}, so that
+      the task API socket of a box fits in {{ nomad_socket_path_max }} bytes. Choose a
+      shorter directory.
+    quiet: true
+  when: nomad_socket_path_check | bool
+  vars:
+    nomad_socket_path_max: "{{ 103 if ansible_facts.system == 'Darwin' else 107 }}"
+
 - name: Preflight | Look for the NixOS marker
   ansible.builtin.stat:
     path: /etc/NIXOS

@@ -72,6 +72,9 @@ nomad_node_name: '{{ ansible_facts.hostname }}'
 nomad_data_dir: /opt/nomad/data
 # Where Nomad keeps the directories of dynamic host volumes (the box disks).
 nomad_host_volumes_dir: /opt/nomad/volumes
+# Refuse a path too long for the unix sockets kept under it (see the preflight).
+# Only the kit's own checks, which install into a long throwaway prefix, turn it off.
+nomad_socket_path_check: true
 # The ancestors of the paths the runtime user has to reach, prepared by this role
 # before the leaf directories. Each entry is {path, owner, group, mode}. Empty by
 # default: a parent the node already has is the operator's decision, not this

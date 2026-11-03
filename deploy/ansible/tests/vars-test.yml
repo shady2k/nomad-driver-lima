@@ -18,6 +18,10 @@ box_release_cache_dir: "{{ nomad_test_prefix }}/var/cache/box-releases/{{ box_ve
 # The same layout a node gets: one directory per version, one live symlink.
 box_release_root: '{{ nomad_test_prefix }}/opt/box'
 box_lima_home: '{{ nomad_test_prefix }}/var/lib/box/lima'
+# The prefix makes every path too long for a unix socket; case 5f turns the check
+# back on and requires it to refuse.
+box_socket_path_check: false
+nomad_socket_path_check: false
 box_image_cache_dir: '{{ nomad_test_prefix }}/var/lib/box/images'
 box_volume_config_file: '{{ nomad_test_prefix }}/etc/box/volume.json'
 

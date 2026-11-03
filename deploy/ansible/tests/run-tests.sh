@@ -44,6 +44,8 @@
 #      reporting changed=0
 #   5e. a runtime user that cannot traverse its way to the box disks stops the
 #      install, with the path and nomad_directory_parents in the failure
+#   5f. a lima_home and a data_dir too long for their unix sockets are refused
+#      before anything is installed
 #   6. rollback: two releases on the node, a switch between them by one symlink,
 #      and nothing else touched - the configuration, the Lima home, the volumes
 #      and the client's data directory are the same bytes afterwards; a release
@@ -623,6 +625,27 @@ fi
 if ! sudo -n rm -rf -- "$TV"; then
 	bad "$TV still belongs to root: remove it with: sudo rm -rf $TV"
 fi
+
+# The prefix is far longer than a socket path allows, so with the checks on the
+# preflight refuses it, naming the setting - before anything is installed.
+printf -- '-- 5f. paths too long for their unix sockets are refused\n'
+export NOMAD_TEST_PREFIX=$TEST_ROOT/socket-paths
+mkdir -p -- "$NOMAD_TEST_PREFIX"
+if play "$TESTS_DIR/play-node.yml" --check -e box_socket_path_check=true \
+	>"$TEST_ROOT/socket-lima.log" 2>&1; then
+	bad 'a lima_home too long for the ssh socket was accepted'
+else
+	check_grep 'a lima_home too long for the ssh socket is refused' \
+		'box_lima_home .* Choose a shorter directory' "$TEST_ROOT/socket-lima.log"
+fi
+if play "$TESTS_DIR/play-node.yml" --check -e nomad_socket_path_check=true \
+	>"$TEST_ROOT/socket-data.log" 2>&1; then
+	bad 'a data_dir too long for the task API socket was accepted'
+else
+	check_grep 'a data_dir too long for the task API socket is refused' \
+		'nomad_data_dir .* Choose a' "$TEST_ROOT/socket-data.log"
+fi
+check 'the refused runs installed nothing' test ! -e "$NOMAD_TEST_PREFIX/opt/box"
 
 # The coordinator, into its own prefix: the CLI is a release and a symlink, and
 # the rollback below switches it the same way.

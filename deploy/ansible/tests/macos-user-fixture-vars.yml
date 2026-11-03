@@ -15,6 +15,9 @@ fixture_root: '{{ lookup("env", "BOX_MAC_FIXTURE") }}'
 # The user profile's tree, one level down so the recorder, the repeated log and the
 # rendered copy have room beside it.
 nomad_user_root: '{{ fixture_root }}/user-node'
+# The short root of the sockets (lima_home, data_dir), as short as the prefix
+# allows: tests/test-macos-user.sh names its prefixes $HOME/bx.XXXXXX for it.
+nomad_user_short_root: '{{ fixture_root }}/s'
 nomad_launchd_plist: '{{ fixture_root }}/LaunchAgents/local.nomad.client.plist'
 
 # The release under test: a local build (deploy/build.sh), so the fixtures test

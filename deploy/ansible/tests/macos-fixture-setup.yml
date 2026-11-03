@@ -13,6 +13,7 @@
       - fixture_root is match('^' ~ (ansible_facts.user_dir | regex_escape) ~ '/')
       - "'/../' not in fixture_root"
       - nomad_user_root is match('^' ~ (fixture_root | regex_escape) ~ '/')
+      - nomad_user_short_root is match('^' ~ (fixture_root | regex_escape) ~ '/')
       - nomad_launchd_plist is match('^' ~ (fixture_root | regex_escape) ~ '/')
       - box_limactl is match('^' ~ (fixture_root | regex_escape) ~ '/')
     fail_msg: >-

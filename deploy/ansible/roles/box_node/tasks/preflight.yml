@@ -24,6 +24,25 @@
       run as root, so it has no default.
     quiet: true
 
+# Lima binds ssh's ControlMaster at <lima_home>/<box id>/ssh.sock.<16 characters>,
+# and a unix socket path is at most 103 bytes on macOS, 107 on Linux. With a box id
+# of up to 40 characters that leaves 67 bytes for the rest: a longer lima_home lets
+# a box boot and then hang in Lima's readiness checks. The driver refuses such a
+# box too; this says it before anything is installed.
+- name: Preflight | Require a lima_home short enough for Lima's sockets
+  ansible.builtin.assert:
+    that:
+      - box_lima_home | length <= box_socket_path_max - 67
+    fail_msg: >-
+      box_lima_home {{ box_lima_home }} is {{ box_lima_home | length }} characters; on
+      {{ ansible_facts.system }} it may be at most {{ box_socket_path_max - 67 }}, so that
+      Lima's ssh socket for a 40-character box id fits in {{ box_socket_path_max }} bytes.
+      Choose a shorter directory.
+    quiet: true
+  when: box_socket_path_check | bool
+  vars:
+    box_socket_path_max: "{{ 103 if ansible_facts.system == 'Darwin' else 107 }}"
+
 # Where the artifacts will come from. This stage is read-only in both cases: the
 # download itself happens in the install stage (release.yml), so a --check run on a
 # machine that has not deployed yet does not stop here.

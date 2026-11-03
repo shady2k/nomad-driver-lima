@@ -65,7 +65,7 @@ def check_user_install(prefix, version, user):
     settings_path = release / "host_volume_plugins" / "box-volume.json"
     settings = read_json(settings_path)
     require(settings["runtime_user"] == user, f"{settings_path} runs the volumes as {settings['runtime_user']}")
-    require(settings["lima_home"] == str(prefix / "user-node" / "lima"), f"{settings_path} has lima_home {settings['lima_home']}")
+    require(settings["lima_home"] == str(prefix / "s" / "lima"), f"{settings_path} has lima_home {settings['lima_home']}")
     require(mode_of(settings_path) == 0o644, f"{settings_path} is {oct(mode_of(settings_path))}, not 0644")
 
     # The client configuration the role rendered for this Mac.
