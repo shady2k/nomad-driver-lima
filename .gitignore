@@ -5,6 +5,10 @@
 __pycache__/
 *.pyc
 
+# the image recipe's own outputs: the built image and its work directory
+/out/
+/.images/
+
 # local integration runs
 /.integration/
 /.integration-root/

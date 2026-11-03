@@ -1,0 +1,17 @@
+# Lima template that boots a published box image exactly the way the box driver
+# does: qemu, no host mounts, no containerd, cloud-init enabled and no
+# provision step. images/verify.sh uses it to prove that the image published as
+# 'image { url, sha256 }' boots and passes images/guest-checks.sh.
+minimumLimaVersion: 2.0.0
+vmType: qemu
+arch: __LIMA_ARCH__
+images:
+- location: __IMAGE_PATH__
+  arch: __LIMA_ARCH__
+cpus: 2
+memory: 2GiB
+disk: 20GiB
+mounts: []
+containerd:
+  system: false
+  user: false

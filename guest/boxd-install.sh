@@ -1,9 +1,10 @@
 #!/bin/sh
 # boxd-install.sh: put the boxd daemon and the boxctl client into a box image.
 #
-# This is the operator's tool. This repository builds no image: an image is the
-# operator's own, and this script is how boxd gets into it -- into an image being
-# built, or into a guest that is already running. It copies one binary to
+# This is the operator's tool. An image is the operator's own -- built from the
+# recipe in images/, or written by hand against docs/guest-image.md -- and this
+# script is how boxd gets into it: into an image being built, or into a guest that
+# is already running. It copies one binary to
 # /usr/local/bin/boxd, links /usr/local/bin/boxctl to it (the binary dispatches
 # on argv[0]), installs /etc/systemd/system/boxd.service, creates the state and
 # runtime directories, and either starts the service (when this runs inside a

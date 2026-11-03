@@ -1,0 +1,38 @@
+# Lima template for the box base-image builder.
+#
+# images/build.sh fills in the __PLACEHOLDER__ values and starts this instance
+# once per image. The template deliberately differs from the runtime box only in
+# what the build needs: more CPUs and memory for the package installs, and a
+# provision script. Everything else (qemu, no host mounts, cloud-init) matches
+# what the box driver uses, so a build here boots the same way as a box.
+minimumLimaVersion: 2.2.0
+vmType: qemu
+arch: __LIMA_ARCH__
+images:
+- location: __IMAGE_PATH__
+  arch: __LIMA_ARCH__
+cpus: __CPUS__
+memory: __MEMORY__
+disk: __DISK__
+mounts: []
+plain: false
+containerd:
+  system: false
+  user: false
+user:
+  # A generic build account, never the account of whoever ran the build: the
+  # default is the host user's name, which must not reach the image. Lima gives
+  # every user it creates passwordless sudo. The uid is above the range cloud-init
+  # uses for the account it creates on the box's first boot, so the build account
+  # can never collide with it; images/build.sh deletes the account before capture.
+  name: builder
+  comment: box image builder
+  shell: /bin/bash
+  uid: 1001
+ssh:
+  forwardAgent: false
+  loadDotSSHPubKeys: false
+propagateProxyEnv: false
+provision:
+- mode: system
+  file: __PROVISION__
