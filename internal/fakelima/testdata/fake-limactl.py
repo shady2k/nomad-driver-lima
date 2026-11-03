@@ -107,7 +107,7 @@ def main():
         d = instance_dir(name)
         os.makedirs(d, exist_ok=True)
         shutil.copyfile(yaml_path, os.path.join(d, "lima.yaml"))
-        cpus, memory, disk = 0, 0, 0
+        cpus, memory, disk, vm_type = 0, 0, 0, "qemu"
         with open(yaml_path) as f:
             for line in f:
                 key, _, value = line.strip().partition(":")
@@ -118,6 +118,8 @@ def main():
                     memory = size_bytes(value)
                 elif key == "disk":
                     disk = size_bytes(value)
+                elif key == "vmType":
+                    vm_type = value
         with open(os.path.join(d, "disk"), "w") as f:
             f.write("FRESH-DISK")
         with open(os.path.join(d, "lima-version"), "w") as f:
@@ -127,7 +129,7 @@ def main():
             "cpus": cpus,
             "memory": memory,
             "disk": disk,
-            "vmType": "qemu",
+            "vmType": vm_type,
         }
         save_state(state)
         return 0
@@ -144,7 +146,8 @@ def main():
         inst["status"] = mode.get("start_status", "Running")
         inst["driverPID"] = mode.get("driver_pid", os.getppid())
         inst["hostAgentPID"] = mode.get("hostagent_pid", os.getppid())
-        with open(os.path.join(instance_dir(name), "qemu.pid"), "w") as f:
+        # lima names the driver's pid file after the VM type: qemu.pid, vz.pid
+        with open(os.path.join(instance_dir(name), inst.get("vmType", "qemu") + ".pid"), "w") as f:
             f.write(str(inst["driverPID"]))
         with open(os.path.join(instance_dir(name), "ha.pid"), "w") as f:
             f.write(str(inst["hostAgentPID"]))
@@ -166,7 +169,7 @@ def main():
         inst["hostAgentPID"] = 0
         save_state(state)
         # lima removes its pid files when the instance stops
-        for name in ("qemu.pid", "ha.pid"):
+        for name in ("qemu.pid", "vz.pid", "ha.pid"):
             try:
                 os.unlink(os.path.join(instance_dir(name_of(args)), name))
             except FileNotFoundError:

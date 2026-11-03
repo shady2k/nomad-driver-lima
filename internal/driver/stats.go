@@ -12,6 +12,8 @@ import (
 	"github.com/hashicorp/nomad/client/lib/cpustats"
 	cstructs "github.com/hashicorp/nomad/client/structs"
 	"github.com/hashicorp/nomad/plugins/drivers"
+
+	"github.com/shady2k/nomad-driver-lima/internal/box"
 )
 
 // taskStats turns the resource usage of the VM processes into a Nomad sample.
@@ -73,18 +75,21 @@ func (t *taskStats) sample(compute cpustats.Compute, pids []int) (*drivers.TaskR
 
 // vmPIDs returns the pids of the processes that make up the box: the qemu (or
 // vz) driver process and the lima hostagent. Lima writes both pid files into the
-// instance directory, so this needs no limactl call.
+// instance directory, so this needs no limactl call. With vz the driver pid is
+// the hostagent's own, and it is counted once.
 func vmPIDs(instanceDir string) []int {
 	var pids []int
-	for _, name := range []string{"qemu.pid", "ha.pid"} {
+	seen := map[int]bool{}
+	for _, name := range []string{box.DriverPIDFile(box.VMTypeQEMU), box.DriverPIDFile(box.VMTypeVZ), "ha.pid"} {
 		data, err := os.ReadFile(filepath.Join(instanceDir, name))
 		if err != nil {
 			continue
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		if err != nil || pid <= 0 {
+		if err != nil || pid <= 0 || seen[pid] {
 			continue
 		}
+		seen[pid] = true
 		pids = append(pids, pid)
 	}
 	return pids

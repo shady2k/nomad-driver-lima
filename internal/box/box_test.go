@@ -602,3 +602,27 @@ func TestStartWithoutTheMemoryLimitNeedsTheOperatorSwitch(t *testing.T) {
 	require.Contains(t, strings.Join(*events, "\n"), `memory_limit is "off"`)
 	require.True(t, f.HasCall(t, "start --tty=false box1"))
 }
+
+// TestLivenessReadsThePIDFileOfItsVMType: lima writes vz.pid, not qemu.pid, for
+// a VZ box, and a box that looked only for qemu.pid took a running VZ VM for a
+// dead one.
+func TestLivenessReadsThePIDFileOfItsVMType(t *testing.T) {
+	for _, vmType := range []string{VMTypeQEMU, VMTypeVZ} {
+		t.Run(vmType, func(t *testing.T) {
+			f := fakelima.New(t)
+			m := newTestManager(t, f)
+			spec := testSpec(t, volumeDir(t))
+			spec.VMType = vmType
+			b, err := m.Box(spec, nil)
+			require.NoError(t, err)
+			_, err = b.Ensure(context.Background())
+			require.NoError(t, err)
+
+			require.FileExists(t, filepath.Join(b.InstanceDir(), vmType+".pid"))
+			live := b.Liveness()
+			require.True(t, live.Known)
+			require.True(t, live.DriverAlive, "the VM process of a running %s box is alive", vmType)
+			require.True(t, live.HostAgentAlive)
+		})
+	}
+}

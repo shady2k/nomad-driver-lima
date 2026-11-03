@@ -652,7 +652,7 @@ type Liveness struct {
 func (b *Box) Liveness() Liveness {
 	var l Liveness
 	dir := b.InstanceDir()
-	if pid, err := readPIDFile(filepath.Join(dir, "qemu.pid")); err == nil {
+	if pid, err := readPIDFile(filepath.Join(dir, DriverPIDFile(b.spec.VMType))); err == nil {
 		l.DriverPID = pid
 		l.DriverAlive = processAlive(pid)
 		l.Known = true
@@ -663,6 +663,16 @@ func (b *Box) Liveness() Liveness {
 		l.Known = true
 	}
 	return l
+}
+
+// DriverPIDFile is the pid file Lima writes for the VM of the given type:
+// qemu.pid for the qemu process, vz.pid for the hostagent that runs the VZ VM
+// in-process.
+func DriverPIDFile(vmType string) string {
+	if vmType == "" {
+		vmType = DefaultVMType()
+	}
+	return vmType + ".pid"
 }
 
 func readPIDFile(path string) (int, error) {

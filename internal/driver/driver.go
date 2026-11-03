@@ -563,7 +563,7 @@ func (d *Driver) startWatcher(h *taskHandle, b *box.Box) {
 					continue
 				}
 				d.stopGuestLogs(h)
-				reason := "its qemu process is gone"
+				reason := "its VM process is gone"
 				if live.DriverAlive && !live.HostAgentAlive {
 					reason = "its lima hostagent is gone"
 				}
