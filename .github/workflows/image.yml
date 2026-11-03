@@ -39,8 +39,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: image-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # One run per image version: a second version builds alongside, and only a
+  # newer push to the same pull request replaces a run in progress.
+  group: image-${{ inputs.version || github.event.release.tag_name || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Pinned, with the digest from the project's own SHA256SUMS.
@@ -110,9 +112,18 @@ jobs:
 
       - name: Make room
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup
+          sudo docker image prune -af >/dev/null 2>&1 || true
           sudo apt-get clean
           df -h /
+          # A box disk is 8 GiB and the driver refuses a node with less free:
+          # say so here rather than as a capacity error deep in a test.
+          free_mib=$(df -m --output=avail / | tail -1 | tr -d ' ')
+          if (( free_mib < 12288 )); then
+            echo "::error::only ${free_mib} MiB free on / after the cleanup; the run needs 12 GiB"
+            exit 1
+          fi
 
       # GitHub's documented way to give an unprivileged user /dev/kvm. A runner
       # without KVM is not fatal: qemu runs the guest with TCG then, which is
