@@ -44,8 +44,10 @@
 #   --provider NAME      the provider id, e.g. myprovider (its credential
 #                        must be in auth.json: run `prime-agent` and /login once)
 #   --base-url URL       its OpenAI-compatible base URL, e.g. https://llm.example/v1
-#   --model ID           a model of that provider; repeatable. Without it the
-#                        script asks <base-url>/models with the credential.
+#   --model ID           a model of that provider; repeatable. Without it: the
+#                        models of this host's own definition of the provider
+#                        in models.json, else <base-url>/models asked with the
+#                        credential.
 #   --no-opencode        stage prime only
 #
 # Then:
@@ -73,7 +75,7 @@ while (($# > 0)); do
     --base-url) (($# >= 2)) || die "--base-url needs a URL"; base_url=$2; shift 2 ;;
     --model) (($# >= 2)) || die "--model needs a model id"; models+=("$2"); shift 2 ;;
     --no-opencode) with_opencode=false; shift ;;
-    -h | --help) sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
 done
@@ -133,8 +135,27 @@ print(f"prime        auth.json: one credential for {provider} ({', '.join(keys_o
 
 env_name = re.sub(r"[^A-Z0-9]+", "_", provider.upper()).strip("_") + "_API_KEY"
 
+# This host's own definition of the provider, when it has one: its models carry
+# what prime-agent needs to use them well (reasoning, input, contextWindow,
+# maxTokens, cost, compat), and the provider may carry compat and headers.
+source_models = os.path.join(prime_dir, "models.json")
+doc = {"providers": {}}
+if os.path.isfile(source_models):
+    try:
+        doc = json.load(open(source_models))
+    except ValueError:
+        doc = {"providers": {}}
+if not isinstance(doc, dict):
+    doc = {"providers": {}}
+source_def = (doc.get("providers") or {}).get(provider) if isinstance(doc.get("providers"), dict) else None
+if not isinstance(source_def, dict):
+    source_def = {}
+source_entries = {m["id"]: m for m in source_def.get("models") or [] if isinstance(m, dict) and m.get("id")}
+
 if wanted_models:
     model_ids = wanted_models
+elif source_entries:
+    model_ids = list(source_entries)
 else:
     # Ask the provider which models it serves, with the credential, and never
     # print the answer's headers.
@@ -150,31 +171,25 @@ else:
 
 # The provider definition prime-agent reads (0.9.8 and 0.10.2). The rest of the
 # source document (schema and so on) is kept; every other provider is dropped.
+# This host's definition is kept whole, with its models' fields; only the base
+# URL and the key's variable are set here, and a model it does not describe
+# gets an id and a name.
 models_path = os.path.join(out, "prime", "models.json")
-doc = {"providers": {}}
-source_models = os.path.join(prime_dir, "models.json")
-if os.path.isfile(source_models):
-    try:
-        doc = json.load(open(source_models))
-    except ValueError:
-        doc = {"providers": {}}
-if not isinstance(doc, dict):
-    doc = {"providers": {}}
 dropped = [name for name in keys_of(doc.get("providers")) if name != provider]
-doc["providers"] = {
-    provider: {
-        "baseUrl": base_url,
-        "api": "openai-completions",
-        "authHeader": True,
-        "apiKey": env_name,
-        "models": [{"id": model, "name": model} for model in model_ids],
-    }
-}
+definition = dict(source_def)
+definition.setdefault("api", "openai-completions")
+definition.setdefault("authHeader", True)
+definition["baseUrl"] = base_url
+definition["apiKey"] = env_name
+definition["models"] = [source_entries.get(model, {"id": model, "name": model}) for model in model_ids]
+doc["providers"] = {provider: definition}
+described = sum(1 for model in model_ids if model in source_entries)
 with open(models_path, "w") as f:
     json.dump(doc, f, indent=2)
     f.write("\n")
 os.chmod(models_path, 0o600)
-print(f"prime        models.json: {provider} at {base_url}, {len(model_ids)} model(s)"
+print(f"prime        models.json: {provider} at {base_url}, {len(model_ids)} model(s), "
+      f"{described} with this host's own description"
       + (f"; dropped the definition(s) of {', '.join(dropped)}" if dropped else ""))
 
 # settings.json without `packages`: a git package cannot travel in a 64 KiB
