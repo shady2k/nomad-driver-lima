@@ -182,7 +182,8 @@ build_one() {
 		rm -f -- "$tmp"
 		die "go build failed for $name"
 	fi
-	chmod 0755 -- "$tmp"
+	# No "--": BSD chmod and install (macOS) take it for a file name.
+	chmod 0755 "$tmp"
 	mv -f -- "$tmp" "$out_dir/$name"
 	built+=("$name")
 }
@@ -202,14 +203,19 @@ done
 # The operator's installer goes next to the guest binaries it looks for
 # (boxd_linux_$arch), so an image build needs nothing else from this repository.
 printf 'including %s\n' boxd-install.sh
-install -m 0755 -- "$repo_root/guest/boxd-install.sh" "$out_dir/boxd-install.sh"
+install -m 0755 "$repo_root/guest/boxd-install.sh" "$out_dir/boxd-install.sh"
 built+=("boxd-install.sh")
 
 # SHA256SUMS covers exactly the artifacts in this directory, in name order.
 (
 	cd -- "$out_dir" || exit 1
 	rm -f -- SHA256SUMS
-	sha256sum -- "${built[@]}" >SHA256SUMS
+	# macOS has shasum, not always sha256sum; both write "<digest>  <name>".
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum -- "${built[@]}" >SHA256SUMS
+	else
+		shasum -a 256 -- "${built[@]}" >SHA256SUMS
+	fi
 ) || die "cannot write $out_dir/SHA256SUMS"
 
 printf '\nbuilt version %s\n' "$version"
