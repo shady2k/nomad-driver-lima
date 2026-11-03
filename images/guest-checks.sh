@@ -334,11 +334,16 @@ check_none "the credential is nowhere on the disk" "$DISK_HITS"
 # --- a rotation reaches boxd --------------------------------------------------
 printf '\n== a credential rotation\n'
 ROTATED_TOKEN="box-check-rotated-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+# The rotated file keeps the old one's mtime: a re-render can land within the
+# same timestamp, and boxd must follow the content, not the time.
+touch -r "$SECRETS/prime/env" "$SECRETS/.env.mtime"
 cat > "$SECRETS/prime/env" <<EOF
 # the same credential, rotated: boxctl reload must pick this up
 BOX_CHECK_TOKEN=$ROTATED_TOKEN
 EOF
 chmod 0600 "$SECRETS/prime/env"
+touch -r "$SECRETS/.env.mtime" "$SECRETS/prime/env"
+rm -f "$SECRETS/.env.mtime"
 RELOAD2=$(boxctl reload 2>&1)
 RELOAD2_PRIME=$(python3 - "$RELOAD2" 2>/dev/null <<'PY'
 import json, sys
@@ -352,7 +357,7 @@ print("prime configured" if "prime" in configured else f"configured {configured}
 PY
 )
 check "boxd reports the executor configured after the rotation" "prime configured" "$RELOAD2_PRIME"
-check "boxd picked up the rotated credential" "$ROTATED_TOKEN" \
+check "boxd picked up the rotated credential (same mtime as the old one)" "$ROTATED_TOKEN" \
   "$(sed -n 's/^BOX_CHECK_TOKEN=//p' "$RUNTIME_ENV" 2>/dev/null | head -1)"
 
 # Leave nothing behind: the box is thrown away, but a check that cleans up after

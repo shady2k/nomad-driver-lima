@@ -305,3 +305,88 @@ func TestExecutorHomesExistWithoutCredentials(t *testing.T) {
 		t.Fatalf("prime's HOME must be on the tmpfs, got %q", home)
 	}
 }
+
+// TestCopyTreeFollowsContentNotTime is a rotation the way a template renders
+// it: the new credential may carry the very mtime of the old one, and it must
+// still reach the executor.
+func TestCopyTreeFollowsContentNotTime(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "secrets")
+	dst := filepath.Join(t.TempDir(), "prime")
+	require := func(cond bool, format string, args ...any) {
+		t.Helper()
+		if !cond {
+			t.Fatalf(format, args...)
+		}
+	}
+	write := func(path, content string, mtime time.Time) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(path string) string {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	stamp := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	write(filepath.Join(src, "auth.json"), "one", stamp)
+	write(filepath.Join(src, "sub", "env"), "A=1", stamp)
+	if err := copyTree(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	require(read(filepath.Join(dst, "auth.json")) == "one", "first copy")
+	require(read(filepath.Join(dst, "sub", "env")) == "A=1", "first copy of a nested file")
+
+	// The same mtime, other content: copied.
+	write(filepath.Join(src, "auth.json"), "two", stamp)
+	if err := copyTree(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	require(read(filepath.Join(dst, "auth.json")) == "two", "a rotation with the same mtime must reach the copy, got %q", read(filepath.Join(dst, "auth.json")))
+
+	// The executor rewrites its copy (a refreshed token) and the source stays:
+	// the executor's version is kept, whatever the times say.
+	write(filepath.Join(dst, "auth.json"), "refreshed-by-executor", stamp.Add(-time.Hour))
+	write(filepath.Join(dst, "state.json"), "executor's own", stamp)
+	if err := copyTree(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	require(read(filepath.Join(dst, "auth.json")) == "refreshed-by-executor", "an unchanged source must not overwrite the executor's file")
+
+	// A file gone from the source goes from the copy; the executor's own stays.
+	if err := os.Remove(filepath.Join(src, "sub", "env")); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyTree(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	_, err := os.Stat(filepath.Join(dst, "sub", "env"))
+	require(os.IsNotExist(err), "a credential removed from the source must be removed from the copy: %v", err)
+	require(read(filepath.Join(dst, "state.json")) == "executor's own", "a file the executor created must be kept")
+
+	// A copy that disappeared is restored even though the source did not change.
+	if err := os.Remove(filepath.Join(dst, "auth.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyTree(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	require(read(filepath.Join(dst, "auth.json")) == "two", "a missing copy must be restored")
+
+	info, err := os.Stat(filepath.Join(dst, "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	require(info.Mode().Perm() == 0o600, "a credential copy must be 0600, got %v", info.Mode().Perm())
+}

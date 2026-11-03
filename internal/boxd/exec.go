@@ -3,9 +3,12 @@ package boxd
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -464,43 +467,98 @@ func fileExists(p string) bool {
 	return err == nil && st.Mode().IsRegular()
 }
 
-// copyTree copies a small directory tree (config files only) with owner-only
-// permissions on everything it creates. A file the guest already has and that is
-// not older than the source is left alone: the executor writes its own state into
-// the same directory, and a box that gets new credentials keeps them.
+// copyTree brings a small directory tree of credentials (config files only)
+// into the executor's runtime directory, with owner-only permissions on
+// everything it creates.
+//
+// What decides a copy is the content of the source, not its time: a rotated
+// credential may well carry the same mtime as the one it replaces. The sha256 of
+// every file copied last time is kept next to dst (dst + ".synced.json", on the
+// same tmpfs), and a file is copied again only when its source content changed
+// or the copy is gone. A file whose source did not change is left alone, because
+// the executor writes its own state (a refreshed token, say) into the same
+// directory. A file that was copied before and is gone from the source is
+// removed; files the executor created itself are never touched.
 func copyTree(src, dst string) error {
 	if err := os.MkdirAll(dst, 0o700); err != nil {
 		return err
 	}
-	ents, err := os.ReadDir(src)
+	manifest := dst + ".synced.json"
+	synced := map[string]string{}
+	if b, err := os.ReadFile(manifest); err == nil {
+		// A manifest that does not parse means nothing is known: copy everything.
+		_ = json.Unmarshal(b, &synced)
+	}
+	current := map[string]string{}
+	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		if !d.Type().IsRegular() {
+			// Nomad renders regular files; anything else is not a credential.
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(b)
+		digest := hex.EncodeToString(sum[:])
+		current[rel] = digest
+		if synced[rel] == digest && fileExists(target) {
+			return nil
+		}
+		return writeFileAtomic(target, b, 0o600)
+	})
 	if err != nil {
 		return err
 	}
-	for _, e := range ents {
-		s := filepath.Join(src, e.Name())
-		d := filepath.Join(dst, e.Name())
-		if e.IsDir() {
-			if err := copyTree(s, d); err != nil {
-				return err
-			}
+	for rel := range synced {
+		if _, ok := current[rel]; ok {
 			continue
 		}
-		srcInfo, err := os.Stat(s)
-		if err != nil {
-			return err
-		}
-		if dstInfo, err := os.Stat(d); err == nil && !srcInfo.ModTime().After(dstInfo.ModTime()) {
-			continue
-		}
-		b, err := os.ReadFile(s)
-		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(d, b, 0o600); err != nil {
+		if err := os.Remove(filepath.Join(dst, rel)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
-	return nil
+	b, err := json.Marshal(current)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(manifest, b, 0o600)
+}
+
+// writeFileAtomic replaces path with data in one rename, so an executor that
+// reads the file while a reload runs sees the old content or the new one.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	_, werr := tmp.Write(data)
+	cerr := tmp.Close()
+	if werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(name, perm)
+	}
+	if werr == nil {
+		werr = os.Rename(name, path)
+	}
+	if werr != nil {
+		_ = os.Remove(name)
+	}
+	return werr
 }
 
 // modelOption applies the requested model through the ACP config option when an
