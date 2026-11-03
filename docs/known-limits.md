@@ -14,7 +14,7 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   `launchctl bootstrap` in the system domain, a `kickstart -k` that leaves a box
   alive, `plutil -lint` and `vz` itself have never been exercised. Closing it
   needs a Mac.
-- **arm64 has no end-to-end test.** `boxd` cross-builds for `linux/arm64` in
+- **arm64 has no end-to-end test.** `box-driver`, `box-volume` and `boxd` cross-build for `linux/arm64` in
   every release, but no driver or CLI suite has run a box on arm64.
 - **NixOS is refused by the client role.** The role writes `/etc/nomad.d`, which
   on NixOS is lost at the next `nixos-rebuild switch`, so the play stops unless

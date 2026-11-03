@@ -45,18 +45,18 @@ Where a role only needs a minimum, that minimum is named.
   `nomad_server_block` (`deploy/README.md`, "The Nomad servers"). HashiCorp's own
   install guide: <https://developer.hashicorp.com/nomad/docs/install>.
 
-### Linux nodes — amd64
+### Linux nodes — amd64 or arm64
 
 The nodes run boxes. Each needs, before `site.yml` touches it:
 
 | what | why, and where it is checked |
 | --- | --- |
-| **amd64** Linux | the published release carries `box-driver_linux_amd64` and `box-volume_linux_amd64` (`deploy/build.sh`). An arm64 Linux node needs a build of your own (`box_release_source: local`) and qemu for that architecture (`qemu-system-arm`, `qemu-utils`, `qemu-efi-aarch64` — the set the arm64 image build installs). |
+| **amd64 or arm64** Linux | the published release carries `box-driver_linux_<arch>` and `box-volume_linux_<arch>` for both (`deploy/build.sh`); the role picks the node's own. arm64 is built and its qemu set is the one the arm64 image build uses, but no arm64 Linux node has run boxes in CI (`docs/known-limits.md`). |
 | **`/dev/kvm`** | it is a qemu VM: hardware virtualisation on, the `kvm` module loaded, and the node not itself a VM without nested virtualisation. `box_node` preflight requires the device and read/write access for the runtime user. |
 | **cgroup v2, systemd, and a user manager for the runtime user** | the memory cap of a box is a transient *user* scope (`memory.max`, `memory.swap.max=0`). `box_node` enables linger (`loginctl enable-linger`), starts `user@<uid>.service`, and proves that `systemd-run --user` starts a scope; it stops the play if it cannot. `box_cgroup_enabled: false` installs anyway and accepts uncapped memory. |
 | **an unprivileged local user** | Lima refuses to run as root, and the client runs as root, so the driver starts every `limactl`, qemu and `systemd-run` child as this user (`box_runtime_user`, for example `dev`). The role adds it to the `kvm` group (when the node has that group), gives it the Lima home and the image cache — it does **not** create the user. |
 | **lima 2.2 or newer** | `box_min_lima: '2.2'`; measured with 2.2.0. `box_limactl` names the binary (default `/usr/local/bin/limactl`). |
-| **qemu and its firmware** | `qemu-system-x86_64` on `PATH` (`box_qemu_binary`). The distribution packages are `qemu-system-x86 qemu-utils ovmf` (`box_qemu_packages`); `ovmf` is the UEFI firmware lima boots an x86_64 guest with. `box_install_deps: true` installs those three, and lima from `box_lima_tarball_url`/`box_lima_tarball_sha256` when you name them; it is **off** by default. |
+| **qemu and its firmware** | `qemu-system-x86_64`, or `qemu-system-aarch64` on arm64, on `PATH` (`box_qemu_binary`). The distribution packages are `qemu-system-x86 qemu-utils ovmf` on amd64 and `qemu-system-arm qemu-utils qemu-efi-aarch64 ipxe-qemu` on arm64 (`box_qemu_packages`); `ovmf`/`qemu-efi-aarch64` are the UEFI firmware lima boots the guest with, and `ipxe-qemu` carries the network card ROM qemu-system-arm needs. `box_install_deps: true` installs that set, and lima from `box_lima_tarball_url`/`box_lima_tarball_sha256` when you name them; it is **off** by default. |
 | **disk** | a box's disk lives on a Nomad volume (`nomad_host_volumes_dir`, default `/opt/nomad/volumes`), and the base image is cached in `box_image_cache_dir` (default `/var/lib/box/images`). `box_node` requires `box_disk_free_floor_mib` (2048) MiB free on the filesystem of `box_lima_home` and warns below `box_disk_free_warn_mib` (10240). Size it for every box disk plus one image. |
 
 `box_node` and `nomad_client` also install the Nomad client itself: the node

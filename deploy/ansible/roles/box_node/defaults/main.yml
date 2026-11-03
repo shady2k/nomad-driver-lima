@@ -138,7 +138,7 @@ box_runtime_group: '{{ box_runtime_user }}'
 
 # ------------------------------------------------------------------ prerequisites
 box_limactl: /usr/local/bin/limactl
-box_qemu_binary: qemu-system-x86_64
+box_qemu_binary: "{{ 'qemu-system-aarch64' if box_arch == 'arm64' else 'qemu-system-x86_64' }}"
 box_min_lima: '2.2'
 box_disk_free_floor_mib: 2048
 box_disk_free_warn_mib: 10240
@@ -149,10 +149,13 @@ box_disk_free_warn_mib: 10240
 # (Debian/Ubuntu) and lima from a pinned upstream tarball that you must name.
 box_install_deps: false
 # ovmf is the UEFI firmware lima boots an x86_64 guest with.
-box_qemu_packages:
-  - qemu-system-x86
-  - qemu-utils
-  - ovmf
+box_qemu_packages: "{{ box_qemu_packages_by_arch[box_arch] }}"
+# The UEFI firmware lima boots the guest with is a separate package on both
+# architectures: ovmf on x86_64, qemu-efi-aarch64 on arm64, where the network
+# card ROMs (ipxe-qemu) are a separate package too.
+box_qemu_packages_by_arch:
+  amd64: [qemu-system-x86, qemu-utils, ovmf]
+  arm64: [qemu-system-arm, qemu-utils, qemu-efi-aarch64, ipxe-qemu]
 box_lima_tarball_url: ''
 box_lima_tarball_sha256: ''
 box_lima_prefix: /opt/lima

@@ -142,7 +142,7 @@ targets=(
 	'linux amd64'
 )
 if [[ $linux_only == false ]]; then
-	targets+=('darwin arm64')
+	targets+=('linux arm64' 'darwin arm64')
 fi
 
 # The guest binary. boxd is never installed on a node: a box runs the boxd of
