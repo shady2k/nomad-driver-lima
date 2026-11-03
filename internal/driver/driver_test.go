@@ -473,6 +473,24 @@ func TestConfigSpecOffersRuntimeUser(t *testing.T) {
 	require.Contains(t, obj.Object.Attributes, "memory_limit")
 }
 
+// TestConfigSpecLeavesPlatformDefaultsToValidate keeps a platform-dependent
+// default out of the HCL schema: Nomad fills a schema default in before the
+// driver sees the block, so a literal "enforce" there made a macOS node without
+// memory_limit refuse the plugin instead of getting "off".
+func TestConfigSpecLeavesPlatformDefaultsToValidate(t *testing.T) {
+	obj, ok := configSpec.Block.(*hclspec.Spec_Object)
+	require.True(t, ok, "the plugin config is an object spec")
+	for _, key := range []string{"memory_limit", "vm_type"} {
+		def := obj.Object.Attributes[key].GetDefault()
+		require.NotNil(t, def, key)
+		require.Equal(t, `""`, def.GetDefault().GetLiteral().GetValue(), key)
+	}
+
+	c := Config{}
+	require.NoError(t, c.validate())
+	require.Equal(t, box.DefaultMemoryLimit(), c.MemoryLimit)
+}
+
 // TestFingerprintReportsMissingRuntimeUser checks the root case: the plugin
 // loads, and the fingerprint says in plain words what has to be set.
 func TestFingerprintReportsMissingRuntimeUser(t *testing.T) {

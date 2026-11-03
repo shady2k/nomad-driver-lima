@@ -84,9 +84,11 @@ var configSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 		hclspec.NewAttr("memory_overhead_mib", "number", false),
 		hclspec.NewLiteral(fmt.Sprintf("%d", box.DefaultMemoryOverheadMiB)),
 	),
+	// Empty, not "enforce": validate picks the platform's default, and a
+	// literal here would refuse every macOS node that leaves the key out.
 	"memory_limit": hclspec.NewDefault(
 		hclspec.NewAttr("memory_limit", "string", false),
-		hclspec.NewLiteral(`"enforce"`),
+		hclspec.NewLiteral(`""`),
 	),
 	"vm_type": hclspec.NewDefault(
 		hclspec.NewAttr("vm_type", "string", false),
