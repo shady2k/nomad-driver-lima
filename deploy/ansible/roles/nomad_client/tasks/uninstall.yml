@@ -43,16 +43,19 @@
     - nomad_system_changes | bool
     - ansible_facts.system == 'Darwin'
 
+# The service files are the ones of this platform: a Linux host has a unit and an
+# environment file, a Mac has a plist, and neither removes the other's. The
+# configuration files are the same on both.
 - name: Uninstall | Remove the service and the configuration this role wrote
   ansible.builtin.file:
     path: '{{ item }}'
     state: absent
-  loop:
-    - '{{ nomad_unit_path }}'
-    - '{{ nomad_launchd_plist }}'
-    - '{{ nomad_base_config_file }}'
-    - '{{ nomad_box_config_file }}'
-    - '{{ nomad_env_file }}'
+  loop: >-
+    {{ [nomad_base_config_file, nomad_box_config_file]
+       + ([nomad_unit_path, nomad_env_file] if ansible_facts.system == 'Linux'
+          else [nomad_launchd_plist]) }}
+  loop_control:
+    label: '{{ item }}'
 
 - name: Uninstall | Reload systemd without the unit
   ansible.builtin.systemd_service:
@@ -67,5 +70,7 @@
   ansible.builtin.debug:
     msg:
       - 'removed: the {{ nomad_service_name }} service ({{ nomad_unit_path if ansible_facts.system == "Linux" else nomad_launchd_plist }})'
-      - 'removed: {{ nomad_base_config_file }}, {{ nomad_box_config_file }}, {{ nomad_env_file }}'
+      - >-
+        removed: {{ nomad_base_config_file }}, {{ nomad_box_config_file }}
+        {{ (", " ~ nomad_env_file) if ansible_facts.system == 'Linux' else '' }}
       - 'kept: {{ nomad_data_dir }} (the node ID and its state), {{ nomad_host_volumes_dir }} (the box disks), and the binary at {{ nomad_binary }}'
