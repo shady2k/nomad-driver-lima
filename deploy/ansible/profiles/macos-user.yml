@@ -27,7 +27,7 @@ ansible_become: false
 # checks both lengths.
 nomad_user_root: '{{ ansible_facts.user_dir }}/Library/Application Support/box'
 nomad_user_short_root: '{{ ansible_facts.user_dir }}/.box'
-box_release_root: '{{ nomad_user_root }}/releases'
+box_release_root: '{{ nomad_user_root }}/box'
 box_lima_home: '{{ nomad_user_short_root }}/lima'
 box_image_cache_dir: '{{ nomad_user_root }}/images'
 box_plugin_owner: '{{ ansible_facts.user_id }}'

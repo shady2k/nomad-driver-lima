@@ -57,8 +57,8 @@ def check_user_install(prefix, version, user):
     require(mode_of(prefix / "LaunchAgents") == 0o711,
             f"{prefix}/LaunchAgents is {oct(mode_of(prefix / 'LaunchAgents'))}, not the 0711 the fixture gave it")
 
-    release = prefix / "user-node" / "releases" / version
-    require(os.path.samefile(prefix / "user-node" / "releases" / "current", release),
+    release = prefix / "user-node" / "box" / "releases" / version
+    require(os.path.samefile(prefix / "user-node" / "box" / "current", release),
             f"{release} is not what the current symlink points at")
 
     # The volume plugin reads its three settings from the file beside its binary.
@@ -76,7 +76,7 @@ def check_user_install(prefix, version, user):
             f"the plugin block has memory_limit {box['memory_limit']}: macOS has no cgroup v2, so it is off")
     require(not pathlib.Path(box["limactl"]).is_absolute() or str(prefix) in box["limactl"],
             f"the plugin block runs {box['limactl']}, which is not the stub inside {prefix}")
-    require(config["client"]["host_volume_plugin_dir"] == str(prefix / "user-node" / "releases" / "current" / "host_volume_plugins"),
+    require(config["client"]["host_volume_plugin_dir"] == str(prefix / "user-node" / "box" / "current" / "host_volume_plugins"),
             f"host_volume_plugin_dir is {config['client']['host_volume_plugin_dir']}, not the live release")
 
 
