@@ -389,6 +389,12 @@ memory and disk; `box images` lists `1.0.0` for the node's architecture.
 ```sh
 box create dev1 --image 1.0.0 --cpus 2 --memory-mib 2048 --disk-gib 16
 box run dev1 -- uname -m
+
+# an agent session inside it (the executor's credentials are step 8's)
+box session new dev1 --executor prime --model <provider>/<model> --title "first run"
+box send dev1 s-7f3a2c "make the tests pass; the repository is in /root/repo"
+box wait dev1 s-7f3a2c --timeout 15m          # returns the moment the turn ends
+
 box stop dev1                                # keep the disk, free the RAM
 box rm dev1 --yes                            # the disk is deleted
 ```
