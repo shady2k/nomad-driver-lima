@@ -50,7 +50,8 @@ jobs:
   image:
     name: ${{ matrix.arch }} image
     runs-on: ${{ matrix.runs-on }}
-    timeout-minutes: 120
+    # arm64 runs under TCG (no /dev/kvm on the arm runners): hours, not minutes.
+    timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
@@ -159,7 +160,7 @@ jobs:
           SOURCE: ${{ steps.image.outputs.source }}
           REF: ${{ steps.image.outputs.ref }}
           ARCH: ${{ matrix.arch }}
-        timeout-minutes: 90
+        timeout-minutes: 240
         run: |
           sudo mkdir -p /tmp/im && sudo chown "$(id -u):$(id -g)" /tmp/im
           case $SOURCE in
@@ -177,7 +178,7 @@ jobs:
         env:
           VERSION: ${{ steps.image.outputs.version }}
           ARCH: ${{ matrix.arch }}
-        timeout-minutes: 45
+        timeout-minutes: 90
         run: |
           IMAGE_PATH=/tmp/im/out/box-base-$VERSION-$ARCH.qcow2 \
           OUT=/tmp/im/out WORK=/tmp/im/work \

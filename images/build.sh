@@ -152,6 +152,10 @@ QEMU_IMG=$(find_qemu_img)
 # limactl finds the emulator as 'qemu-system-<arch>' in PATH, so the directory
 # that holds qemu-img goes in front of PATH for every limactl call.
 QEMU_BIN=$(dirname "$QEMU_IMG")
+# Go is resolved first: the qemu directory may be /usr/bin, whose distribution
+# go is older than the one go.mod asks for and would shadow it.
+GO=${GO:-$(command -v go || true)}
+export GO
 export PATH=$QEMU_BIN:$PATH
 export LIMA_HOME
 mkdir -p "$OUT" "$WORK" "$LIMA_HOME" "$WORK/cache" "$WORK/scripts"

@@ -80,7 +80,7 @@ build_boxd() { # build_boxd <source-tree> <version> <output>
   local ldflags
   ldflags="-s -w -X github.com/shady2k/nomad-driver-lima/internal/version.Version=$version"
   ( cd "$tree" && CGO_ENABLED=0 GOOS=linux GOARCH=$ARCH GOFLAGS='' \
-      go build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$out" ./cmd/boxd ) \
+      "${GO:-go}" build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$out" ./cmd/boxd ) \
     || die "cannot build ./cmd/boxd for linux/$ARCH from $tree"
 }
 
