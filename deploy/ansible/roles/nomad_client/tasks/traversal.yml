@@ -1,0 +1,71 @@
+---
+# A directory the runtime user owns is not enough: it has to be reachable. On a
+# node where /opt/nomad already existed as root:root 0750, this role created the
+# volumes directory correctly, and the first box failed with permission denied -
+# the runtime user could not traverse the parent to reach it.
+#
+# So after the directories exist, this asks the runtime user itself, the way the
+# driver will: `test -x` runs as that user against the host volumes directory and
+# the Lima home (the path a box disk is symlinked from). The failure names the
+# path and the two ways to fix it, and nothing here changes a mode: the data
+# directory keeps whatever the operator gave it.
+#
+# It is a task file of its own because it is the one stage of the install the
+# deploy kit's own checks run on its own (tests/play-traversal.yml).
+
+# Check mode has not created anything, and a directory that is not there yet is
+# not a permission problem: only the paths that exist are asked about.
+- name: Directories | Look for the paths a box reaches through
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  register: nomad_traversal_paths
+  loop:
+    - '{{ nomad_host_volumes_dir }}'
+    - '{{ nomad_box_lima_home }}'
+  loop_control:
+    label: '{{ item }}'
+
+- name: Directories | Remember the paths that are there
+  ansible.builtin.set_fact:
+    nomad_traversal_existing: >-
+      {{ nomad_traversal_paths.results | default([])
+         | selectattr('stat.exists', 'defined') | selectattr('stat.exists')
+         | map(attribute='item') | list }}
+
+- name: Directories | Ask the runtime user whether it can traverse them
+  ansible.builtin.command:
+    argv: ['test', '-x', '{{ item }}']
+  # The user profile connects as the runtime user, and there is nothing to
+  # escalate to.
+  become: '{{ ansible_facts.user_id != nomad_box_runtime_user }}'
+  become_user: '{{ nomad_box_runtime_user }}'
+  register: nomad_traversal
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  loop: '{{ nomad_traversal_existing | default([]) }}'
+  loop_control:
+    label: '{{ item }}'
+  when:
+    - nomad_box_enabled | bool
+    - nomad_box_runtime_user | length > 0
+
+- name: Directories | Require the runtime user to reach them
+  ansible.builtin.assert:
+    that:
+      - item.rc | default(0) == 0
+    fail_msg: >-
+      {{ nomad_box_runtime_user }} cannot traverse {{ item.item }}. The box disks
+      live under {{ nomad_host_volumes_dir }}, the Lima home is
+      {{ nomad_box_lima_home }}, and the driver starts every box as that user, so
+      a box on this node fails with permission denied. One of the ancestors of
+      that path keeps it out - a /opt/nomad that already existed as root:root
+      0750 is the measured case. Fix that ancestor (give it --x for the runtime
+      user or for a group the user is in) or name it in nomad_directory_parents,
+      which this role prepares before the directories below it. Nothing was
+      changed.
+    quiet: true
+  loop: '{{ nomad_traversal.results | default([]) }}'
+  loop_control:
+    label: '{{ item.item }}'
+  when: item.rc is defined

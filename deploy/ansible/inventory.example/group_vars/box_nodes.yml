@@ -54,6 +54,18 @@ nomad_meta:
 # Where Nomad keeps the directories of dynamic host volumes (the box disks).
 # nomad_host_volumes_dir: /opt/nomad/volumes
 
+# An ancestor of those paths that the node already had, and that keeps the runtime
+# user out: the volume directory can be right while /opt/nomad is root:root 0750,
+# and then the first box fails with permission denied. The role applies these
+# before the leaf directories and then checks that the runtime user can pass
+# through them. Fix that directory by hand instead, if you prefer; review the path
+# and the group either way, because a closed parent is a decision about the node.
+# nomad_directory_parents:
+#   - path: '{{ nomad_host_volumes_dir | dirname }}'
+#     owner: '{{ nomad_file_owner }}'
+#     group: '{{ box_runtime_group }}'
+#     mode: '0710'
+
 # Telemetry, for a Prometheus scrape of the node.
 nomad_telemetry:
   prometheus_metrics: true

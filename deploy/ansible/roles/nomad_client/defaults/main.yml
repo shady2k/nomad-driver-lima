@@ -72,6 +72,14 @@ nomad_node_name: '{{ ansible_facts.hostname }}'
 nomad_data_dir: /opt/nomad/data
 # Where Nomad keeps the directories of dynamic host volumes (the box disks).
 nomad_host_volumes_dir: /opt/nomad/volumes
+# The ancestors of the paths the runtime user has to reach, prepared by this role
+# before the leaf directories. Each entry is {path, owner, group, mode}. Empty by
+# default: a parent the node already has is the operator's decision, not this
+# role's, and changing the mode of a shared ancestor without review is how a node
+# closes a directory to the half of its users it forgot about. The case this
+# exists for: /opt/nomad that already existed as root:root 0750, which leaves the
+# runtime user with no way into the volume directories below it.
+nomad_directory_parents: []
 
 nomad_bind_addr: '0.0.0.0'
 # The address the node advertises to the cluster for http, rpc and serf.

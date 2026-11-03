@@ -42,6 +42,8 @@
 #   5c. the coordinator: the CLI as a release and a symlink, the skill for the
 #      Prime Agent, the Claude Code plugin (or the copied skill), and a second run
 #      reporting changed=0
+#   5e. a runtime user that cannot traverse its way to the box disks stops the
+#      install, with the path and nomad_directory_parents in the failure
 #   6. rollback: two releases on the node, a switch between them by one symlink,
 #      and nothing else touched - the configuration, the Lima home, the volumes
 #      and the client's data directory are the same bytes afterwards; a release
@@ -592,6 +594,30 @@ if play "$TESTS_DIR/play-node.yml" >"$TEST_ROOT/apply2.log" 2>&1; then
 else
 	bad 'the second run failed (tests/.test/apply2.log)'
 	tail -20 "$TEST_ROOT/apply2.log"
+fi
+
+# The runtime user has to reach the box disks through every ancestor, and the role
+# now says so instead of letting the first box fail. The fixture is the measured
+# shape: one ancestor of both paths in the prefix, root-owned 0750, with the leaves
+# below it exactly as an install would create them. sudo is needed for the fixture
+# and to remove it again.
+printf -- '-- 5e. a runtime user that cannot reach the box disks stops the install\n'
+export NOMAD_TEST_PREFIX=$TEST_ROOT/traversal
+TV=$NOMAD_TEST_PREFIX
+sudo -n rm -rf -- "$TV" 2>/dev/null
+mkdir -p -- "$TV"
+if play "$TESTS_DIR/play-traversal.yml" >"$TEST_ROOT/traversal.log" 2>&1; then
+	bad 'the traversal check accepted a path the runtime user cannot reach'
+else
+	if grep -qE 'cannot traverse' "$TEST_ROOT/traversal.log" && grep -q 'nomad_directory_parents' "$TEST_ROOT/traversal.log"; then
+		ok 'a path the runtime user cannot traverse is refused, and the failure names it and nomad_directory_parents'
+	else
+		bad 'the refusal does not say which path is unreachable or how to fix the ancestor'
+		tail -20 "$TEST_ROOT/traversal.log"
+	fi
+fi
+if ! sudo -n rm -rf -- "$TV"; then
+	bad "$TV still belongs to root: remove it with: sudo rm -rf $TV"
 fi
 
 # The coordinator, into its own prefix: the CLI is a release and a symlink, and

@@ -206,6 +206,34 @@ box fail (`-e box_runtime_user=dev` is the one variable a run must name).
   directory of the task files (`<lima_home>/_staging`, a name Lima skips), and the
   volume directory.
 
+**Every ancestor of those paths has to let that user in.** A directory the role
+creates can be perfectly right while the path above it is closed: on one node
+`/opt/nomad` already existed as `root:root 0750`, so the volume directory below it
+was created correctly and the first box stopped with permission denied. Once the
+directories exist, the role asks the runtime user itself (`test -x`, the way the
+driver will reach the box disk) about `nomad_host_volumes_dir` and the Lima home,
+and fails the play with the path instead of leaving it to the first box.
+
+Two ways to fix that ancestor:
+
+- change it by hand - give the runtime user's group traversal, `root:<group> 0710`,
+  rather than opening it to everyone;
+- name it in `nomad_directory_parents`, which the role prepares **before** the leaf
+  directories:
+
+```yaml
+# group_vars/box_nodes.yml
+nomad_directory_parents:
+  - path: '{{ nomad_host_volumes_dir | dirname }}'
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ box_runtime_group }}'
+    mode: '0710'
+```
+
+Review the ancestor and the group before you add either; a parent that is closed
+on purpose is a decision about the whole node. The role never changes the mode of
+`nomad_data_dir`, which keeps whatever the operator gave it.
+
 A client that runs as an unprivileged user instead of root works too - point
 `nomad_file_owner`/`box_plugin_owner` at that user - but the volume plugin then has
 no `runtime_user` to give a volume directory to, so keep the two the same.

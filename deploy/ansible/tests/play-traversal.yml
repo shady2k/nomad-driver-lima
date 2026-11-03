@@ -1,0 +1,58 @@
+---
+# The check that stops an install when the runtime user cannot reach the paths a
+# box uses (roles/nomad_client/tasks/traversal.yml).
+#
+# The measured case: /opt/nomad already existed as root:root 0750, so the role
+# created the volume directory correctly and the first box still failed with
+# permission denied - the runtime user could not traverse the parent. This play
+# builds that shape inside the throwaway prefix: a 0750 root-owned ancestor, with
+# the two leaves below it the way an install would create them. The check must
+# then fail, naming the path and nomad_directory_parents; run-tests.sh reads that
+# failure and removes the prefix with sudo afterwards, because the fixture
+# directories belong to root on purpose.
+#
+#   sudo is needed twice: to build the fixture and to remove it.
+- name: The traversal check of the client role
+  hosts: box_nodes
+  # The install stage runs as root (site.yml), and so does this: the fixture is
+  # root-owned, and the role's own lookup has to read a path the runtime user
+  # cannot. Only the check itself drops to the runtime user.
+  become: true
+  gather_facts: true
+  # box_runtime_user and box_runtime_group come from vars-test.yml and the command
+  # line, the way run-tests.sh passes them to the other plays: this play runs one
+  # task file of a role, not the role's preflight.
+  vars_files:
+    - vars-test.yml
+  tasks:
+    - name: Make the shared ancestor of the two paths root-only
+      ansible.builtin.file:
+        path: '{{ box_lima_home | dirname }}'
+        state: directory
+        owner: root
+        group: '{{ "wheel" if ansible_facts.system == "Darwin" else "root" }}'
+        mode: '0750'
+
+    - name: Create the two leaves inside it the way an install would
+      ansible.builtin.file:
+        path: '{{ item.path }}'
+        state: directory
+        owner: '{{ item.owner }}'
+        group: '{{ item.group }}'
+        mode: '{{ item.mode }}'
+      loop:
+        - path: '{{ nomad_host_volumes_dir }}'
+          owner: root
+          group: '{{ "wheel" if ansible_facts.system == "Darwin" else "root" }}'
+          mode: '0755'
+        - path: '{{ box_lima_home }}'
+          owner: '{{ box_runtime_user }}'
+          group: '{{ box_runtime_group }}'
+          mode: '0700'
+      loop_control:
+        label: '{{ item.path }}'
+
+    - name: Run the check of the client role
+      ansible.builtin.import_role:
+        name: nomad_client
+        tasks_from: traversal
