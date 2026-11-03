@@ -3,13 +3,16 @@
 # same configuration for it; the service is a launchd LaunchDaemon instead of a
 # systemd unit.
 #
-# Why root, and not the runtime user: launchd is a system-wide daemon
-# (/Library/LaunchDaemons), and the client itself needs root - it writes the
-# plugin directory, the host volumes directory and the allocation directories
-# under data_dir. Lima does not need root: vz runs the VM inside the limactl
-# hostagent, which the driver starts as box_runtime_user (its uid, its HOME, its
-# LIMA_HOME). So the client is root and every VM is the unprivileged user: the
-# same split as on Linux.
+# Two scopes, one default. `system` is a LaunchDaemon in /Library/LaunchDaemons: it
+# starts at boot and runs as root, because the client itself needs root - it
+# writes the plugin directory, the host volumes directory and the allocation
+# directories under data_dir. `user` (profiles/macos-user.yml) is a LaunchAgent of
+# one login user in its gui/<uid> domain: no root, every path under that user's
+# home, and it starts when that user logs in - not at boot.
+#
+# Lima needs no root in either scope: vz runs the VM inside the limactl hostagent,
+# which the driver starts as box_runtime_user (its uid, its HOME, its LIMA_HOME).
+# So every VM is the unprivileged user, the same split as on Linux.
 
 - name: Darwin | Look for launchctl
   ansible.builtin.command:
@@ -30,16 +33,57 @@
     quiet: true
   when: nomad_launchd_load | bool
 
+- name: Darwin | Require a known launchd scope
+  ansible.builtin.assert:
+    that:
+      - nomad_launchd_scope in ['system', 'user']
+      - nomad_launchd_scope != 'user' or ansible_facts.user_uid | int > 0
+      - nomad_launchd_scope != 'user' or nomad_launchd_uid | int == ansible_facts.user_uid | int
+      - nomad_launchd_scope != 'user' or nomad_file_owner == ansible_facts.user_id
+      - nomad_launchd_scope != 'user' or nomad_box_runtime_user == ansible_facts.user_id
+    fail_msg: >-
+      The user scope is the agent of one non-root login user, running as that
+      user: nomad_launchd_uid must be the uid of the connection user
+      ({{ ansible_facts.user_id }}, {{ ansible_facts.user_uid }}),
+      nomad_file_owner must be that user, and so must nomad_box_runtime_user. It
+      never escalates and never switches users; for the other shape use the
+      default, nomad_launchd_scope: system.
+    quiet: true
+
+# A user agent can only write where its user can: a path outside the login home
+# would need root, which is what the system scope is for.
+- name: Darwin | Keep the user scope inside the login home
+  ansible.builtin.assert:
+    that:
+      - item is match('^' ~ (nomad_launchd_home | regex_escape) ~ '/')
+      - "'/../' not in item"
+    fail_msg: >-
+      {{ item }} is outside {{ nomad_launchd_home }}: a user-scope client writes
+      only inside its own home. Put it there, or use nomad_launchd_scope: system.
+    quiet: true
+  loop: >-
+    {{ [nomad_config_dir, nomad_data_dir, nomad_host_volumes_dir,
+        nomad_launchd_plist, nomad_launchd_stdout, nomad_launchd_stderr,
+        nomad_box_plugin_dir, nomad_box_volume_plugin_dir,
+        nomad_box_lima_home, nomad_box_image_cache_dir] }}
+  loop_control:
+    label: '{{ item }}'
+  when: nomad_launchd_scope == 'user'
+
 - name: Darwin | Report the service this role writes
   ansible.builtin.debug:
     msg:
       - >-
-        launchd: {{ nomad_launchd_plist }} ({{ nomad_launchd_label }}, a system
-        LaunchDaemon, runs as root), loaded with
-        `launchctl bootstrap system {{ nomad_launchd_plist }}` when
-        nomad_launchd_load is true
+        launchd: {{ nomad_launchd_plist }} ({{ nomad_launchd_label }}, scope
+        {{ nomad_launchd_scope }}, {{ 'root' if nomad_launchd_scope == 'system' else 'the login user ' ~ nomad_file_owner }}),
+        loaded with `launchctl bootstrap {{ nomad_launchd_domain }}
+        {{ nomad_launchd_plist }}` when nomad_launchd_load is true
       - >-
-        a restart of the daemon keeps the VMs: AbandonProcessGroup=
+        a restart of the job keeps the VMs: AbandonProcessGroup=
         {{ nomad_launchd_abandon_process_group }} leaves the limactl hostagents and
         the qemu/vz processes of the boxes running, and Nomad re-attaches to them
         (the macOS form of KillMode=process)
+      - >-
+        {{ 'the daemon starts at boot and needs no login session'
+           if nomad_launchd_scope == 'system'
+           else 'the agent starts when ' ~ nomad_file_owner ~ ' logs in to the GUI, and not before' }}

@@ -2,14 +2,23 @@
 <!-- Managed by deploy/ansible/roles/nomad_client (Ansible). Do not edit on the
      node: change the role variables and run the play again.
 
-     The Nomad client of a box node on macOS: a system LaunchDaemon, so it starts
-     at boot, needs no login session, and runs as root (it writes the plugin
-     directory, the host volumes directory and the allocation directories under
-     {{ nomad_data_dir }}). The VMs are not root: the box driver starts limactl,
-     and with it the vz VM, as the runtime user {{ nomad_box_runtime_user }}.
+     The Nomad client of a box node on macOS, in one of two scopes.
 
-     Load it with: sudo launchctl bootstrap system {{ nomad_launchd_plist }}
-     Restart it, keeping the boxes: sudo launchctl kickstart -k system/{{ nomad_launchd_label }} -->
+     system (the default): a LaunchDaemon in /Library/LaunchDaemons, owned by
+     root and started at boot, with no login session behind it. It runs as root
+     because it writes the plugin directory, the host volumes directory and the
+     allocation directories under {{ nomad_data_dir }}.
+
+     user (profiles/macos-user.yml): a LaunchAgent in the login user's
+     ~/Library/LaunchAgents, owned by that user and loaded in its gui/ domain.
+     Nothing escalates, every path is that user's own, and the job starts when
+     that user logs in to the GUI - not at boot.
+
+     In both scopes the VMs are not root: the box driver starts limactl, and with
+     it the vz VM, as the runtime user {{ nomad_box_runtime_user }}.
+
+     Load: launchctl bootstrap {{ nomad_launchd_domain }} {{ nomad_launchd_plist }}
+     Restart, keeping the boxes: launchctl kickstart -k {{ nomad_launchd_domain }}/{{ nomad_launchd_label }} -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -21,8 +30,13 @@
     <string>{{ arg }}</string>
 {% endfor %}
   </array>
+{% if nomad_launchd_scope == "system" %}
+  <!-- The daemon runs as root. A user agent has no UserName: launchd knows whose
+       agent it is from the gui/<uid> domain it is loaded in, and refuses the key
+       there. -->
   <key>UserName</key>
   <string>{{ nomad_file_owner }}</string>
+{% endif %}
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -50,6 +64,13 @@
        NOMAD_TOKEN is for the CLI in a shell on this host. -->
   <key>EnvironmentVariables</key>
   <dict>
+{% if nomad_launchd_scope == "user" %}
+    <!-- A user agent does not inherit the login environment. Nomad and the
+         limactl calls it makes need a home directory: this is the one the box
+         paths live under. -->
+    <key>HOME</key>
+    <string>{{ nomad_launchd_home }}</string>
+{% endif %}
     <key>PATH</key>
     <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 {% if nomad_client_intro_token | length > 0 %}

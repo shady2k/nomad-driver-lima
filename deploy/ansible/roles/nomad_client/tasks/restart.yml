@@ -32,7 +32,7 @@
 
 - name: Restart | Kick the launchd daemon
   ansible.builtin.command:
-    argv: ['launchctl', 'kickstart', '-k', 'system/{{ nomad_launchd_label }}']
+    argv: ['launchctl', 'kickstart', '-k', '{{ nomad_launchd_domain }}/{{ nomad_launchd_label }}']
   when:
     - not ansible_check_mode
     - nomad_system_changes | bool

@@ -35,7 +35,7 @@
 
 - name: Uninstall | Take the launchd daemon down
   ansible.builtin.command:
-    argv: ['launchctl', 'bootout', 'system/{{ nomad_launchd_label }}']
+    argv: ['launchctl', 'bootout', '{{ nomad_launchd_domain }}/{{ nomad_launchd_label }}']
   failed_when: false
   changed_when: true
   when:

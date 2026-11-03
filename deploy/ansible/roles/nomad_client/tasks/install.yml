@@ -96,17 +96,48 @@
   notify: Restart the Nomad client
   when: ansible_facts.system == 'Linux'
 
-# The launchd daemon of the Mac. It carries the same two tokens in its
+# The launchd job of the Mac. It carries the same two tokens in its
 # EnvironmentVariables (macOS has no EnvironmentFile), so it is written 0600 and
 # with no_log.
+#
+# The directory is the one the plist goes into. A system LaunchDaemon lives in
+# /Library/LaunchDaemons, which this role may set up; a user LaunchAgent lives in
+# ~/Library/LaunchAgents, which the user already has and which keeps whatever
+# metadata it has - mode, owner or an ACL somebody put there on purpose. The role
+# only creates that directory when it is missing.
+- name: Install | Inspect the directory of the launchd plist
+  ansible.builtin.stat:
+    path: '{{ nomad_launchd_plist | dirname }}'
+  register: nomad_launchd_directory
+  when: nomad_launchd_enabled | bool
+
 - name: Install | Create the directory of the launchd plist
   ansible.builtin.file:
     path: '{{ nomad_launchd_plist | dirname }}'
     state: directory
     owner: '{{ nomad_file_owner }}'
     group: '{{ nomad_file_group }}'
-    mode: '0755'
-  when: nomad_launchd_enabled | bool
+    mode: '{{ "0700" if nomad_launchd_scope == "user" else "0755" }}'
+  when:
+    - nomad_launchd_enabled | bool
+    - nomad_launchd_scope != 'user' or not nomad_launchd_directory.stat.exists
+
+# A user agent writes its logs beside the rest of its state, and launchd does not
+# create that directory. The system scope logs into /var/log, which exists and
+# whose metadata this role leaves alone.
+- name: Install | Create the log directories of the user agent
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: '{{ nomad_file_owner }}'
+    group: '{{ nomad_file_group }}'
+    mode: '0700'
+  loop: '{{ [nomad_launchd_stdout | dirname, nomad_launchd_stderr | dirname] | unique }}'
+  loop_control:
+    label: '{{ item }}'
+  when:
+    - nomad_launchd_enabled | bool
+    - nomad_launchd_scope == 'user'
 
 - name: Install | Write the launchd plist (macOS)
   ansible.builtin.template:
@@ -124,7 +155,7 @@
 # loaded yet - the first run on a fresh Mac - is loaded here.
 - name: Install | Ask launchd whether the daemon is loaded
   ansible.builtin.command:
-    argv: ['launchctl', 'print', 'system/{{ nomad_launchd_label }}']
+    argv: ['launchctl', 'print', '{{ nomad_launchd_domain }}/{{ nomad_launchd_label }}']
   register: nomad_launchd_state
   changed_when: false
   failed_when: false
@@ -135,7 +166,7 @@
 
 - name: Install | Load the launchd daemon
   ansible.builtin.command:
-    argv: ['launchctl', 'bootstrap', 'system', '{{ nomad_launchd_plist }}']
+    argv: ['launchctl', 'bootstrap', '{{ nomad_launchd_domain }}', '{{ nomad_launchd_plist }}']
   when:
     - not ansible_check_mode
     - nomad_launchd_enabled | bool
@@ -147,12 +178,12 @@
   ansible.builtin.debug:
     msg:
       - >-
-        launchd writes {{ nomad_launchd_plist }}; the job is
+        launchd writes {{ nomad_launchd_plist }} (scope {{ nomad_launchd_scope }}); the job is
         {{ "loaded by this role" if nomad_launchd_load | bool
-           else "STAGED - load it with: sudo launchctl bootstrap system " ~ nomad_launchd_plist }}
+           else "STAGED - load it with: launchctl bootstrap " ~ nomad_launchd_domain ~ " " ~ nomad_launchd_plist }}
       - >-
-        a restart that keeps the boxes: sudo launchctl kickstart -k
-        system/{{ nomad_launchd_label }} (AbandonProcessGroup={{ nomad_launchd_abandon_process_group }}
+        a restart that keeps the boxes: launchctl kickstart -k
+        {{ nomad_launchd_domain }}/{{ nomad_launchd_label }} (AbandonProcessGroup={{ nomad_launchd_abandon_process_group }}
         leaves the VMs running)
   when: nomad_launchd_enabled | bool
 

@@ -1,0 +1,57 @@
+---
+# The opt-in other half of the macOS choice: the box client of this Mac runs as its
+# own login user, from a LaunchAgent in that user's gui/<uid> domain, with every
+# path under that user's home. Nothing escalates and nothing starts at boot.
+#
+#   cd deploy/ansible
+#   ansible-playbook -i inventory site.yml --limit <mac-host> \
+#     -e @profiles/macos-user.yml --check     # then the same line without --check
+#
+# Load it for Mac hosts only, never for a mixed group: `ansible_become: false` knows
+# about the whole run. Keep site addresses and credentials in the private
+# inventory, as for the system profile. The role's Darwin preflight refuses a user
+# scope whose files would leave the login home, or whose owner, uid or runtime user
+# is not that same login user.
+#
+# The client is the Homebrew Nomad and the Homebrew lima: this profile installs
+# neither and changes no sudoers. See deploy/README.md, "macOS: the optional user
+# LaunchAgent".
+
+# The connection IS the user (ssh as that user, or a local connection): no sudo.
+ansible_become: false
+
+# Everything of the node lives under the login home, in one directory.
+nomad_user_root: '{{ ansible_facts.user_dir }}/Library/Application Support/box'
+box_release_root: '{{ nomad_user_root }}/releases'
+box_lima_home: '{{ nomad_user_root }}/lima'
+box_image_cache_dir: '{{ nomad_user_root }}/images'
+box_plugin_owner: '{{ ansible_facts.user_id }}'
+box_plugin_group: '{{ ansible_facts.user_gid }}'
+box_install_deps: false
+box_limactl: /opt/homebrew/bin/limactl
+box_runtime_user: '{{ ansible_facts.user_id }}'
+
+# The volume plugin reads its three settings from this file, next to the binary it
+# runs as (its own resolved path, not the `current` symlink). /etc/box/volume.json,
+# if this Mac also has one, wins: do not mix a system and a user deployment.
+box_volume_config_file: '{{ box_release_dir }}/host_volume_plugins/box-volume.json'
+
+nomad_install_binary: false
+nomad_binary: /opt/homebrew/bin/nomad
+nomad_file_owner: '{{ ansible_facts.user_id }}'
+nomad_file_group: '{{ ansible_facts.user_gid }}'
+nomad_config_dir: '{{ nomad_user_root }}/nomad/config'
+nomad_data_dir: '{{ nomad_user_root }}/nomad/data'
+nomad_host_volumes_dir: '{{ nomad_user_root }}/nomad/volumes'
+
+# The job: a LaunchAgent of this user, in the gui domain of its uid.
+nomad_launchd_scope: user
+nomad_launchd_label: local.nomad.client
+nomad_launchd_uid: '{{ ansible_facts.user_uid }}'
+nomad_launchd_home: '{{ ansible_facts.user_dir }}'
+nomad_launchd_plist: '{{ nomad_launchd_home }}/Library/LaunchAgents/{{ nomad_launchd_label }}.plist'
+nomad_launchd_stdout: '{{ nomad_user_root }}/logs/nomad.log'
+nomad_launchd_stderr: '{{ nomad_user_root }}/logs/nomad.err.log'
+
+# Apple Virtualization is the only choice a user agent can make.
+nomad_box_vm_type: vz

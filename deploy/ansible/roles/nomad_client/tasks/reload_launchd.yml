@@ -11,7 +11,7 @@
 
 - name: Reload | Take the daemon down
   ansible.builtin.command:
-    argv: ['launchctl', 'bootout', 'system/{{ nomad_launchd_label }}']
+    argv: ['launchctl', 'bootout', '{{ nomad_launchd_domain }}/{{ nomad_launchd_label }}']
   register: nomad_launchd_bootout
   failed_when: false
   changed_when: nomad_launchd_bootout.rc | default(1) == 0
@@ -19,7 +19,7 @@
 
 - name: Reload | Load it again
   ansible.builtin.command:
-    argv: ['launchctl', 'bootstrap', 'system', '{{ nomad_launchd_plist }}']
+    argv: ['launchctl', 'bootstrap', '{{ nomad_launchd_domain }}', '{{ nomad_launchd_plist }}']
   changed_when: true
   when: not ansible_check_mode
 

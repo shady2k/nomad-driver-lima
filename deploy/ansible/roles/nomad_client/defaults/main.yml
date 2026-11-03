@@ -184,6 +184,18 @@ nomad_stop_timeout: 90
 # root (vz runs the VM inside the limactl hostagent), so the VMs run as the
 # runtime user; what needs root is the client itself (the plugin directory, the
 # host volumes directory and the allocation directories under data_dir).
+#
+# `user` is the opt-in other half of that choice (profiles/macos-user.yml): the
+# client is a LaunchAgent of one login user, in that user's gui/<uid> domain, with
+# every path below that user's home. Nothing escalates and nothing starts before
+# that user logs in. The system scope is the default because a node is a node
+# whether or not somebody is at its screen.
+nomad_launchd_scope: system
+nomad_launchd_uid: '{{ ansible_facts.user_uid }}'
+nomad_launchd_home: '{{ ansible_facts.user_dir }}'
+# The launchd domain the job is loaded in: `system` for the daemon, `gui/<uid>` for
+# the agent of the logged-in user.
+nomad_launchd_domain: '{{ ("gui/" ~ nomad_launchd_uid) if nomad_launchd_scope == "user" else "system" }}'
 nomad_launchd_label: com.hashicorp.nomad
 nomad_launchd_plist: /Library/LaunchDaemons/{{ nomad_launchd_label }}.plist
 # Render the plist? On a Mac, yes; a Linux run renders nothing unless a check

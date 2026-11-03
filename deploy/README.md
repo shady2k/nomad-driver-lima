@@ -330,6 +330,32 @@ do is run it:
 - the VM paths themselves: `vz` needs macOS 13+, and the disks live on the APFS
   volume under the Lima home.
 
+## macOS: the optional user LaunchAgent
+
+The default stays the system LaunchDaemon. `profiles/macos-user.yml` runs the same
+client as one login user instead: no root, everything under
+`~/Library/Application Support/box`, and launchd's `gui/<uid>` domain.
+
+```bash
+cd deploy/ansible
+ansible-playbook -i inventory site.yml --limit <mac-host> -e @profiles/macos-user.yml --check
+```
+
+**The trade-off is when it starts.** A LaunchAgent starts when that user logs in to
+the GUI; the system LaunchDaemon starts at boot. A Mac that has rebooted and sits at
+the login window runs no boxes until someone logs in. In exchange that Mac needs no
+sudo, no root-owned paths and no system daemon - and the connection has to be the
+same non-root user (`ansible_become: false` in the profile, and the Darwin
+preflight refuses a user scope whose owner, uid or runtime user is not that user,
+or whose paths would leave its home). One client per Mac: do not mix the two
+scopes on one machine.
+
+Nomad does not pass a plugin's environment through, so the volume plugin of that
+profile reads its settings from the file beside the release's `box-volume`
+(`host_volume_plugins/box-volume.json`), not from the plist. An
+`/etc/box/volume.json` on the same Mac wins over it: resolve that, do not leave
+both.
+
 ## NixOS nodes
 
 The role refuses a NixOS node whose configuration or unit path is under `/etc`: on

@@ -22,3 +22,7 @@ nomad_meta:
 # nomad_launchd_load: true
 # A restart that keeps the boxes (AbandonProcessGroup=true):
 #   sudo launchctl kickstart -k system/com.hashicorp.nomad
+#
+# The other scope - a LaunchAgent of the logged-in user, no root, started at login
+# instead of at boot - is a profile rather than a group setting: see
+# deploy/ansible/profiles/macos-user.yml and deploy/README.md.
