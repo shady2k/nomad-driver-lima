@@ -17,54 +17,51 @@
       - box_memory_overhead_mib | int > 0
       - box_runtime_user | length > 0
     fail_msg: >-
-      The role needs box_version (the dist/<version> directory that
-      deploy/build.sh wrote), absolute paths, and box_runtime_user. box_plugin_dir
-      and box_volume_plugin_dir must differ: Nomad runs every executable in
-      host_volume_plugin_dir as a volume plugin. box_runtime_user is the
-      unprivileged user the boxes run as: Lima refuses to run as root, so it has
-      no default.
+      The role needs box_version (the release to install), absolute paths, and
+      box_runtime_user. box_plugin_dir and box_volume_plugin_dir must differ:
+      Nomad runs every executable in host_volume_plugin_dir as a volume plugin.
+      box_runtime_user is the unprivileged user the boxes run as: Lima refuses to
+      run as root, so it has no default.
     quiet: true
 
-- name: Preflight | Look for the release that deploy/build.sh wrote
+# Where the artifacts will come from. This stage is read-only in both cases: the
+# download itself happens in the install stage (release.yml), so a --check run on a
+# machine that has not deployed yet does not stop here.
+- name: Preflight | Require a source the role knows
+  ansible.builtin.assert:
+    that:
+      - box_release_source in ['download', 'local']
+    fail_msg: >-
+      box_release_source is "{{ box_release_source }}": use download (the
+      published release of {{ box_version }}, which the install stage fetches into
+      box_release_cache_dir) or local (box_dist_dir, the directory
+      deploy/build.sh wrote).
+    quiet: true
+
+- name: Preflight | Look for a local release
   ansible.builtin.stat:
     path: '{{ box_dist_dir }}/SHA256SUMS'
   delegate_to: localhost
   become: false
   register: box_sums_file
   check_mode: false
+  when: box_release_source == 'local'
 
-- name: Preflight | Read the release checksums
-  ansible.builtin.slurp:
-    src: '{{ box_dist_dir }}/SHA256SUMS'
-  delegate_to: localhost
-  become: false
-  register: box_sums_raw
-  check_mode: false
-  when: box_sums_file.stat.exists
-
-- name: Preflight | Read the checksum of the artifacts this node needs
-  ansible.builtin.set_fact:
-    box_driver_sha256: >-
-      {{ (box_sums_raw.content | default('') | b64decode | default('', true))
-         | regex_findall('(?m)^([0-9a-f]{64})[ ]+' ~ (box_driver_artifact | regex_escape) ~ '$')
-         | first | default('') }}
-    box_volume_sha256: >-
-      {{ (box_sums_raw.content | default('') | b64decode | default('', true))
-         | regex_findall('(?m)^([0-9a-f]{64})[ ]+' ~ (box_volume_artifact | regex_escape) ~ '$')
-         | first | default('') }}
-
-- name: Preflight | Require a complete release for this node
+# The artifacts and their checksums are verified by release.yml, in both modes;
+# this is the fast, clear failure for the common mistake of never having built the
+# release the play names.
+- name: Preflight | Require a local release that deploy/build.sh wrote
   ansible.builtin.assert:
     that:
-      - box_sums_file.stat.exists
-      - box_driver_sha256 | length == 64
-      - box_volume_sha256 | length == 64
+      - box_sums_file.stat.exists | default(false)
     fail_msg: >-
-      {{ box_dist_dir }} does not hold a complete release for {{ box_os }}/{{ box_arch }}:
-      run deploy/build.sh --version {{ box_version }} on this machine, or point
+      {{ box_dist_dir }} does not hold a release: run
+      deploy/build.sh --version {{ box_version }} on this machine, or point
       box_dist_dir at the directory it wrote (it must contain SHA256SUMS and the
-      {{ box_driver_artifact }} and {{ box_volume_artifact }} artifacts).
+      {{ box_driver_artifact }} and {{ box_volume_artifact }} artifacts). To install
+      the published release instead, set box_release_source: download.
     quiet: true
+  when: box_release_source == 'local'
 
 - name: Preflight | Read the local user database for the runtime user
   ansible.builtin.getent:
@@ -147,7 +144,12 @@
 - name: Preflight | Report what was checked
   ansible.builtin.debug:
     msg:
-      - 'node {{ inventory_hostname }} ({{ ansible_facts.system }} {{ ansible_facts.architecture }}): release {{ box_version }} from {{ box_dist_dir }}'
+      - >-
+        node {{ inventory_hostname }} ({{ ansible_facts.system }} {{ ansible_facts.architecture }}):
+        release {{ box_version }} from
+        {{ box_release_base_url if box_release_source == 'download' else box_dist_dir }}
+        {{ '(downloaded once on the machine that runs Ansible, then copied here)'
+           if box_release_source == 'download' else '(a local build, copied here)' }}
       - 'release {{ box_release_dir }}, live through {{ box_current_link }}'
       - 'plugin_dir {{ box_plugin_dir }}, host_volume_plugin_dir {{ box_volume_plugin_dir }}'
       - 'lima {{ box_lima_semver | default("n/a") }} at {{ box_limactl }}{{ (", qemu " ~ box_qemu_path) if box_qemu_path | default("") | length > 0 else "" }}'

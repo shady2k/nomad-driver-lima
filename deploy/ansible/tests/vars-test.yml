@@ -5,9 +5,14 @@
 # and without a service manager.
 nomad_test_prefix: "{{ lookup('env', 'NOMAD_TEST_PREFIX') }}"
 
-# The release under test, built by deploy/build.sh at the start of the run.
+# The release under test, built by deploy/build.sh at the start of the run. The
+# checks install it from that build (box_release_source: local); the download path
+# has its own section in run-tests.sh, which overrides these three.
 box_version: "{{ lookup('env', 'BOX_TEST_VERSION') }}"
 box_dist_dir: "{{ lookup('env', 'BOX_TEST_DIST') }}"
+box_release_source: local
+box_release_base_url: "{{ lookup('env', 'BOX_TEST_RELEASE_URL') }}"
+box_release_cache_dir: "{{ nomad_test_prefix }}/var/cache/box-releases/{{ box_version }}"
 
 # ------------------------------------------------------------------ the release
 # The same layout a node gets: one directory per version, one live symlink.

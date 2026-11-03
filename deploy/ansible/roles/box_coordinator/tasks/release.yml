@@ -1,0 +1,160 @@
+---
+# Obtain the `box` CLI of box_version, on the machine that runs Ansible, and verify
+# it against the release's SHA256SUMS.
+#
+#   box_release_source: download (the default)
+#     Fetch box_release_base_url/SHA256SUMS and box_<os>_<arch> into
+#     box_release_cache_dir, once, on the machine that runs Ansible (delegated to
+#     localhost, run once), and check the binary against its digest. A cached
+#     artifact whose checksum is still right is not fetched again.
+#   box_release_source: local
+#     box_dist_dir, the directory deploy/build.sh wrote: nothing is fetched, and the
+#     same checksum is read.
+#
+# The bytes are read on the controller and copied to the host by main.yml, so this
+# host needs no route to the release host. The fact this file sets -
+# box_cli_sha256 - is what main.yml checks the installed CLI against.
+#
+# Run in check mode too (the cache belongs to the controller, not to this host), so
+# that site.yml --check on a machine that has never deployed anything is checked
+# against the real artifact.
+
+- name: Release | Require a source the role knows
+  ansible.builtin.assert:
+    that:
+      - box_release_source in ['download', 'local']
+      - box_release_cache_dir is match('^/')
+      - box_dist_dir is match('^/')
+    fail_msg: >-
+      box_release_source is "{{ box_release_source }}": use download (the
+      published release of {{ box_version }}, fetched once into
+      box_release_cache_dir) or local (box_dist_dir, the directory
+      deploy/build.sh wrote). Both are absolute paths.
+    quiet: true
+
+- name: Release | Require an address to download from
+  ansible.builtin.assert:
+    that:
+      - box_release_base_url is search('^https?://')
+    fail_msg: >-
+      box_release_base_url is "{{ box_release_base_url }}": it is where the assets
+      of release {{ box_version }} and their SHA256SUMS are served, over HTTP(S).
+      Set your own mirror, or set box_release_source: local to install a release
+      that deploy/build.sh built here.
+    quiet: true
+  when: box_release_source == 'download'
+
+# --------------------------------------------------------- a published release
+- name: Release | Create the cache directory of the release
+  ansible.builtin.file:
+    path: '{{ box_release_cache_dir }}'
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+  become: false
+  run_once: true
+  check_mode: false
+  when: box_release_source == 'download'
+
+# The checksums come first: they are what makes the artifact below verifiable. A
+# release's assets never change, so a cached SHA256SUMS is never fetched again -
+# which is also why a run with the release host unreachable still installs from a
+# warm cache.
+- name: Release | Look for the cached checksums of the release
+  ansible.builtin.stat:
+    path: '{{ box_release_cache_dir }}/SHA256SUMS'
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: box_sums_cached
+  check_mode: false
+  when: box_release_source == 'download'
+
+- name: Release | Fetch the checksums of the release
+  ansible.builtin.get_url:
+    url: '{{ box_release_base_url }}/SHA256SUMS'
+    dest: '{{ box_release_cache_dir }}/SHA256SUMS'
+    mode: '0644'
+    timeout: 60
+  delegate_to: localhost
+  become: false
+  run_once: true
+  check_mode: false
+  when:
+    - box_release_source == 'download'
+    - not box_sums_cached.stat.exists | default(false)
+
+- name: Release | Look for the checksums of the release
+  ansible.builtin.stat:
+    path: '{{ box_artifacts_dir }}/SHA256SUMS'
+  delegate_to: localhost
+  become: false
+  register: box_sums_file
+  check_mode: false
+
+- name: Release | Read the checksums of the release
+  ansible.builtin.slurp:
+    src: '{{ box_artifacts_dir }}/SHA256SUMS'
+  delegate_to: localhost
+  become: false
+  register: box_sums_raw
+  check_mode: false
+  when: box_sums_file.stat.exists
+
+- name: Release | Require the checksums of the release
+  ansible.builtin.assert:
+    that:
+      - box_sums_file.stat.exists
+    fail_msg: >-
+      {{ box_artifacts_dir }}/SHA256SUMS is missing. With box_release_source:
+      download, check box_release_base_url ({{ box_release_base_url }}): it must
+      hold SHA256SUMS and the assets of release {{ box_version }}. With
+      box_release_source: local, run deploy/build.sh --version {{ box_version }}
+      on this machine, or point box_dist_dir at the directory it wrote.
+    quiet: true
+
+- name: Release | Read the checksum of the CLI artifact
+  ansible.builtin.set_fact:
+    box_cli_sha256: >-
+      {{ (box_sums_raw.content | default('') | b64decode | default('', true))
+         | regex_findall('(?m)^([0-9a-f]{64})[ ]+' ~ (box_cli_artifact | regex_escape) ~ '$')
+         | first | default('') }}
+
+- name: Release | Require a release that carries this host's CLI
+  ansible.builtin.assert:
+    that:
+      - box_cli_sha256 | length == 64
+    fail_msg: >-
+      SHA256SUMS in {{ box_artifacts_dir }} has no entry for {{ box_cli_artifact }},
+      so release {{ box_version }} does not carry a CLI for {{ box_cli_os }}/{{ box_cli_arch }}.
+      A published release carries linux/amd64 and darwin/arm64; a local build needs
+      deploy/build.sh --version {{ box_version }} without --linux-only.
+    quiet: true
+
+# get_url with a checksum is the verification: a cached binary whose digest is
+# still the one SHA256SUMS names is kept, and one that arrives with another digest
+# fails the task.
+- name: Release | Download the CLI
+  ansible.builtin.get_url:
+    url: '{{ box_release_base_url }}/{{ box_cli_artifact }}'
+    dest: '{{ box_release_cache_dir }}/{{ box_cli_artifact }}'
+    checksum: 'sha256:{{ box_cli_sha256 }}'
+    mode: '0644'
+    timeout: 300
+  delegate_to: localhost
+  become: false
+  run_once: true
+  check_mode: false
+  when: box_release_source == 'download'
+
+# --------------------------------------------------------------------- what next
+- name: Release | Report where the CLI came from
+  ansible.builtin.debug:
+    msg:
+      - >-
+        release {{ box_version }} from
+        {{ 'the published release ' ~ box_release_base_url ~ ' (downloaded once into ' ~ box_release_cache_dir ~ ' on the machine that runs Ansible)'
+           if box_release_source == 'download'
+           else 'the local build ' ~ box_dist_dir }}
+      - '{{ box_cli_artifact }} {{ box_cli_sha256 }} (checked against SHA256SUMS)'
+      - 'it is copied to this host over the Ansible connection: the host itself never downloads it'

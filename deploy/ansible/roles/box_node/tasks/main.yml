@@ -3,9 +3,10 @@
 # client node.
 #
 # What this role owns: the release directories and the `current` symlink, the two
-# plugin binaries, the box-volume operator settings file, lima and qemu (checked,
-# installed only when box_install_deps says so), /dev/kvm access, the runtime user
-# and its groups, and the cgroup prerequisites of the memory cap.
+# plugin binaries (from a published release or a local build, see
+# box_release_source), the box-volume operator settings file, lima and qemu
+# (checked, installed only when box_install_deps says so), /dev/kvm access, the
+# runtime user and its groups, and the cgroup prerequisites of the memory cap.
 #
 # What it does NOT own: the Nomad client configuration and the service. The
 # nomad_client role of the same play renders /etc/nomad.d from these variables
@@ -16,14 +17,22 @@
 # The two stages are tagged, so they can be run apart:
 #
 #   --tags preflight   read-only checks, nothing is written
-#   --tags install     the release, the two plugins, the settings file, the
-#                      runtime user, the cgroup prerequisites
+#   --tags install     the release (downloaded once on the machine that runs
+#                      Ansible, or read from a local build, and checked against its
+#                      SHA256SUMS), the two plugins, the settings file, the runtime
+#                      user, the cgroup prerequisites
 #
-# Both run by default. --check lists every change without making any.
+# Both run by default. --check lists every change on the node without making any;
+# it does fetch the release into the controller's cache, so that what it reports is
+# checked against the real artifacts.
 
 - name: Preflight
   ansible.builtin.import_tasks: preflight.yml
   tags: [preflight]
+
+- name: Obtain the release and verify it
+  ansible.builtin.import_tasks: release.yml
+  tags: [install]
 
 - name: Install the box driver
   ansible.builtin.import_tasks: install.yml

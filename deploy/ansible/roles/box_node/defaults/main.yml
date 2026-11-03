@@ -10,29 +10,60 @@
 # listed, and nothing is changed.
 
 # ---------------------------------------------------------------- what to install
-# The release to install: one directory name under dist/ built by deploy/build.sh.
-# Required; the role refuses to run without it.
+# The release to install: a version published as a GitHub release (the tag
+# v{{ box_version }}), or one directory name under dist/ built by deploy/build.sh.
+# Required; the role refuses to run without it, and the version must be semver:
+# Nomad refuses a plugin whose version it cannot parse.
 box_version: ''
 
-# Where deploy/build.sh put the release on the machine that runs Ansible. The
-# path is worked out from the role, not from playbook_dir, so a playbook in any
+# Where that release comes from:
+#
+#   download (the default) - the published release. The machine that runs Ansible
+#                            downloads the artifacts this node's os/arch needs
+#                            once, into box_release_cache_dir, checks every one of
+#                            them against the release's SHA256SUMS, and copies them
+#                            to the node. A node never reaches the release host,
+#                            and nothing has to be built to deploy.
+#   local                  - box_dist_dir, the directory deploy/build.sh wrote on
+#                            that machine, for a release built from source (which
+#                            needs the Go toolchain there).
+box_release_source: download
+
+# Where a published release lives: the assets of the v{{ box_version }} tag and
+# their SHA256SUMS, served over HTTP(S). A site with its own mirror (a release
+# cache, an internal raw proxy) sets this, and the same bytes are installed.
+box_release_base_url: 'https://github.com/shady2k/nomad-driver-lima/releases/download/v{{ box_version }}'
+
+# Where the download is kept on the machine that runs Ansible: one directory per
+# version, shared by every node of the rollout and by every run. An artifact whose
+# checksum is already right is not fetched again, so the second node of the same
+# architecture copies out of the cache instead of downloading.
+box_release_cache_dir: '{{ lookup("env", "HOME") }}/.cache/nomad-driver-lima/releases/{{ box_version }}'
+
+# Where deploy/build.sh put a local release (box_release_source: local). The path
+# is worked out from the role, not from playbook_dir, so a playbook in any
 # directory (site.yml, tests/play-node.yml, rollback.yml) finds the same release.
 box_dist_dir: '{{ role_path }}/../../../../dist/{{ box_version }}'
+
+# The one directory the artifacts are read from: the cache of a published release,
+# or the local build. release.yml reads SHA256SUMS there and verifies every
+# artifact before install.yml copies it to the node.
+box_artifacts_dir: '{{ box_release_cache_dir if box_release_source == "download" else box_dist_dir }}'
 
 # The role installs the plugins for the node's own architecture.
 box_os: "{{ 'darwin' if ansible_facts.system == 'Darwin' else 'linux' }}"
 box_arch: "{{ 'arm64' if ansible_facts.architecture in ['aarch64', 'arm64'] else 'amd64' }}"
 box_driver_artifact: 'box-driver_{{ box_os }}_{{ box_arch }}'
 box_volume_artifact: 'box-volume_{{ box_os }}_{{ box_arch }}'
-# The two artifacts this node installs, their installed names and the release
-# checksums (filled in by the preflight stage).
+# The two artifacts this node installs, their installed names and the checksums
+# SHA256SUMS gives them (read by release.yml).
 box_plugin_artifacts:
-  - src: '{{ box_dist_dir }}/{{ box_driver_artifact }}'
+  - src: '{{ box_artifacts_dir }}/{{ box_driver_artifact }}'
     dest: '{{ box_release_dir }}/plugins/box'
     live: '{{ box_plugin_dir }}/box'
     sha256: '{{ box_driver_sha256 | default("") }}'
     name: box driver
-  - src: '{{ box_dist_dir }}/{{ box_volume_artifact }}'
+  - src: '{{ box_artifacts_dir }}/{{ box_volume_artifact }}'
     dest: '{{ box_release_dir }}/host_volume_plugins/box-volume'
     live: '{{ box_volume_plugin_dir }}/box-volume'
     sha256: '{{ box_volume_sha256 | default("") }}'

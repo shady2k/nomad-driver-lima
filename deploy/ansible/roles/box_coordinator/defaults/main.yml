@@ -8,11 +8,23 @@
 # environment file.
 
 # ----------------------------------------------------------------- what to install
-# The release to install: one directory name under dist/ built by deploy/build.sh.
+# The release to install: a version published as a GitHub release (the tag
+# v{{ box_version }}), or one directory name under dist/ built by deploy/build.sh.
 # Required; the role refuses to run without it.
 box_version: ''
+
+# Where that release comes from: download (the default) fetches the CLI of
+# box_version once into box_release_cache_dir on the machine that runs Ansible and
+# checks it against the release's SHA256SUMS; local reads it from box_dist_dir,
+# the directory deploy/build.sh wrote. The two settings are the same ones
+# box_node has, so one group_vars file configures both roles of a rollout.
+box_release_source: download
+box_release_base_url: 'https://github.com/shady2k/nomad-driver-lima/releases/download/v{{ box_version }}'
+box_release_cache_dir: '{{ lookup("env", "HOME") }}/.cache/nomad-driver-lima/releases/{{ box_version }}'
 # Worked out from the role, so a playbook in any directory finds the same release.
 box_dist_dir: '{{ role_path }}/../../../../dist/{{ box_version }}'
+# The one directory the CLI artifact is read from: the cache or the local build.
+box_artifacts_dir: '{{ box_release_cache_dir if box_release_source == "download" else box_dist_dir }}'
 
 # The coordinator is linux/amd64 or darwin/arm64; both are built, so an operator
 # who runs the CLI from the Mac laptop gets the same symlink.

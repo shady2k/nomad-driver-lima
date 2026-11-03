@@ -240,8 +240,9 @@
       {{ item.item.live }} does not hold {{ item.item.name }} from release
       {{ box_version }} (it has {{ item.stat.checksum | default('nothing') }},
       expected {{ item.item.sha256 }}), so {{ box_current_link }} does not point
-      at a complete release. Copy the release again or rebuild it with
-      deploy/build.sh.
+      at a complete release. Run the play again; if it repeats, remove
+      {{ box_release_cache_dir }} (box_release_source: download) or rebuild the
+      release with deploy/build.sh (box_release_source: local).
     quiet: true
   loop: '{{ box_installed_plugins.results | default([]) }}'
   loop_control:

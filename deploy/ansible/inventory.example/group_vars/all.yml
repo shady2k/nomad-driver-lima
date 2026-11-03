@@ -6,10 +6,25 @@
 # is a variable you set here. Secrets are not here either: they are the vault_*
 # names at the bottom of this file (see vault.example.yml).
 
-# The box release to install: one directory name under dist/, built by
-# deploy/build.sh on the machine that runs Ansible. It must be semver
-# (0.1.0, 0.1.0-rc1): Nomad refuses to load a plugin whose version is not.
+# The box release to install. It must be semver (0.1.0, 0.1.0-rc1): Nomad refuses
+# to load a plugin whose version is not, and the release of that version has to
+# exist where box_release_base_url points.
 box_version: '0.1.0'
+
+# Where that release comes from:
+#
+#   download (the default) - the published release. The machine that runs Ansible
+#                            downloads the artifacts each host needs once, into
+#                            box_release_cache_dir, checks them against the
+#                            release's SHA256SUMS and copies them over the Ansible
+#                            connection. No Go toolchain, and no node that needs a
+#                            route to the release host.
+#   local                  - dist/<box_version>, built by deploy/build.sh on that
+#                            machine (see "Building from source" in README.md).
+#
+# box_release_source: download
+# box_release_base_url: 'https://github.com/shady2k/nomad-driver-lima/releases/download/v{{ box_version }}'
+# box_release_cache_dir: '{{ lookup("env", "HOME") }}/.cache/nomad-driver-lima/releases/{{ box_version }}'
 
 # The Nomad release the nodes get, and where it comes from. The default is the
 # public release with its official checksum; point nomad_release_url at a mirror

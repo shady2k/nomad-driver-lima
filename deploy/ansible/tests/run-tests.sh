@@ -23,6 +23,13 @@
 #      `claude plugin validate` accepts both (when the CLI is here)
 #   3. two releases build (deploy/build.sh) and their versions are semver - Nomad
 #      refuses to load a plugin whose version is not
+#   3b. the release download: a local HTTP server serves the built dist directory,
+#      and the node roles install from box_release_base_url - the artifacts reach
+#      the controller cache and the node, a second run with the server gone is
+#      changed=0, and --check on an empty cache fetches into the cache and touches
+#      no host; 3c: an artifact whose bytes are not the ones SHA256SUMS names, and
+#      a release without the artifacts this node installs, are both refused and
+#      install nothing
 #   4. --check against localhost changes nothing on disk
 #   5. a real apply into a prefix: the release layout and the live symlink, the
 #      rendered JSON accepted by `nomad config validate`, the unit (KillMode,
@@ -51,6 +58,10 @@ set -uo pipefail
 readonly PROG=${0##*/}
 readonly HTTP_PORT=54646
 readonly ACL_PORT=54656
+# The "release host" of the download checks: two local HTTP servers over a directory
+# of release artifacts, one serving them as published and one serving broken ones.
+readonly RELEASE_PORT=54660
+readonly RELEASE_BAD_PORT=54661
 readonly NODE_NAME=box-test-node
 readonly V1=0.1.0-test
 readonly V2=0.1.1-test
@@ -187,6 +198,39 @@ use_release() {
 	export BOX_TEST_DIST=$DIST_ROOT/$1
 }
 
+# start_store <directory> <port>: an HTTP server serving one directory, answering
+# before this returns; stop_store ends it.
+start_store() {
+	local directory=$1 port=$2
+	if ss -lnt 2>/dev/null | grep -qE ":($port) "; then
+		die "port $port is in use; stop what holds it (the checks use their own ports)"
+	fi
+	python3 -m http.server --bind 127.0.0.1 --directory "$directory" "$port" \
+		>"$TEST_ROOT/http-$port.log" 2>&1 &
+	store_pid=$!
+	for _ in $(seq 1 50); do
+		kill -0 "$store_pid" 2>/dev/null || break
+		if python3 -c 'import sys, urllib.request
+urllib.request.urlopen(sys.argv[1], timeout=2).read()' "http://127.0.0.1:$port/" 2>/dev/null; then
+			return 0
+		fi
+		sleep 0.2
+	done
+	die "the release host on port $port did not start (tests/.test/http-$port.log)"
+}
+
+# stop_store: end the server start_store began, and wait for it.
+stop_store() {
+	[[ -n $store_pid ]] || return 0
+	kill -TERM "$store_pid" 2>/dev/null
+	for _ in $(seq 1 50); do
+		kill -0 "$store_pid" 2>/dev/null || break
+		sleep 0.2
+	done
+	kill -KILL "$store_pid" 2>/dev/null
+	store_pid=''
+}
+
 # ------------------------------------------------------------------- 1. lint
 printf -- '-- 1. ansible-lint\n'
 if (cd -- "$ANSIBLE_DIR" && ansible-lint >"$TEST_ROOT/lint.log" 2>&1); then
@@ -282,6 +326,125 @@ for version in "$V1" "$V2"; do
 		bad "the release version $version is not semver: Nomad will not load the plugin"
 	fi
 done
+
+# ------------------------------------------------------- 3b. a downloaded release
+# The default way to deploy: the roles fetch the published release once, on the
+# machine that runs Ansible, check every artifact against the release's SHA256SUMS,
+# and copy it to the host. The "release host" here is a local HTTP server over the
+# dist directory the build above wrote.
+printf -- '-- 3b. the release download\n'
+store_pid=''
+
+start_store "$DIST_ROOT" "$RELEASE_PORT"
+export NOMAD_TEST_PREFIX=$TEST_ROOT/download
+prepare_prefix "$NOMAD_TEST_PREFIX"
+D=$NOMAD_TEST_PREFIX
+use_release "$V2"
+# The cache is inside the prefix (the machine that runs Ansible is the "node" of
+# these checks), so a fresh prefix is a fresh cache.
+release_url="http://127.0.0.1:$RELEASE_PORT/$V2"
+download_args=(
+	-e box_release_source=download
+	-e "box_release_base_url=$release_url"
+)
+if play "$TESTS_DIR/play-node.yml" "${download_args[@]}" >"$TEST_ROOT/download.log" 2>&1; then
+	ok 'the node roles install a release downloaded from box_release_base_url'
+else
+	bad 'the node roles failed with box_release_source: download (tests/.test/download.log)'
+	tail -30 "$TEST_ROOT/download.log"
+fi
+check "the downloaded release is installed" test -x "$D/opt/box/releases/$V2/plugins/box"
+check 'the installed driver is the artifact the release carries' \
+	cmp -s "$D/opt/box/releases/$V2/plugins/box" "$DIST_ROOT/$V2/box-driver_linux_amd64"
+check 'the installed volume plugin is the artifact the release carries' \
+	cmp -s "$D/opt/box/releases/$V2/host_volume_plugins/box-volume" "$DIST_ROOT/$V2/box-volume_linux_amd64"
+check 'the cache holds the artifacts of the release' \
+	test -f "$D/var/cache/box-releases/$V2/box-driver_linux_amd64"
+check 'the cache holds the checksums of the release' \
+	test -f "$D/var/cache/box-releases/$V2/SHA256SUMS"
+
+# Downloaded once: with the release host gone, the same play reads the cache and
+# changes nothing. Nothing but the cache can answer it.
+stop_store
+if play "$TESTS_DIR/play-node.yml" "${download_args[@]}" >"$TEST_ROOT/download2.log" 2>&1; then
+	if grep -qE 'changed=0 .*failed=0' "$TEST_ROOT/download2.log"; then
+		ok 'a second run installs from the cache with the release host gone, changed=0'
+	else
+		bad 'a second downloaded install changed something'
+		grep -E 'changed=[1-9]' "$TEST_ROOT/download2.log" | head -5
+	fi
+else
+	bad 'the second downloaded install failed (tests/.test/download2.log)'
+	tail -20 "$TEST_ROOT/download2.log"
+fi
+
+# --check on a machine whose cache is empty: the release is fetched so that every
+# host step is checked against the real bytes, and the node itself is untouched.
+export NOMAD_TEST_PREFIX=$TEST_ROOT/download-check
+prepare_prefix "$NOMAD_TEST_PREFIX"
+DC=$NOMAD_TEST_PREFIX
+start_store "$DIST_ROOT" "$RELEASE_PORT"
+if play "$TESTS_DIR/play-node.yml" "${download_args[@]}" --check >"$TEST_ROOT/download-check.log" 2>&1; then
+	ok '--check runs against a release that is not in the cache yet'
+else
+	bad '--check failed with an empty release cache (tests/.test/download-check.log)'
+	tail -30 "$TEST_ROOT/download-check.log"
+fi
+check '--check fetched the release into the cache on the controller' \
+	test -f "$DC/var/cache/box-releases/$V2/SHA256SUMS"
+check '--check installed nothing on the node' test ! -e "$DC/opt/box"
+stop_store
+
+# ---------------------------------------------------------------- 3c. a bad release
+# A release host that serves bytes another than SHA256SUMS names must stop the
+# play before anything reaches the node. Two cases: an artifact with the wrong
+# bytes, and a release that does not carry the artifact this node installs.
+printf -- '-- 3c. a release that does not match its checksums\n'
+mkdir -p -- "$TEST_ROOT/store/bad/$V2" "$TEST_ROOT/store/incomplete/$V2"
+cp -- "$DIST_ROOT/$V2/SHA256SUMS" "$TEST_ROOT/store/bad/$V2/SHA256SUMS"
+cp -- "$DIST_ROOT/$V2/box-volume_linux_amd64" "$TEST_ROOT/store/bad/$V2/box-volume_linux_amd64"
+printf 'this is not the driver of %s\n' "$V2" >"$TEST_ROOT/store/bad/$V2/box-driver_linux_amd64"
+cp -- "$DIST_ROOT/$V2/box-driver_linux_amd64" "$TEST_ROOT/store/incomplete/$V2/box-driver_linux_amd64"
+grep -v 'box-volume_linux_amd64$' "$DIST_ROOT/$V2/SHA256SUMS" \
+	>"$TEST_ROOT/store/incomplete/$V2/SHA256SUMS"
+
+start_store "$TEST_ROOT/store" "$RELEASE_BAD_PORT"
+export NOMAD_TEST_PREFIX=$TEST_ROOT/download-bad
+prepare_prefix "$NOMAD_TEST_PREFIX"
+DB=$NOMAD_TEST_PREFIX
+if play "$TESTS_DIR/play-node.yml" \
+	-e box_release_source=download \
+	-e "box_release_base_url=http://127.0.0.1:$RELEASE_BAD_PORT/bad/$V2" \
+	>"$TEST_ROOT/download-bad.log" 2>&1; then
+	bad 'an artifact that does not match SHA256SUMS was installed'
+else
+	if grep -qiE 'checksum' "$TEST_ROOT/download-bad.log"; then
+		ok 'an artifact whose bytes are not the ones SHA256SUMS names is refused, and the failure says so'
+	else
+		bad 'the refused download does not mention the checksum'
+		tail -20 "$TEST_ROOT/download-bad.log"
+	fi
+fi
+check 'the refused release installed nothing on the node' test ! -e "$DB/opt/box"
+
+export NOMAD_TEST_PREFIX=$TEST_ROOT/download-incomplete
+prepare_prefix "$NOMAD_TEST_PREFIX"
+DI=$NOMAD_TEST_PREFIX
+if play "$TESTS_DIR/play-node.yml" \
+	-e box_release_source=download \
+	-e "box_release_base_url=http://127.0.0.1:$RELEASE_BAD_PORT/incomplete/$V2" \
+	>"$TEST_ROOT/download-incomplete.log" 2>&1; then
+	bad 'a release without the artifact this node installs was accepted'
+else
+	if grep -qE 'is not complete|has no entry' "$TEST_ROOT/download-incomplete.log"; then
+		ok 'a release that does not carry the artifacts of this node is refused, and the failure names them'
+	else
+		bad 'the refusal does not say which artifact the release lacks'
+		tail -20 "$TEST_ROOT/download-incomplete.log"
+	fi
+fi
+check 'the incomplete release installed nothing on the node' test ! -e "$DI/opt/box"
+stop_store
 
 # ------------------------------------------------------------- 4. check mode
 printf -- '-- 4. --check against localhost\n'

@@ -20,45 +20,15 @@
       - box_env_file is match('^/')
       - box_coordinator_user in ansible_facts.getent_passwd
     fail_msg: >-
-      The role needs box_version (the dist/<version> directory that
-      deploy/build.sh wrote) and the local user that runs the agent
-      (box_coordinator_user, currently "{{ box_coordinator_user }}").
+      The role needs box_version (the release to install) and the local user that
+      runs the agent (box_coordinator_user, currently
+      "{{ box_coordinator_user }}").
     quiet: true
 
-- name: Coordinator | Look for the release that deploy/build.sh wrote
-  ansible.builtin.stat:
-    path: '{{ box_dist_dir }}/SHA256SUMS'
-  delegate_to: localhost
-  become: false
-  register: box_sums_file
-  check_mode: false
-
-- name: Coordinator | Read the release checksums
-  ansible.builtin.slurp:
-    src: '{{ box_dist_dir }}/SHA256SUMS'
-  delegate_to: localhost
-  become: false
-  register: box_sums_raw
-  check_mode: false
-  when: box_sums_file.stat.exists
-
-- name: Coordinator | Read the checksum of the CLI artifact
-  ansible.builtin.set_fact:
-    box_cli_sha256: >-
-      {{ (box_sums_raw.content | default('') | b64decode | default('', true))
-         | regex_findall('(?m)^([0-9a-f]{64})[ ]+' ~ (box_cli_artifact | regex_escape) ~ '$')
-         | first | default('') }}
-
-- name: Coordinator | Require a complete release for this host
-  ansible.builtin.assert:
-    that:
-      - box_sums_file.stat.exists
-      - box_cli_sha256 | length == 64
-    fail_msg: >-
-      {{ box_dist_dir }} does not hold {{ box_cli_artifact }}: run
-      deploy/build.sh --version {{ box_version }} on this machine, or point
-      box_dist_dir at the directory it wrote.
-    quiet: true
+# The CLI itself: downloaded once on the machine that runs Ansible (or read from a
+# local build) and verified against the release's SHA256SUMS.
+- name: Obtain the release and verify it
+  ansible.builtin.import_tasks: release.yml
 
 # ------------------------------------------------------------------- the release
 - name: Coordinator | Create the release directories
@@ -80,7 +50,7 @@
 
 - name: Coordinator | Install the box CLI into the release
   ansible.builtin.copy:
-    src: '{{ box_dist_dir }}/{{ box_cli_artifact }}'
+    src: '{{ box_artifacts_dir }}/{{ box_cli_artifact }}'
     dest: '{{ box_release_dir }}/bin/box'
     owner: '{{ box_coordinator_user }}'
     group: '{{ box_coordinator_group }}'
