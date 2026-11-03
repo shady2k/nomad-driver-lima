@@ -104,12 +104,12 @@ ref=
 tag=
 commit=
 version=
-dirty=false
+dirty="false"
 url=
 
 if [[ -n $BOXD_RELEASE ]]; then
   # --- a published release ---------------------------------------------------
-  kind=release
+  kind="release"
   tag=$BOXD_RELEASE
   [[ $tag =~ ^[0-9A-Za-z._+-]+$ ]] || die "BOXD_RELEASE=$tag is not a plain tag name"
   if [[ $tag != v* ]]; then
@@ -154,7 +154,7 @@ if [[ -n $BOXD_RELEASE ]]; then
   fi
 elif [[ -n $BOXD_COMMIT ]]; then
   # --- one commit of this repository -----------------------------------------
-  kind=commit
+  kind="commit"
   ref=$BOXD_COMMIT
   commit=$(git -C "$ROOT" rev-parse --verify --quiet "$ref^{commit}") \
     || die "BOXD_COMMIT=$ref does not name a commit of $ROOT"
@@ -175,8 +175,8 @@ elif [[ -n $BOXD_COMMIT ]]; then
   rm -f "$OUTDIR/boxd.build"
 else
   # --- this checkout ---------------------------------------------------------
-  kind=head
-  if ! commit=$(git -C "$ROOT" rev-parse --verify --quiet HEAD^{commit}); then
+  kind="head"
+  if ! commit=$(git -C "$ROOT" rev-parse --verify --quiet "HEAD^{commit}"); then
     die "the tree at $ROOT is not a git checkout: set BOXD_COMMIT or BOXD_RELEASE to name the boxd source"
   fi
   ref=$commit
@@ -187,7 +187,7 @@ else
 $(printf '%s\n' "$dirty_tree" | sed 's/^/  /')
 commit them, or set BOXD_COMMIT=<commit> to build a recorded one, or BOXD_ALLOW_DIRTY=1 to build this tree and record it as dirty"
     fi
-    dirty=true
+    dirty="true"
     log "BOXD_ALLOW_DIRTY=1: building the working tree, which has uncommitted changes under cmd/ or internal/"
   fi
   version=$(git -C "$ROOT" describe --tags --always 2>/dev/null || true)
