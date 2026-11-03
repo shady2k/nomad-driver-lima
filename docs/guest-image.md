@@ -205,6 +205,7 @@ defaults are written down.
 | `BOX_MIRROR_GITHUB`, `BOX_MIRROR_NODE` | GitHub release assets, the Node.js release files |
 | `BOX_MIRROR_DOCKER` | a Docker Hub registry mirror in `/etc/docker/daemon.json` |
 | `BOX_MIRROR_CLOUDIMAGE` | the base cloud image (`images/build.sh` only) |
+| `BOXD_REPO`, `BOXD_RELEASE_BASE_URL`, `BOXD_ALLOW_DIRTY` | which repository a `BOXD_RELEASE` asset comes from (`shady2k/nomad-driver-lima` by default), where its release assets are served (`https://github.com`), and whether a dirty tree may be built into an image (no, unless it is set to `1` and then recorded) |
 | `BOX_STORE_URL`, `BOX_STORE_TOKEN`, `BOX_STORE_TOKEN_FILE`, `BOX_STORE_TOKEN_HEADER`, `BOX_STORE_TOKEN_SCHEME` | the operator's store, and the token `images/publish.sh` and `images/verify.sh` send it |
 
 One difference reaches the box: `GOSUMDB`. The public Go proxy serves the
