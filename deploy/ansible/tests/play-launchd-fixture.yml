@@ -1,0 +1,126 @@
+---
+# The launchd lifecycle of one scope, against a recorder instead of launchd.
+#
+#   BOX_MAC_FIXTURE=... ./tests/test-macos-user.sh
+#
+# What it proves: a reload, a restart and an uninstall of the client speak to the
+# domain the scope names - gui/<uid> for the user agent, system for the daemon -
+# with the plist of that scope, and that the uninstall keeps the box disks. The
+# recorder writes every argv it is called with to commands.jsonl, and the real
+# launchctl is never on PATH: the first pre_task proves the recorder is first
+# (test-macos-user.sh must never call the machine's launchd).
+#
+# The play is run twice, once per scope, in two prefixes. `-e nomad_launchd_scope=system`
+# selects the daemon; the profile's user scope is the default.
+- name: The launchd lifecycle of one scope, against a recorder
+  hosts: box_nodes_mac
+  become: false
+  gather_facts: true
+  vars_files:
+    - ../profiles/macos-user.yml
+    - macos-user-fixture-vars.yml
+  vars:
+    # The service actions run; on macOS they reach launchctl, which is the recorder.
+    nomad_system_changes: true
+    nomad_launchd_load: true
+    box_system_changes: false
+    box_uninstall_confirm: true
+    fixture_commands: '{{ fixture_root }}/commands.jsonl'
+    fixture_launchctl: '{{ fixture_root }}/test-bin/launchctl'
+  environment:
+    # The recorder first - the guard below proves it - and the PATH of this
+    # connection behind it, so the python and the tools of the run stay reachable.
+    PATH: '{{ fixture_root }}/test-bin:{{ lookup("env", "PATH") }}'
+    BOX_TEST_LAUNCH_LOG: '{{ fixture_commands }}'
+  pre_tasks:
+    - name: Fixture | The prefix guards and the stub binaries
+      ansible.builtin.import_tasks: macos-fixture-setup.yml
+
+    - name: Fixture | Create the directories and the recorder of the run
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        mode: '0700'
+      loop:
+        - '{{ fixture_root }}/test-bin'
+        - '{{ nomad_launchd_plist | dirname }}'
+        - '{{ nomad_config_dir }}'
+        - '{{ nomad_host_volumes_dir }}'
+      loop_control:
+        label: '{{ item }}'
+
+    - name: Fixture | Write the recorder that stands in for launchctl
+      ansible.builtin.copy:
+        dest: '{{ fixture_launchctl }}'
+        mode: '0700'
+        content: |
+          #!{{ ansible_facts.python.executable }}
+          import json, os, sys
+
+          with open(os.environ['BOX_TEST_LAUNCH_LOG'], 'a', encoding='utf-8') as log:
+              log.write(json.dumps(sys.argv[1:]) + '\n')
+
+    - name: Fixture | Start from an empty record of what was called
+      ansible.builtin.copy:
+        dest: '{{ fixture_commands }}'
+        mode: '0600'
+        content: ''
+
+    - name: Fixture | Require the recorder to be the launchctl of this play
+      ansible.builtin.command:
+        argv: ['sh', '-c', 'command -v launchctl']
+      register: fixture_launchctl_which
+      changed_when: false
+      check_mode: false
+
+    - name: Fixture | Refuse a play that would reach the machine's launchd
+      ansible.builtin.assert:
+        that:
+          - fixture_launchctl_which.stdout | trim == fixture_launchctl
+        fail_msg: >-
+          launchctl on PATH is "{{ fixture_launchctl_which.stdout | trim }}", not
+          the recorder {{ fixture_launchctl }}. This play must never talk to the
+          launchd of the machine that runs it.
+        quiet: true
+
+    # A box disk is a directory of the host volumes directory: the uninstall must
+    # not remove it.
+    - name: Fixture | Mark a box disk that has to survive the uninstall
+      ansible.builtin.copy:
+        dest: '{{ nomad_host_volumes_dir }}/retained-marker'
+        mode: '0600'
+        content: retained
+
+  tasks:
+    - name: Fixture | Build the facts the plist is rendered from
+      ansible.builtin.import_role:
+        name: nomad_client
+        tasks_from: config
+
+    - name: Fixture | Write the plist the job would be loaded from
+      ansible.builtin.template:
+        src: '{{ playbook_dir }}/../roles/nomad_client/templates/nomad.plist.j2'
+        dest: '{{ nomad_launchd_plist }}'
+        mode: '0600'
+
+    - name: Fixture | Keep a copy, because the uninstall removes the plist
+      ansible.builtin.copy:
+        src: '{{ nomad_launchd_plist }}'
+        dest: '{{ fixture_root }}/rendered.plist'
+        mode: '0600'
+        remote_src: true
+
+    - name: Fixture | Reload the job
+      ansible.builtin.import_role:
+        name: nomad_client
+        tasks_from: reload_launchd
+
+    - name: Fixture | Restart the job
+      ansible.builtin.import_role:
+        name: nomad_client
+        tasks_from: restart
+
+    - name: Fixture | Uninstall the client
+      ansible.builtin.import_role:
+        name: nomad_client
+        tasks_from: uninstall

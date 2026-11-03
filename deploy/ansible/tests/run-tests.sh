@@ -57,6 +57,9 @@
 #   9. uninstall: the release, the settings file and the configuration go, the
 #      Lima home and the client's data directory stay
 #
+# The Mac needs a Mac: the launchd fixtures and the user profile are
+# tests/test-macos-user.sh, run by the macos-fixtures job of .github/workflows/ci.yml.
+#
 # Exit status: 0 every check passed, 1 something failed, 2 a tool is missing.
 set -uo pipefail
 

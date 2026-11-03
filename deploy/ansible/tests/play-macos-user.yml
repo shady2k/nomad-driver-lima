@@ -1,0 +1,52 @@
+---
+# The user profile, applied to the machine that runs the play, into one isolated
+# prefix: no launchd, no Nomad agent, no VM.
+#
+#   BOX_MAC_FIXTURE=~/box-fixture.XXXX ./tests/test-macos-user.sh
+#
+# What it proves: both roles install a client whose every path is under the login
+# home, and a second run changes nothing. The plist, the volume-plugin settings file
+# and the rendered 50-box.json are then asserted by tests/assert-macos-fixture.py,
+# which the script runs.
+- name: The user profile, into an isolated prefix, without launchd or VMs
+  hosts: box_nodes_mac
+  become: false
+  gather_facts: true
+  vars_files:
+    - ../profiles/macos-user.yml
+    - macos-user-fixture-vars.yml
+  vars:
+    # Nothing is loaded, nothing is restarted, nothing is waited for: this run
+    # writes files and the assertions read them.
+    nomad_system_changes: false
+    box_system_changes: false
+    nomad_launchd_load: false
+    nomad_restart_enabled: false
+    nomad_wait_ready: false
+    # A client of its own, not of a cluster.
+    nomad_node_name: mac-fixture
+    nomad_servers: ['127.0.0.1:54647']
+    nomad_bind_addr: 127.0.0.1
+    nomad_advertise_addr: 127.0.0.1
+    nomad_ports:
+      http: 54646
+      rpc: 54647
+      serf: 54648
+    nomad_acl_enabled: false
+    nomad_acl_token: ''
+    nomad_client_intro_token: ''
+  pre_tasks:
+    - name: Fixture | The prefix guards and the stub binaries
+      ansible.builtin.import_tasks: macos-fixture-setup.yml
+
+    # The role creates this directory only when it is missing, so the fixture gives
+    # it a mode the role never writes: if it still has it afterwards, an existing
+    # ~/Library/LaunchAgents keeps whatever its owner put there.
+    - name: Fixture | Give the directory of the plist metadata to preserve
+      ansible.builtin.file:
+        path: '{{ nomad_launchd_plist | dirname }}'
+        state: directory
+        mode: '0711'
+  roles:
+    - box_node
+    - nomad_client

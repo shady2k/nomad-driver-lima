@@ -1,0 +1,47 @@
+---
+# The pre_tasks both Mac fixtures start with: refuse a prefix that is not an
+# isolated throwaway inside the login home, and write the stub binaries the roles
+# ask about. Kept in one file so the two plays cannot disagree about what "inside
+# the prefix" means.
+#
+# Expects the variables of macos-user-fixture-vars.yml.
+
+- name: Fixture | Refuse a prefix that is not a throwaway inside the login home
+  ansible.builtin.assert:
+    that:
+      - fixture_root | length > 0
+      - fixture_root is match('^' ~ (ansible_facts.user_dir | regex_escape) ~ '/')
+      - "'/../' not in fixture_root"
+      - nomad_user_root is match('^' ~ (fixture_root | regex_escape) ~ '/')
+      - nomad_launchd_plist is match('^' ~ (fixture_root | regex_escape) ~ '/')
+      - box_limactl is match('^' ~ (fixture_root | regex_escape) ~ '/')
+    fail_msg: >-
+      The fixture prefix is "{{ fixture_root }}": it has to be a throwaway
+      directory inside {{ ansible_facts.user_dir }}, and every path of the play has
+      to live inside it. Make one with
+      mktemp -d "{{ ansible_facts.user_dir }}/box-fixture.XXXXXX" and pass it as
+      BOX_MAC_FIXTURE.
+    quiet: true
+
+- name: Fixture | Create the directory of the stubs
+  ansible.builtin.file:
+    path: '{{ fixture_root }}/test-bin'
+    state: directory
+    mode: '0700'
+
+# The preflight reads `limactl --version`; the client role reads `nomad version`
+# and would otherwise try to install the pinned release. Neither binary is
+# installed on the machine that runs a fixture, and neither is meant to do
+# anything: the stub answers the one question each is asked.
+- name: Fixture | Write the stub binaries of the run
+  ansible.builtin.copy:
+    dest: '{{ fixture_root }}/test-bin/{{ item.name }}'
+    mode: '0700'
+    content: "#!/bin/sh\n{{ item.body }}\n"
+  loop:
+    - name: limactl
+      body: echo "limactl version {{ fixture_lima_version }}"
+    - name: nomad
+      body: echo "Nomad v{{ fixture_nomad_version }}"
+  loop_control:
+    label: '{{ item.name }}'

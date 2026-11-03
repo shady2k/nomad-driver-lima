@@ -10,10 +10,12 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   or qemu version can change the process model, the pid files or the guest agent's
   behaviour. Only the Linux/qemu path is measured end to end.
 - **macOS and Apple Virtualization are rendered, not run.** The launchd plist,
-  the arm64 configuration and the `vz` block are validated as files on Linux.
-  `launchctl bootstrap` in the system domain, a `kickstart -k` that leaves a box
-  alive, `plutil -lint` and `vz` itself have never been exercised. Closing it
-  needs a Mac.
+  the arm64 configuration and the `vz` block are validated as files on Linux, and
+  the two role fixtures run on a GitHub `macos-15` runner - but with a recording
+  `launchctl` and a stub `limactl`, so they prove the files and the launchd argv,
+  not the daemon. A real `launchctl bootstrap`, a `kickstart -k` that leaves a box
+  alive, `plutil -lint` and `vz` itself have never been exercised. Closing it needs
+  a Mac running the real client.
 - **arm64 has no end-to-end test.** `box-driver`, `box-volume` and `boxd` cross-build for `linux/arm64` in
   every release, but no driver or CLI suite has run a box on arm64.
 - **NixOS is refused by the client role.** The role writes `/etc/nomad.d`, which

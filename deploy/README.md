@@ -495,6 +495,14 @@ the `current` symlink; and runs `uninstall.yml` to check what it removes and wha
 keeps. It needs `nomad`, `limactl`, `qemu-system-x86_64`, `ansible-playbook`,
 `ansible-lint`, `python3` and `go` in `PATH`.
 
+The Mac half of the kit has its own fixtures, because it needs a Mac:
+`deploy/ansible/tests/test-macos-user.sh` applies the user profile into one
+throwaway prefix and the launchd lifecycle of both scopes into two more, with a
+recording `launchctl` (never the real one), a stub `limactl` and a local release -
+no launchd, no VM, no Nomad. The `macos-fixtures` job of `.github/workflows/ci.yml`
+runs it on `macos-15`, an Apple Silicon runner, against a release built from the
+tree with `deploy/build.sh`.
+
 ## If a step fails, send back
 
 1. The failing command and its whole output (`-vv` on `ansible-playbook` for the

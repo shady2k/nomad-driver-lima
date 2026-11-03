@@ -1,0 +1,39 @@
+---
+# What the two Mac fixtures share: one isolated prefix, stubs for the three
+# commands the roles would otherwise run against the machine, and a local release.
+#
+# Every path is inside BOX_MAC_FIXTURE, and each play asserts that before it runs a
+# role: a fixture that escapes its prefix would write into the real login home.
+# tests/test-macos-user.sh sets the three prefixes and BOX_MAC_VERSION.
+#
+# Nothing here starts anything: nomad_system_changes/box_system_changes are false
+# in the install fixture, and the lifecycle fixture reaches launchd only through a
+# recorder that writes its argv to a file.
+
+fixture_root: '{{ lookup("env", "BOX_MAC_FIXTURE") }}'
+
+# The user profile's tree, one level down so the recorder, the repeated log and the
+# rendered copy have room beside it.
+nomad_user_root: '{{ fixture_root }}/user-node'
+nomad_launchd_plist: '{{ fixture_root }}/LaunchAgents/local.nomad.client.plist'
+
+# The release under test: a local build (deploy/build.sh), so the fixtures test
+# this tree and download nothing.
+box_release_source: local
+box_version: '{{ lookup("env", "BOX_MAC_VERSION") }}'
+box_dist_dir: '{{ lookup("env", "BOX_MAC_DIST") }}'
+# Nothing is downloaded, so the cache stays empty; it is inside the prefix anyway.
+box_release_cache_dir: '{{ fixture_root }}/release-cache'
+box_install_deps: false
+
+# The two binaries the roles would run against the machine are stubs: limactl
+# answers --version (the Darwin preflight asks for it and nothing else runs it) and
+# nomad answers version. The configuration is not validated by Nomad here - the
+# Linux suite in run-tests.sh does that - so nothing needs a real Nomad.
+box_limactl: '{{ fixture_root }}/test-bin/limactl'
+nomad_binary: '{{ fixture_root }}/test-bin/nomad'
+nomad_validate_config: false
+# What the stubs answer. The lima version is one `box_min_lima` accepts, and the
+# Nomad one is the release the role pins, so nothing is installed or downloaded.
+fixture_lima_version: '2.2.0'
+fixture_nomad_version: '2.0.7'

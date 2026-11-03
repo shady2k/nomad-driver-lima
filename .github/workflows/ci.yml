@@ -131,6 +131,46 @@ jobs:
             ansible-playbook -i tests/inventory.test.ini "$playbook" --syntax-check
           done
 
+  macos-fixtures:
+    name: macOS fixtures (user LaunchAgent, launchd lifecycle)
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      ANSIBLE_CORE_VERSION: 2.22.0
+      BOX_MAC_VERSION: 0.0.0-fixture
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      # The same Ansible the Linux job runs the kit's linters with.
+      - name: Install ansible-core
+        run: |
+          python -m pip install --disable-pip-version-check "ansible-core==$ANSIBLE_CORE_VERSION"
+          ansible --version
+
+      # The release the fixtures install comes from this tree, not from a download:
+      # deploy/build.sh writes dist/<version>, and box_release_source stays local.
+      - name: Build the release the fixtures install
+        run: ./deploy/build.sh --version "$BOX_MAC_VERSION"
+
+      # Three throwaway prefixes under the login home, which is where the user
+      # profile insists its paths are; the script never removes them.
+      - name: The macOS fixtures (no launchd, no VM)
+        run: |
+          BOX_MAC_FIXTURE=$(mktemp -d "$HOME/box-node.XXXXXX")
+          BOX_MAC_USER_LIFECYCLE_FIXTURE=$(mktemp -d "$HOME/box-user.XXXXXX")
+          BOX_MAC_SYSTEM_LIFECYCLE_FIXTURE=$(mktemp -d "$HOME/box-system.XXXXXX")
+          export BOX_MAC_FIXTURE BOX_MAC_USER_LIFECYCLE_FIXTURE BOX_MAC_SYSTEM_LIFECYCLE_FIXTURE
+          export BOX_MAC_DIST="$PWD/dist/$BOX_MAC_VERSION"
+          ./deploy/ansible/tests/test-macos-user.sh
+          rm -rf "$BOX_MAC_FIXTURE" "$BOX_MAC_USER_LIFECYCLE_FIXTURE" "$BOX_MAC_SYSTEM_LIFECYCLE_FIXTURE"
+
   build:
     name: Release artifacts (cross-build)
     runs-on: ubuntu-latest
