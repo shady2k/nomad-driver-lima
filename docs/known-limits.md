@@ -16,6 +16,13 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   not the daemon. A real `launchctl bootstrap`, a `kickstart -k` that leaves a box
   alive, `plutil -lint` and `vz` itself have never been exercised. Closing it needs
   a Mac running the real client.
+- **A rare hang of Lima's readiness checks on a Mac, cause unknown.** Once, in a
+  direct `limactl start` under `vz` (no Nomad, no driver), the first SSH check
+  passed and the second stayed on an open connection until it was stopped; 20
+  later starts, over usernet and over vsock, did not repeat it. Under Nomad such a
+  start fails after Lima's own wait (10 minutes) and the task's restart policy
+  starts it again. The guest's own logs of that run were lost, so nothing here says
+  why; a repeat with the instance kept would.
 - **arm64 has no end-to-end test.** `box-driver`, `box-volume` and `boxd` cross-build for `linux/arm64` in
   every release, but no driver or CLI suite has run a box on arm64.
 - **NixOS is refused by the client role.** The role writes `/etc/nomad.d`, which
