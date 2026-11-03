@@ -6,6 +6,8 @@
 # The boxes are not affected: AbandonProcessGroup=true means launchd does not
 # signal the rest of the process group, so the limactl hostagents and the VMs they
 # hold keep running and Nomad re-attaches to them.
+#
+# Check mode runs no launchctl here: a --check run must not take a service down.
 
 - name: Reload | Take the daemon down
   ansible.builtin.command:
@@ -13,11 +15,13 @@
   register: nomad_launchd_bootout
   failed_when: false
   changed_when: nomad_launchd_bootout.rc | default(1) == 0
+  when: not ansible_check_mode
 
 - name: Reload | Load it again
   ansible.builtin.command:
     argv: ['launchctl', 'bootstrap', 'system', '{{ nomad_launchd_plist }}']
   changed_when: true
+  when: not ansible_check_mode
 
 - name: Reload | Report the reload
   ansible.builtin.debug:

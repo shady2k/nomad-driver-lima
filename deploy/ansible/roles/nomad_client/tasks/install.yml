@@ -120,6 +120,7 @@
   ansible.builtin.command:
     argv: ['launchctl', 'bootstrap', 'system', '{{ nomad_launchd_plist }}']
   when:
+    - not ansible_check_mode
     - nomad_launchd_enabled | bool
     - nomad_launchd_load | bool
     - nomad_launchd_state.rc | default(1) != 0

@@ -13,6 +13,12 @@
 #
 # The nomad_client role's handler includes this file; deploy/ansible/rollback.yml
 # runs it directly (tasks_from: restart) after it switched the live release.
+#
+# Check mode runs every task of this file except the two that signal a service:
+# `state: restarted` in check mode is not a no-op, it asks the host about the unit,
+# and a unit this host does not have - a --check run before the first install -
+# answers "Could not find the requested service" and fails the play. The report
+# says what would have been restarted instead.
 
 - name: Restart | Restart the systemd unit
   ansible.builtin.systemd_service:
@@ -20,6 +26,7 @@
     state: restarted
     daemon_reload: true
   when:
+    - not ansible_check_mode
     - nomad_system_changes | bool
     - ansible_facts.system == 'Linux'
 
@@ -27,6 +34,7 @@
   ansible.builtin.command:
     argv: ['launchctl', 'kickstart', '-k', 'system/{{ nomad_launchd_label }}']
   when:
+    - not ansible_check_mode
     - nomad_system_changes | bool
     - ansible_facts.system == 'Darwin'
   changed_when: true
@@ -34,7 +42,9 @@
 - name: Restart | Report the restart
   ansible.builtin.debug:
     msg: >-
-      {{ nomad_service_name }} restarted on {{ inventory_hostname }}
+      {{ ('check mode: would restart ' ~ nomad_service_name ~ ' on ' ~ inventory_hostname)
+         if ansible_check_mode
+         else (nomad_service_name ~ ' restarted on ' ~ inventory_hostname) }}
       ({{ 'systemd, KillMode=' ~ nomad_kill_mode if ansible_facts.system == 'Linux'
          else 'launchd, AbandonProcessGroup=' ~ nomad_launchd_abandon_process_group }}):
       the boxes of this node keep running.

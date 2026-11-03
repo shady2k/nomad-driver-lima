@@ -1,0 +1,18 @@
+---
+# The failure the guards in roles/nomad_client/tasks/restart.yml avoid.
+#
+# `state: restarted` in check mode is not a no-op: the module asks the host about
+# the unit, and a unit that was never installed answers "Could not find the
+# requested service", which fails the whole play. run-tests.sh runs this play to
+# show that the shape its check-mode case covers really fails here; the guards are
+# what keeps that failure out of a --check run of site.yml.
+#
+# The unit name is not "nomad": a host that runs a real client must not be touched.
+- name: A check-mode restart of a unit this host does not have
+  hosts: box_nodes
+  gather_facts: false
+  tasks:
+    - name: Restart a unit that was never installed
+      ansible.builtin.systemd_service:
+        name: '{{ nomad_absent_unit | default("nomad-never-installed") }}'
+        state: restarted

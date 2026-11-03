@@ -30,7 +30,10 @@
 #      no host; 3c: an artifact whose bytes are not the ones SHA256SUMS names, and
 #      a release without the artifacts this node installs, are both refused and
 #      install nothing
-#   4. --check against localhost changes nothing on disk
+#   4. --check against localhost changes nothing on disk; 4b: a --check of a first
+#      install plans the client restart instead of restarting a unit that is not
+#      installed (the case fails without the guards of roles/nomad_client/tasks/
+#      restart.yml, which the same section shows on this host)
 #   5. a real apply into a prefix: the release layout and the live symlink, the
 #      rendered JSON accepted by `nomad config validate`, the unit (KillMode,
 #      ExecStart, XDG_RUNTIME_DIR), the secrets file 0600, /etc/box/volume.json
@@ -461,6 +464,42 @@ if [[ -e $NOMAD_TEST_PREFIX/etc/nomad.d/10-base.json || -e $NOMAD_TEST_PREFIX/op
 	bad '--check wrote the release or the configuration'
 else
 	ok '--check wrote nothing'
+fi
+
+# The restart handler used to run in check mode too. On a host where the client was
+# never installed that is a failure, not a plan: `state: restarted` asks about the
+# unit and the missing unit stops the run. The case below is the plan of a first
+# install, on a prefix with no unit in it.
+printf -- '-- 4b. --check plans the restart of a unit that is not installed\n'
+export NOMAD_TEST_PREFIX=$TEST_ROOT/check-missing-service
+prepare_prefix "$NOMAD_TEST_PREFIX"
+CM=$NOMAD_TEST_PREFIX
+use_release "$V1"
+# nomad_system_changes: true arms the restart handler (vars-test.yml turns it off
+# for the other cases); box_system_changes stays false, so no service is touched
+# while the client play plans its restart. Nothing is written either way: the run
+# is --check.
+if play "$TESTS_DIR/play-node.yml" --check \
+	-e nomad_system_changes=true -e nomad_restart_enabled=true \
+	>"$TEST_ROOT/check-missing-service.log" 2>&1; then
+	ok '--check of a first install passes on a host without the nomad unit'
+else
+	bad '--check of a first install failed on a host without the nomad unit (tests/.test/check-missing-service.log)'
+	tail -30 "$TEST_ROOT/check-missing-service.log"
+fi
+check_grep '--check reports the restart it did not do' 'check mode: would restart' "$TEST_ROOT/check-missing-service.log"
+check 'the unit was not written by the --check run' test ! -e "$CM/etc/systemd/system/nomad.service"
+# And the shape is a real one: this host has no such unit, and a check-mode restart
+# of it fails. Without that, a passing case above would prove nothing.
+if play "$TESTS_DIR/play-absent-unit.yml" --check >"$TEST_ROOT/absent-unit.log" 2>&1; then
+	bad 'a check-mode restart of a unit that is not installed succeeded: this host cannot show the failure the guards avoid'
+else
+	if grep -qE 'Could not find the requested service' "$TEST_ROOT/absent-unit.log"; then
+		ok 'a check-mode restart of a missing unit does fail here - the case above is a real regression'
+	else
+		bad 'the missing-unit probe failed for another reason (tests/.test/absent-unit.log)'
+		tail -20 "$TEST_ROOT/absent-unit.log"
+	fi
 fi
 
 # --------------------------------------------------------- 5. a real apply
