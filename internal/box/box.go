@@ -761,6 +761,11 @@ func (b *Box) CopyTaskFiles(ctx context.Context, localDir, secretsDir, localDirI
 	return count, nil
 }
 
+// nomadSecretsMarker is the empty file Nomad puts into the tmpfs it mounts as a
+// task's secrets/ directory on Linux (allocdir's secretMarker). It is Nomad's,
+// not the job's, and is not copied into the guest.
+const nomadSecretsMarker = ".nomad-mount"
+
 // collectTaskFiles lists the regular files below root, keyed by the path below
 // it with prefix in front (for the log messages).
 func collectTaskFiles(root, prefix string) ([]taskFile, error) {
@@ -781,6 +786,9 @@ func collectTaskFiles(root, prefix string) ([]taskFile, error) {
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
+		}
+		if rel == nomadSecretsMarker {
+			return nil
 		}
 		files = append(files, taskFile{host: path, rel: rel})
 		return nil

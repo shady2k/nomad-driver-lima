@@ -393,6 +393,8 @@ func TestCopyTaskFiles(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(local, "nested"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(local, "nested", "extra.conf"), []byte("x"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(secrets, "token"), []byte("s3cret"), 0o600))
+	// Nomad's own marker of its secrets tmpfs is not a task file.
+	require.NoError(t, os.WriteFile(filepath.Join(secrets, ".nomad-mount"), nil, 0o600))
 
 	n, err := b.CopyTaskFiles(context.Background(), local, secrets, "/etc/box", DefaultSecretsDirInGuest)
 	require.NoError(t, err)
