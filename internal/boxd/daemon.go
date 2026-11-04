@@ -330,6 +330,7 @@ func (d *Daemon) Info(ctx context.Context) Info {
 	info := Info{
 		BoxdVersion: version.Version,
 		Executors:   []ExecutorInfo{},
+		Platform:    readPlatform(d.cfg.platformDir()),
 		Sessions:    d.mgr.Count(),
 		CPUs:        runtime.NumCPU(),
 	}
@@ -410,7 +411,8 @@ func fail(w http.ResponseWriter, err error) {
 }
 
 // startLine says what this boxd runs with: its version, the executors and
-// whether they have credentials, and whether the task files are mounted.
+// whether they have credentials, whether the task files are mounted, and which
+// platform bundle the box mounts.
 func (d *Daemon) startLine(ctx context.Context) string {
 	var parts []string
 	for _, name := range []string{"prime", "opencode", "claude"} {
@@ -430,6 +432,14 @@ func (d *Daemon) startLine(ctx context.Context) string {
 			mounted = "mounted (" + f[0] + ")"
 		}
 	}
-	return fmt.Sprintf("boxd %s: executors %s; task files at %s %s",
-		version.Version, strings.Join(parts, ", "), d.cfg.SecretsDir, mounted)
+	platform := readPlatform(d.cfg.platformDir())
+	bundle := "no bundle mounted at " + platform.Path
+	if platform.Mounted {
+		bundle = "platform " + platform.Version
+		if platform.Boxd != "" {
+			bundle += " (boxd " + platform.Boxd + ")"
+		}
+	}
+	return fmt.Sprintf("boxd %s: executors %s; task files at %s %s; %s",
+		version.Version, strings.Join(parts, ", "), d.cfg.SecretsDir, mounted, bundle)
 }

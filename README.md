@@ -181,6 +181,20 @@ export BOXD_RELEASE=v0.1.0            # boxd_linux_<arch> from that release, sha
 images/build.sh amd64 1.0.0           # -> out/box-base-1.0.0-amd64.qcow2 (+ .sha256, .json)
 ```
 
+The image carries the OS and the toolchain; `boxd`, the executors and your
+add-ons are a separate **platform bundle** that the node mounts into the guest at
+`/opt/box`. Build one from the same release:
+
+```sh
+images/boxd-source.sh amd64 /tmp/boxd   # the boxd of that release, recorded
+images/platform.sh --version 1.0.0 --arch amd64 --boxd /tmp/boxd/boxd --out out
+# -> out/box-platform-1.0.0-linux-amd64.tar.gz (+ .sha256), one JSON line
+```
+
+A new executor or a new `boxd` is then a new bundle version, not a new image;
+`docs/guest-image.md` has the layout and `--addons DIR` puts extra files at
+`/opt/box/addons`.
+
 A closed network sets mirrors for the build's sources — the recipe names no
 private one (`images/README.md` has the whole list):
 
@@ -195,8 +209,9 @@ The image is a VM with an 8 GiB virtual disk by default; a box's `disk_gib` can
 only grow it.
 
 **Success:** the script ends with `built out/box-base-1.0.0-amd64.qcow2`, its
-sha256 and size, and writes the manifest that records every source and the
-`boxd` it carries. `guest/no-secrets.sh` ran before the disk was captured.
+sha256 and size, and writes the manifest that records every source, the stub
+`boxd.service` it runs and `"platform": "mount"`. `guest/no-secrets.sh` ran
+before the disk was captured.
 
 Bringing your own image instead is supported: `docs/guest-image.md` is the
 contract it has to meet, and `guest/boxd-install.sh` puts `boxd` into it in one
@@ -205,33 +220,37 @@ command.
 ### 3. Verify the image
 
 ```sh
+PLATFORM_ARCHIVE=out/box-platform-1.0.0-linux-amd64.tar.gz \
 IMAGE_PATH=out/box-base-1.0.0-amd64.qcow2 OUT=out \
   images/verify.sh amd64 1.0.0
 ```
 
-It boots the image the way the driver does and runs `images/guest-checks.sh`
-inside it. **Success:** one `PASS` line per check and exit status 0 — the image
-boots, cloud-init finishes, `boxd.service` is enabled and active, the executors
-are available, the credential paths are tmpfs, and the disk grew into its
-partition. `docs/guest-image.md` lists every check.
+It boots the image the way the driver does, with the bundle mounted read-only at
+`/opt/box`, and runs `images/guest-checks.sh` inside it. **Success:** one `PASS`
+line per check and exit status 0 — the image boots, cloud-init finishes, the
+bundle is mounted and `boxd.service` runs out of it, the executors are available,
+the credential paths are tmpfs, and the disk grew into its partition.
+`docs/guest-image.md` lists every check.
 
 ### 4. Publish the image and its index
 
 ```sh
 export BOX_STORE_URL=https://store.example.com/box-images
 export BOX_STORE_TOKEN_FILE=/run/secrets/store-token      # or BOX_STORE_TOKEN
+images/publish.sh --platform out/box-platform-1.0.0-linux-amd64.tar.gz amd64 1.0.0
 images/publish.sh amd64 1.0.0
 
 BOX_STORE_URL=$BOX_STORE_URL images/verify.sh amd64 1.0.0  # the published copy
 ```
 
 `publish.sh` refuses a version that already exists (a published version never
-changes), uploads the image, its `.sha256` and its manifest, reads them back, and
-only then merges the version into `index.json` under a lock.
+changes), uploads the artifact, its `.sha256` and its manifest, reads them back,
+and only then merges the version into `index.json` under a lock.
 
 **Success:** `https://store.example.com/box-images/index.json` lists
-`images["1.0.0"]["amd64"]` with a `url` and a `sha256`. Point the coordinator at
-that document:
+`images["1.0.0"]["amd64"]` with a `url` and a `sha256` (and `"platform":
+"mount"`), and `platforms["1.0.0"]["amd64"]` with the bundle's `url`, `sha256`,
+`boxd` and `tools`. Point the coordinator at that document:
 
 ```yaml
 # inventory/group_vars/box_coordinators.yml

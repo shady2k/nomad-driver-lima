@@ -143,15 +143,25 @@ channel; `box ssh` is an interactive shell over it.
 
 ## Images
 
-A box boots an image the operator built. There are two ways to one: `images/` is
-the recipe and the build automation -- `images/build.sh` builds, `images/verify.sh`
-boots and checks, `images/publish.sh` uploads to the operator's store -- and any
+A box boots an image the operator built, and -- for an image that says so -- a
+platform bundle the node mounts into it. There are two ways to an image:
+`images/` is the recipe and the build automation -- `images/build.sh` builds,
+`images/platform.sh` builds the bundle, `images/verify.sh` boots and checks the
+two together, `images/publish.sh` uploads both to the operator's store -- and any
 qcow2 that boots under Lima, runs `boxd` and meets the guest contract (cloud-init
-on the first boot, passwordless `sudo` for Lima's user, the executors on `PATH`,
-`/run` a tmpfs) works just as well. The release carries `boxd` for both guest
-architectures and `boxd-install.sh`, which puts it into an image of the operator's
-own. `docs/guest-image.md` is the contract; nothing here ships or publishes an
-image.
+on the first boot, passwordless `sudo` for Lima's user, an empty `/opt/box`, a
+`boxd.service` that runs `/opt/box/bin/boxd`, `/run` a tmpfs) works just as well.
+The release carries `boxd` for both guest architectures and `boxd-install.sh`,
+which puts it into an image of the operator's own that carries no bundle.
+`docs/guest-image.md` is the contract; nothing here ships or publishes an image
+or a bundle.
+
+Why the split: `boxd` and the executors change far more often than an OS image
+should, and an image derived from another one is nobody's to rebuild. The bundle
+is a versioned archive the node downloads and mounts read-only at `/opt/box`
+before the boot, the way Lima delivers its own guest agent; the image keeps the
+kernel, the toolchain and a stub unit. A bundle is a new version of an executor
+or of `boxd` with no image build at all.
 
 An image is identified by a URL and a sha256 through an index the CLI reads
 (`BOX_IMAGE_INDEX`), so a published version never changes: a new build is a new

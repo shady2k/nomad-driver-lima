@@ -4,19 +4,22 @@
 # Usage: images/verify.sh <arch> <version>
 #
 # Takes an image -- a local build (IMAGE_PATH) or one published to the operator's
-# store (BOX_STORE_URL) -- checks its digest, boots it with images/box-boot.yaml
-# (the same shape of Lima configuration the box driver writes), and runs
-# images/guest-checks.sh inside the guest. Every check prints PASS or FAIL with
-# the value expected and the value found, and the script exits non-zero when any
-# of them failed.
+# store (BOX_STORE_URL) -- checks its digest, and boots it with a platform bundle
+# (PLATFORM_ARCHIVE, or one built here with images/platform.sh) mounted read-only
+# at /opt/box, the way the node mounts one into a box. It uses
+# images/box-boot.yaml, the same shape of Lima configuration the box driver
+# writes, and runs images/guest-checks.sh inside the guest. Every check prints
+# PASS or FAIL with the value expected and the value found, and the script exits
+# non-zero when any of them failed.
 #
 # What is checked, in the guest: it booted, cloud-init finished, boxd.service is
-# active and boxctl answers; the tool versions are the ones the manifest records,
-# and so is the boxd binary (its sha256 and the version it reports); /run/box/secrets
-# and /run/boxd are tmpfs; a credential written into /run/box/secrets the way the
-# driver delivers it is read by boxd, is not readable by the box's default user,
-# and is nowhere on the disk; a rotated credential reaches boxd through
-# `boxctl reload`; guest/no-secrets.sh finds no secret in the image.
+# active, the bundle is mounted at /opt/box and boxctl answers out of it; the
+# image's tool versions are the ones its manifest records, and so are the
+# bundle's (its version, its boxd and its tools); /run/box/secrets and /run/boxd
+# are tmpfs; a credential written into /run/box/secrets the way the driver
+# delivers it is read by boxd, is not readable by the box's default user, and is
+# nowhere on the disk; a rotated credential reaches boxd through `boxctl reload`;
+# guest/no-secrets.sh finds no secret in the image.
 #
 # Environment:
 #   BOX_STORE_URL           base URL of the store (required unless IMAGE_PATH is
@@ -34,6 +37,15 @@
 #   LIMA_HOME    Lima home (default $WORK/lima-home)
 #   LIMACTL      limactl binary (default: PATH, then a nix store lima 2.x)
 #   QEMU_IMG     qemu-img binary (default: PATH, then a nix store qemu 11.x)
+#   PLATFORM_ARCHIVE  a platform bundle to boot with (box-platform-<version>
+#                -linux-<arch>.tar.gz, from images/platform.sh). Unset: one is
+#                built here with images/platform.sh, from the boxd source the
+#                BOXD_* settings name (images/boxd-source.sh), version $VERSION
+#   PLATFORM_ADDONS   a directory to pack into the bundle built here (the same
+#                input images/platform.sh takes; ignored when PLATFORM_ARCHIVE
+#                is set)
+#   BOXD_RELEASE, BOXD_COMMIT, BOXD_ALLOW_DIRTY, BOXD_REPO, BOXD_RELEASE_BASE_URL
+#                which boxd a bundle built here carries (images/boxd-source.sh)
 #   CPUS/MEMORY/DISK  VM size (default: 2 / 2GiB / 20GiB)
 #   KEEP=1       keep the VM and the downloaded image
 #
@@ -212,10 +224,84 @@ if [[ -n $MANIFEST ]]; then
   fi
 fi
 
+# --- the platform bundle ------------------------------------------------------
+# The image carries no boxd and no executor: the node downloads a platform bundle
+# and mounts it read-only at /opt/box before the guest boots (docs/guest-image.md).
+# This is the same thing for one boot: a bundle on this host -- the one given, or
+# one built here -- unpacked into a directory of its own and mounted the way the
+# driver mounts it (9p with cache fscache, read-only).
+PLATFORM_ARCHIVE=${PLATFORM_ARCHIVE:-}
+BUNDLE_ROOT=$WORK/bundle
+BUNDLE_DIR=$BUNDLE_ROOT/tree
+rm -rf "$BUNDLE_ROOT"
+mkdir -p "$BUNDLE_DIR"
+if [[ -n $PLATFORM_ARCHIVE ]]; then
+  log "using the platform bundle $PLATFORM_ARCHIVE"
+  [[ -s $PLATFORM_ARCHIVE ]] || die "PLATFORM_ARCHIVE=$PLATFORM_ARCHIVE does not exist"
+  PLATFORM_ARCHIVE=$(cd "$(dirname "$PLATFORM_ARCHIVE")" && pwd)/$(basename "$PLATFORM_ARCHIVE")
+else
+  log "building a platform bundle for linux/$ARCH with boxd from ${BOXD_RELEASE:-${BOXD_COMMIT:-this checkout}}"
+  BOXD_DIR=$BUNDLE_ROOT/boxd
+  mkdir -p "$BOXD_DIR"
+  "$ROOT/images/boxd-source.sh" "$ARCH" "$BOXD_DIR" || die "images/boxd-source.sh failed"
+  PLATFORM_ADDONS_ARGS=()
+  if [[ -n ${PLATFORM_ADDONS:-} ]]; then
+    PLATFORM_ADDONS_ARGS=(--addons "$PLATFORM_ADDONS")
+  fi
+  "$ROOT/images/platform.sh" --version "$VERSION" --arch "$ARCH" \
+    --boxd "$BOXD_DIR/boxd" --out "$BUNDLE_ROOT/out" "${PLATFORM_ADDONS_ARGS[@]}" > "$BUNDLE_ROOT/built.json" \
+    || die "images/platform.sh could not build a bundle"
+  cat "$BUNDLE_ROOT/built.json" >&2
+  PLATFORM_ARCHIVE=$BUNDLE_ROOT/out/box-platform-$VERSION-linux-$ARCH.tar.gz
+  # The boxd binary went into the archive; the tree it was built from is not
+  # needed any more. The archive stays: it is what this run mounts and what the
+  # report names.
+  rm -rf "$BOXD_DIR"
+fi
+WANT_BUNDLE_SHA=$(sha256sum "$PLATFORM_ARCHIVE" | cut -d' ' -f1)
+if [[ -s $PLATFORM_ARCHIVE.sha256 ]]; then
+  check "the bundle's sha256 is the digest it came with" \
+    "$(cut -d' ' -f1 "$PLATFORM_ARCHIVE.sha256")" "$WANT_BUNDLE_SHA"
+fi
+tar -xzf "$PLATFORM_ARCHIVE" -C "$BUNDLE_DIR" || die "cannot unpack $PLATFORM_ARCHIVE"
+[[ -s $BUNDLE_DIR/manifest.json ]] || die "the bundle has no manifest.json"
+BUNDLE_VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$BUNDLE_DIR/manifest.json") \
+  || die "the bundle's manifest is not valid JSON"
+BUNDLE_BOXD=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("boxd", ""))' "$BUNDLE_DIR/manifest.json")
+BUNDLE_SCHEMA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("schema", ""))' "$BUNDLE_DIR/manifest.json")
+log "bundle $BUNDLE_VERSION (boxd ${BUNDLE_BOXD:-?}) at $BUNDLE_DIR, sha256 $WANT_BUNDLE_SHA"
+check "the bundle is schema 1" "1" "$BUNDLE_SCHEMA"
+check "the bundle holds the boxd it names" "present" \
+  "$([[ -x $BUNDLE_DIR/bin/boxd ]] && echo present || echo missing)"
+
 # --- boot --------------------------------------------------------------------
+# box-boot.yaml is the shape of the driver's own configuration, the platform
+# mount included: __MOUNTS__ is the bundle's mount. The directory is the bundle's
+# own and never changes under the guest -- a new bundle is a new directory -- so
+# 9p may cache it. A run always mounts one: what this verifies is the pair, an
+# image that takes a bundle and a bundle that runs.
+MOUNTS_YAML=$(python3 - "$BUNDLE_DIR" <<'PY'
+import sys
+location = sys.argv[1]
+print()
+print(f"- location: {location!r}")
+print("  mountPoint: /opt/box")
+print("  writable: false")
+print("  9p:")
+print("    securityModel: none")
+print("    cache: fscache")
+PY
+)
 YAML=$WORK/scripts/box-boot-$ARCH.yaml
-sed -e "s|__LIMA_ARCH__|$LIMA_ARCH|g" -e "s|__IMAGE_PATH__|$IMAGE|g" \
-  "$ROOT/images/box-boot.yaml" > "$YAML"
+python3 - "$ROOT/images/box-boot.yaml" "$YAML" "$LIMA_ARCH" "$IMAGE" "$MOUNTS_YAML" <<'PY'
+import sys
+
+template, out, lima_arch, image, mounts = sys.argv[1:6]
+text = open(template).read()
+text = text.replace("__LIMA_ARCH__", lima_arch).replace("__IMAGE_PATH__", image)
+text = text.replace("__MOUNTS__", mounts)
+open(out, "w").write(text)
+PY
 # Without a usable /dev/kvm qemu runs the guest under TCG, where lima's
 # default CPU model for a guest of the host's own architecture ("host") does not
 # exist; "max" is the TCG equivalent.
@@ -247,10 +333,10 @@ fi
 log "running the guest checks"
 lima cp "$ROOT/images/guest-checks.sh" "$NAME:/tmp/guest-checks.sh"
 lima cp "$ROOT/guest/no-secrets.sh" "$NAME:/tmp/no-secrets.sh"
-GUEST_ARGS=()
+GUEST_ARGS=(--platform /opt/box)
 if [[ -n $MANIFEST ]]; then
   lima cp "$MANIFEST" "$NAME:/tmp/image-manifest.json"
-  GUEST_ARGS=(--manifest /tmp/image-manifest.json)
+  GUEST_ARGS+=(--manifest /tmp/image-manifest.json)
 fi
 set +e
 lima shell "$NAME" sudo bash /tmp/guest-checks.sh "${GUEST_ARGS[@]}"

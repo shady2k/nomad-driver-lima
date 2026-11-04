@@ -87,6 +87,17 @@ type ExecutorInfo struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
+// PlatformInfo is the versioned platform bundle mounted at /opt/box: what the
+// node downloaded and mounted, as the guest sees it.
+type PlatformInfo struct {
+	Path    string            `json:"path"`
+	Mounted bool              `json:"mounted"`
+	Version string            `json:"version,omitempty"`
+	Boxd    string            `json:"boxd,omitempty"`
+	Tools   map[string]string `json:"tools,omitempty"`
+	Reason  string            `json:"reason,omitempty"`
+}
+
 // Info is the result of "boxctl info".
 type Info struct {
 	BoxdVersion string         `json:"boxd_version"`
@@ -99,6 +110,9 @@ type Info struct {
 	Prepare *PrepareState `json:"prepare,omitempty"`
 	// Usage is the guest's load, measured every few seconds.
 	Usage *Usage `json:"usage,omitempty"`
+	// Platform is the bundle the box mounts at /opt/box; it is always present,
+	// with Mounted false and a reason when there is none.
+	Platform PlatformInfo `json:"platform"`
 }
 
 // ErrorBody is the failure document boxctl prints to stdout and exits 1 with.

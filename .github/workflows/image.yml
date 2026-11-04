@@ -1,14 +1,19 @@
-# The guest image: the recipe in images/ builds an amd64 image, and
-# images/verify.sh boots it and runs its checks. arm64 is not built here: the
-# GitHub arm64 runners have no /dev/kvm, and an emulated build takes hours to
-# prove what the amd64 one already proves. An arm64 image is built by the
-# operator on an arm64 host (images/build.sh arm64 <version>).
+# The guest image and the platform bundle it expects: the recipe in images/
+# builds an amd64 image, images/platform.sh builds the bundle for the same
+# architecture on this host (no VM: the executors are fetched as their own
+# tarballs), and images/verify.sh boots the image with that bundle mounted
+# read-only at /opt/box and runs its checks. arm64 is not built here: the GitHub
+# arm64 runners have no /dev/kvm, and an emulated build takes hours to prove what
+# the amd64 one already proves. An arm64 bundle builds on this host with
+# images/platform.sh --arch arm64; an arm64 image is built by the operator on an
+# arm64 host (images/build.sh arm64 <version>).
 #
-# This repository publishes no image. Nothing here uploads to a release, writes an
-# index, or contacts a store: an image is the operator's, built with images/build.sh
-# and published with images/publish.sh to their own store. What a run of this
-# workflow proves is that the recipe in the tree builds an image that boots and
-# passes images/guest-checks.sh.
+# This repository publishes no image and no bundle. Nothing here uploads to a
+# release, writes an index, or contacts a store: they are the operator's, built
+# with images/build.sh and images/platform.sh and published with
+# images/publish.sh to their own store. What a run of this workflow proves is that
+# the tree builds an image and a bundle that boot together and pass
+# images/guest-checks.sh.
 #
 # Runs on pull requests that touch the recipe, the guest tools boxd is installed
 # with, or boxd itself, and on demand with a version and a boxd source.
@@ -151,6 +156,29 @@ jobs:
       # Short work directories: lima puts a socket at <lima home>/<instance>/serial
       # paths and refuses a long one, so nothing under $GITHUB_WORKSPACE is used
       # for the build.
+      - name: Build the platform bundle
+        env:
+          VERSION: ${{ steps.image.outputs.version }}
+          SOURCE: ${{ steps.image.outputs.source }}
+          REF: ${{ steps.image.outputs.ref }}
+          ARCH: ${{ matrix.arch }}
+        timeout-minutes: 20
+        run: |
+          sudo mkdir -p /tmp/im && sudo chown "$(id -u):$(id -g)" /tmp/im
+          case $SOURCE in
+            release) export BOXD_RELEASE="$REF" ;;
+            commit) export BOXD_COMMIT="$REF" ;;
+            head) ;;
+          esac
+          # The bundle carries the boxd of this run: the same source the image's
+          # stub unit is printed from. Nothing is published; no mirror is set
+          # here, so the executors come from the public upstreams images/pins.sh
+          # pins.
+          images/boxd-source.sh "$ARCH" /tmp/im/boxd
+          images/platform.sh --version "$VERSION" --arch "$ARCH" \
+            --boxd /tmp/im/boxd/boxd --out /tmp/im/out | tee /tmp/im/out/platform.json
+          ls -l /tmp/im/out
+
       - name: Build the image
         env:
           VERSION: ${{ steps.image.outputs.version }}
@@ -159,7 +187,6 @@ jobs:
           ARCH: ${{ matrix.arch }}
         timeout-minutes: 60
         run: |
-          sudo mkdir -p /tmp/im && sudo chown "$(id -u):$(id -g)" /tmp/im
           case $SOURCE in
             release) export BOXD_RELEASE="$REF" ;;
             commit) export BOXD_COMMIT="$REF" ;;
@@ -171,13 +198,18 @@ jobs:
           OUT=/tmp/im/out WORK=/tmp/im/work images/build.sh "$ARCH" "$VERSION"
           ls -l /tmp/im/out
 
-      - name: Boot the image and run the guest checks
+      # The bundle built above is mounted into the verify VM the way the node
+      # mounts one into a box (read-only, 9p with cache fscache), so this proves
+      # the two halves together: an image that expects a bundle, and a bundle
+      # that runs.
+      - name: Boot the image with the bundle and run the guest checks
         env:
           VERSION: ${{ steps.image.outputs.version }}
           ARCH: ${{ matrix.arch }}
         timeout-minutes: 30
         run: |
           IMAGE_PATH=/tmp/im/out/box-base-$VERSION-$ARCH.qcow2 \
+          PLATFORM_ARCHIVE=/tmp/im/out/box-platform-$VERSION-linux-$ARCH.tar.gz \
           OUT=/tmp/im/out WORK=/tmp/im/work \
             images/verify.sh "$ARCH" "$VERSION"
 
@@ -193,13 +225,29 @@ jobs:
              /tmp/im/out/box-base-"$VERSION"-"$ARCH".qcow2.sha256 \
              /tmp/im/out/box-base-"$VERSION"-"$ARCH".json \
              /tmp/im/out/box-base-"$VERSION"-"$ARCH".guest-checks.txt \
+             /tmp/im/out/box-platform-"$VERSION"-linux-"$ARCH".tar.gz \
+             /tmp/im/out/box-platform-"$VERSION"-linux-"$ARCH".tar.gz.sha256 \
+             /tmp/im/out/platform.json \
              /tmp/im/artifact/
           (cd /tmp/im/artifact && sha256sum --check ./*.qcow2.sha256)
+          (cd /tmp/im/artifact && sha256sum --check ./*.tar.gz.sha256)
           ls -l /tmp/im/artifact
           {
             echo "### Image $VERSION ($ARCH)"
             echo
-            echo "boxd: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["boxd"]; print(d["kind"], d["tag"] or d["resolved_commit"], "sha256", d["sha256"][:16])' /tmp/im/out/box-base-"$VERSION"-"$ARCH".json)"
+            python3 - /tmp/im/out/box-base-"$VERSION"-"$ARCH".json /tmp/im/out/platform.json <<'PY'
+          import json, sys
+          image = json.load(open(sys.argv[1]))
+          bundle = json.load(open(sys.argv[2]))
+          unit = image.get("unit_from") or {}
+          print(f"image platform field: {image.get('platform')}")
+          print(f"stub unit printed by boxd: {unit.get('kind')} "
+                f"{unit.get('tag') or unit.get('resolved_commit')} sha256 {str(unit.get('sha256'))[:16]}")
+          print()
+          print("platform bundle:")
+          print(f"  version {bundle['version']} {bundle['arch']}, boxd {bundle['boxd']}, "
+                f"tools {bundle['tools']}, sha256 {bundle['sha256'][:16]}..., {bundle['size']} bytes")
+          PY
             echo
             echo "Nothing was published: images/publish.sh uploads to the operator's own store."
           } >> "$GITHUB_STEP_SUMMARY"

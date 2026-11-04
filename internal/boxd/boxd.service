@@ -3,9 +3,10 @@ Description=boxd: box guest agent-session daemon
 Documentation=https://github.com/shady2k/nomad-driver-lima
 After=local-fs.target network.target
 Wants=local-fs.target
-# The task files and the executor credentials are read-only mounts of the
-# host (the box driver's files.go); boxd reads them as it starts.
-RequiresMountsFor=/run/box/secrets /etc/box/local
+# The platform bundle, the task files and the executor credentials are
+# read-only mounts of the host (the box driver's files.go); boxd reads them as
+# it starts.
+RequiresMountsFor=/opt/box /run/box/secrets /etc/box/local
 
 [Service]
 Type=simple
@@ -14,12 +15,14 @@ Type=simple
 # box's files on the host's tmpfs, and everything boxd derives from them lives
 # in the runtime directory (/run/boxd), which a reboot removes. The
 # socket is recreated per boot too.
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# The bundle's bin comes first, so the daemon and the executor version probes
+# (which run with this environment) find the executors the bundle carries.
+Environment=PATH=/opt/box/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 StateDirectory=boxd
 StateDirectoryMode=0700
 RuntimeDirectory=boxd
 RuntimeDirectoryMode=0755
-ExecStart=/usr/local/bin/boxd \
+ExecStart=/opt/box/bin/boxd \
     --socket /run/boxd/boxd.sock \
     --state-dir /var/lib/boxd \
     --runtime-dir /run/boxd \

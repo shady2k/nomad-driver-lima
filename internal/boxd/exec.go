@@ -52,14 +52,19 @@ func splitModel(s string) (provider, model string) {
 	return "", s
 }
 
-// probeEnv is the environment a version probe runs in: exactly the HOME and
-// XDG_CONFIG_HOME its sessions get.
+// probeEnv is the environment a version probe runs in: exactly the HOME and the
+// XDG_CONFIG_HOME its sessions get, and the bundle's bin in front of PATH.
 //
 // A probe is not a read-only question. `opencode --version` creates its data
 // directory and a log in $HOME, so a probe that inherits boxd's own HOME writes
 // into root's home the moment somebody asks `boxctl info`.
-func probeEnv(dirs executorDirs) []string {
+//
+// platformBin is the bundle's bin, in front of PATH: a probe must find the
+// executors where the daemon would run them, so `boxctl info` reports the
+// versions the box actually uses.
+func probeEnv(dirs executorDirs, platformBin string) []string {
 	env := os.Environ()
+	env = appendFiltered(env, "PATH", "PATH="+withPathFront(pathOf(env), platformBin))
 	if dirs.home == "" {
 		return env
 	}
@@ -147,25 +152,28 @@ func buildExecutor(name string, cfg DaemonConfig) (Executor, error) {
 	switch name {
 	case "prime":
 		return &primeExecutor{
-			bin:       cfg.PrimeAgent,
-			configDir: cfg.primeConfigDir(),
-			envFile:   filepath.Join(cfg.SecretsDir, "prime", "env"),
-			dirs:      cfg.dirsOf("prime"),
-			secrets:   filepath.Join(cfg.SecretsDir, "prime"),
+			bin:         cfg.PrimeAgent,
+			configDir:   cfg.primeConfigDir(),
+			envFile:     filepath.Join(cfg.SecretsDir, "prime", "env"),
+			dirs:        cfg.dirsOf("prime"),
+			secrets:     filepath.Join(cfg.SecretsDir, "prime"),
+			platformBin: cfg.platformBinDir(),
 		}, nil
 	case "opencode":
 		return &opencodeExecutor{
-			bin:     cfg.OpenCode,
-			envFile: filepath.Join(cfg.SecretsDir, "opencode", "env"),
-			dirs:    cfg.dirsOf("opencode"),
-			secrets: filepath.Join(cfg.SecretsDir, "opencode"),
+			bin:         cfg.OpenCode,
+			envFile:     filepath.Join(cfg.SecretsDir, "opencode", "env"),
+			dirs:        cfg.dirsOf("opencode"),
+			secrets:     filepath.Join(cfg.SecretsDir, "opencode"),
+			platformBin: cfg.platformBinDir(),
 		}, nil
 	case "claude":
 		return &claudeExecutor{
-			bin:     cfg.ClaudeACP,
-			envFile: filepath.Join(cfg.SecretsDir, "claude", "env"),
-			dirs:    cfg.dirsOf("claude"),
-			secrets: filepath.Join(cfg.SecretsDir, "claude"),
+			bin:         cfg.ClaudeACP,
+			envFile:     filepath.Join(cfg.SecretsDir, "claude", "env"),
+			dirs:        cfg.dirsOf("claude"),
+			secrets:     filepath.Join(cfg.SecretsDir, "claude"),
+			platformBin: cfg.platformBinDir(),
 		}, nil
 	}
 	return nil, Errorf(CodeInvalid, "unknown executor %q (want prime, opencode or claude)", name)
@@ -174,15 +182,25 @@ func buildExecutor(name string, cfg DaemonConfig) (Executor, error) {
 // executorEnv builds the environment of one executor process: inherited
 // environment, the adapter's config directory and options, then the secret env
 // file (which wins).
-func executorEnv(envFile string, dirs executorDirs, extra map[string]string) ([]string, error) {
+//
+// PATH is the bundle's bin (platformBin) first, then the PATH boxd itself runs
+// with, then the executor's own home directories. The bundle comes first so an
+// executor the box carries is the one that runs, whatever the image installed.
+func executorEnv(envFile string, dirs executorDirs, platformBin string, extra map[string]string) ([]string, error) {
 	env := os.Environ()
 	if dirs.home != "" && dirExists(dirs.home) {
 		env = appendFiltered(env, "HOME", "HOME="+dirs.home)
+	}
+	path := withPathFront(pathOf(env), platformBin)
+	if dirs.home != "" && dirExists(dirs.home) {
 		// What an agent installs for itself lands in its HOME: `go install` in
 		// ~/go/bin, `uv tool` and pip --user in ~/.local/bin. Without them on
 		// PATH a tool it has just installed is "command not found".
-		env = appendFiltered(env, "PATH", "PATH="+withPath(pathOf(env),
-			filepath.Join(dirs.home, "go", "bin"), filepath.Join(dirs.home, ".local", "bin")))
+		path = withPath(path,
+			filepath.Join(dirs.home, "go", "bin"), filepath.Join(dirs.home, ".local", "bin"))
+	}
+	if path != pathOf(env) {
+		env = appendFiltered(env, "PATH", "PATH="+path)
 	}
 	if dirs.config != "" && dirExists(dirs.config) {
 		env = appendFiltered(env, "XDG_CONFIG_HOME", "XDG_CONFIG_HOME="+dirs.config)
@@ -227,11 +245,12 @@ func dirExists(p string) bool {
 // primeExecutor runs "prime-agent --mode acp": one process per session, with
 // explicit provider and model so no global settings file decides anything.
 type primeExecutor struct {
-	bin       string
-	configDir string // PRIME_AGENT_CODING_AGENT_DIR ("" = leave the default)
-	envFile   string
-	dirs      executorDirs
-	secrets   string
+	bin         string
+	configDir   string // PRIME_AGENT_CODING_AGENT_DIR ("" = leave the default)
+	envFile     string
+	dirs        executorDirs
+	secrets     string
+	platformBin string // the platform bundle's bin, first on PATH
 }
 
 func (p *primeExecutor) Name() string { return "prime" }
@@ -245,10 +264,10 @@ func (p *primeExecutor) Probe(ctx context.Context) ExecutorInfo {
 	info := ExecutorInfo{Name: "prime"}
 	path, err := exec.LookPath(p.bin)
 	if err != nil {
-		info.Reason = fmt.Sprintf("prime-agent not found (%q); the guest image installs it", p.bin)
+		info.Reason = fmt.Sprintf("prime-agent not found (%q); the executors a box runs are in the platform bundle's bin/", p.bin)
 		return info
 	}
-	v, err := probeVersion(ctx, path, probeEnv(p.dirs), "--version")
+	v, err := probeVersion(ctx, path, probeEnv(p.dirs, p.platformBin), "--version")
 	if err != nil {
 		info.Reason = "prime-agent --version failed: " + err.Error()
 		return info
@@ -275,7 +294,7 @@ func (p *primeExecutor) Argv(spec ExecSpec) ([]string, []string, error) {
 	if spec.ResumeRootID != "" {
 		argv = append(argv, "-r", spec.ResumeRootID)
 	}
-	env, err := executorEnv(p.envFile, p.dirs, map[string]string{
+	env, err := executorEnv(p.envFile, p.dirs, p.platformBin, map[string]string{
 		"PRIME_AGENT_CODING_AGENT_DIR": p.configDir,
 	})
 	if err != nil {
@@ -311,10 +330,11 @@ func jsonlIDs(dir string) []string {
 // per-session transcript in a directory of our choosing, so sessions are not
 // resumable across executor restarts.
 type opencodeExecutor struct {
-	bin     string
-	envFile string
-	dirs    executorDirs
-	secrets string
+	bin         string
+	envFile     string
+	dirs        executorDirs
+	secrets     string
+	platformBin string // the platform bundle's bin, first on PATH
 }
 
 func (o *opencodeExecutor) Name() string { return "opencode" }
@@ -329,10 +349,10 @@ func (o *opencodeExecutor) Probe(ctx context.Context) ExecutorInfo {
 	info := ExecutorInfo{Name: "opencode"}
 	path, err := exec.LookPath(o.bin)
 	if err != nil {
-		info.Reason = fmt.Sprintf("opencode not found (%q); the guest image installs it from npm", o.bin)
+		info.Reason = fmt.Sprintf("opencode not found (%q); the executors a box runs are in the platform bundle's bin/", o.bin)
 		return info
 	}
-	if v, err := probeVersion(ctx, path, probeEnv(o.dirs), "--version"); err == nil {
+	if v, err := probeVersion(ctx, path, probeEnv(o.dirs, o.platformBin), "--version"); err == nil {
 		info.Version = v
 	}
 	info.Available = true
@@ -345,7 +365,7 @@ func (o *opencodeExecutor) Probe(ctx context.Context) ExecutorInfo {
 }
 
 func (o *opencodeExecutor) Argv(spec ExecSpec) ([]string, []string, error) {
-	env, err := executorEnv(o.envFile, o.dirs, map[string]string{
+	env, err := executorEnv(o.envFile, o.dirs, o.platformBin, map[string]string{
 		"BOX_MODEL": spec.Model,
 	})
 	if err != nil {
@@ -361,10 +381,11 @@ func (o *opencodeExecutor) TranscriptIDs(string) []string { return nil }
 // claudeExecutor runs the Zed claude-code ACP adapter. Like opencode it keeps no
 // transcript of ours, so it cannot resume a session.
 type claudeExecutor struct {
-	bin     string
-	envFile string
-	dirs    executorDirs
-	secrets string
+	bin         string
+	envFile     string
+	dirs        executorDirs
+	secrets     string
+	platformBin string // the platform bundle's bin, first on PATH
 }
 
 func (c *claudeExecutor) Name() string { return "claude" }
@@ -376,10 +397,10 @@ func (c *claudeExecutor) Probe(ctx context.Context) ExecutorInfo {
 	info := ExecutorInfo{Name: "claude"}
 	path, err := exec.LookPath(c.bin)
 	if err != nil {
-		info.Reason = fmt.Sprintf("claude-code-acp not found (%q); install @zed-industries/claude-code-acp from the npm registry, or let boxd run the executors the image ships", c.bin)
+		info.Reason = fmt.Sprintf("claude-code-acp not found (%q); install @zed-industries/claude-code-acp from the npm registry and add it to the platform bundle the box mounts", c.bin)
 		return info
 	}
-	if v, err := probeVersion(ctx, path, probeEnv(c.dirs), "--version"); err == nil {
+	if v, err := probeVersion(ctx, path, probeEnv(c.dirs, c.platformBin), "--version"); err == nil {
 		info.Version = v
 	}
 	info.Available = true
@@ -392,7 +413,7 @@ func (c *claudeExecutor) Probe(ctx context.Context) ExecutorInfo {
 }
 
 func (c *claudeExecutor) Argv(spec ExecSpec) ([]string, []string, error) {
-	env, err := executorEnv(c.envFile, c.dirs, map[string]string{
+	env, err := executorEnv(c.envFile, c.dirs, c.platformBin, map[string]string{
 		"BOX_MODEL": spec.Model,
 	})
 	if err != nil {
@@ -631,10 +652,38 @@ func pathOf(env []string) string {
 	return ""
 }
 
+// defaultPath is the PATH a process gets when boxd's own environment has none.
+const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// withPathFront puts dirs in front of a PATH that does not have them yet, in the
+// order given. It is how the platform bundle's bin comes before everything else:
+// an empty dir is skipped.
+func withPathFront(path string, dirs ...string) string {
+	if path == "" {
+		path = defaultPath
+	}
+	have := map[string]bool{}
+	for _, d := range filepath.SplitList(path) {
+		have[d] = true
+	}
+	var front []string
+	for _, d := range dirs {
+		if d == "" || have[d] {
+			continue
+		}
+		front = append(front, d)
+		have[d] = true
+	}
+	if len(front) == 0 {
+		return path
+	}
+	return strings.Join(front, string(filepath.ListSeparator)) + string(filepath.ListSeparator) + path
+}
+
 // withPath appends dirs to a PATH that does not have them yet.
 func withPath(path string, dirs ...string) string {
 	if path == "" {
-		path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+		path = defaultPath
 	}
 	have := map[string]bool{}
 	for _, d := range filepath.SplitList(path) {

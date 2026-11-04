@@ -3,10 +3,17 @@
 #
 # This script runs as root inside a Lima instance built from the Ubuntu 24.04
 # (noble) cloud image. Everything the qcow2 contains is created here, apart from
-# two steps images/build.sh takes after it: boxd goes in through
-# guest/boxd-install.sh, and /etc/box/image.json -- the record of what the image
-# is and which boxd it carries -- is written beside it. guest/no-secrets.sh is
+# two steps images/build.sh takes after it: the stub boxd.service -- whose
+# contents are boxd's own, printed with "boxd -print-unit" -- and
+# /etc/box/image.json, the record of what the image is. guest/no-secrets.sh is
 # the last check before the disk is captured.
+#
+# The image carries the OS and the toolchain, not the part that changes often:
+# boxd and the executors are in a versioned platform bundle that the node mounts
+# read-only at /opt/box before the guest boots (docs/guest-image.md). So /opt/box
+# is an empty mount point here, /etc/profile.d/box-platform.sh puts its bin/ on
+# the PATH, the manifest records "platform": "mount", and boxd, the executors and
+# the add-ons are built by images/platform.sh instead.
 #
 # The recipe is this repository's, and the image it builds is the operator's:
 # nothing here publishes anything. docs/guest-image.md is the contract the image
@@ -22,9 +29,10 @@
 # repository names no private host. The versions and their sha256 pins stay in
 # force either way, so a mirror has to serve the same bytes or the build stops.
 # The pins below were re-checked against their public upstreams when this recipe
-# came back (2026-11-03): the noble cloud images, Node 24.22.2, Go 1.27.3,
-# prime-agent 0.10.2, opencode 2.2.5 and uv 0.13.5 are the bytes their own
-# checksum files describe.
+# came back (2026-11-03): the noble cloud images, Node 24.22.2, Go 1.27.3 and
+# uv 0.13.5 are the bytes their own checksum files describe. The executors are not
+# in this image any more; their pins are in images/pins.sh, where the platform
+# bundle's recipe reads them.
 #
 #   BOX_MIRROR_APT           Ubuntu archive
 #                            (default http://archive.ubuntu.com/ubuntu, or
@@ -79,8 +87,6 @@ esac
 # (or build a new version) rather than editing an already published one.
 NODE_VERSION=24.22.2
 GO_VERSION=1.27.3
-PRIME_AGENT_VERSION=0.10.2
-OPENCODE_VERSION=2.2.5
 UV_VERSION=0.13.5
 
 case $BOX_ARCH in
@@ -90,9 +96,6 @@ case $BOX_ARCH in
     NODE_ARCH=x64
     NODE_SHA256=48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75
     GO_SHA256=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
-    PRIME_AGENT_ARCH=x64
-    PRIME_AGENT_SHA256=09659961dfde201cc39f1e69b607385d708da3e591f267a4fea04970afb8b005
-    OPENCODE_NPM_PKG=@opencode/cli-linux-x64
     ;;
   arm64)
     DEFAULT_APT_ARCHIVE=http://ports.ubuntu.com/ubuntu-ports
@@ -100,9 +103,6 @@ case $BOX_ARCH in
     NODE_ARCH=arm64
     NODE_SHA256=eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8
     GO_SHA256=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
-    PRIME_AGENT_ARCH=arm64
-    PRIME_AGENT_SHA256=cd31de3a52dac3bdee44b723f10341cc5255f135acbcde8894575e324fa852b7
-    OPENCODE_NPM_PKG=@opencode/cli-linux-arm64
     ;;
 esac
 
@@ -124,8 +124,6 @@ UV_PYTHON_MIRROR=$GITHUB_URL/astral-sh/python-build-standalone/releases/download
 
 NODE_URL=$NODE_DIST_URL/v$NODE_VERSION/node-v$NODE_VERSION-linux-$NODE_ARCH.tar.xz
 GO_URL=$GO_DIST_URL/go$GO_VERSION.linux-$BOX_ARCH.tar.gz
-PRIME_AGENT_ASSET=PrimeIntellect-ai/prime-agent/releases/download/v$PRIME_AGENT_VERSION/prime-agent-$PRIME_AGENT_VERSION-linux-$PRIME_AGENT_ARCH.tar.gz
-PRIME_AGENT_URL=$GITHUB_URL/$PRIME_AGENT_ASSET
 
 # The public Go proxy serves the checksum database, so a box verifies module
 # sums by default. A mirror rarely does (proxy.golang.org answers
@@ -156,7 +154,6 @@ printf 'go               %s\n' "$GO_URL"
 printf 'go modules       %s (GOSUMDB %s)\n' "$GOPROXY_URL" "$GOSUMDB"
 printf 'npm              %s\n' "$NPM_REGISTRY"
 printf 'pypi             %s\n' "$PIP_INDEX"
-printf 'prime-agent      %s\n' "$PRIME_AGENT_URL"
 printf 'docker mirror    %s\n' "${DOCKER_MIRROR:-none}"
 
 # download URL DEST SHA256 -- fetch and refuse to continue on a mismatch.
@@ -271,39 +268,19 @@ rm -f /tmp/go.tar.gz
 ln -sfn /usr/local/go/bin/go /usr/local/bin/go
 ln -sfn /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 
-# --- prime-agent --------------------------------------------------------------
-log "prime-agent $PRIME_AGENT_VERSION"
-# A GitHub release asset; BOX_MIRROR_GITHUB points it at a mirror that serves
-# the same path. The sha256 pin decides whether the bytes are the right ones.
-download "$PRIME_AGENT_URL" /tmp/prime-agent.tar.gz "$PRIME_AGENT_SHA256"
-install -d -m 0755 /opt/prime-agent-$PRIME_AGENT_VERSION
-tar -xzf /tmp/prime-agent.tar.gz -C /opt/prime-agent-$PRIME_AGENT_VERSION
-rm -f /tmp/prime-agent.tar.gz
-PRIME_AGENT_BIN=$(find /opt/prime-agent-$PRIME_AGENT_VERSION -maxdepth 2 -type f -name prime-agent -print -quit)
-[ -n "$PRIME_AGENT_BIN" ] || fail "the prime-agent archive has no prime-agent binary"
-chmod 0755 "$PRIME_AGENT_BIN"
-ln -sfn "$PRIME_AGENT_BIN" /usr/local/bin/prime-agent
-
-# --- opencode -----------------------------------------------------------------
-log "opencode $OPENCODE_VERSION"
-# opencode comes from npm. The @opencode/cli package ships an x64 launcher and
-# its postinstall copies the binary of the matching @opencode/cli-<os>-<arch>
-# package over it; npm 11 does not run a dependency's install script unless it is
-# approved, and the registry carries every platform package (4 x 240 MB on
-# amd64), so the image installs the binary package of the guest's own
-# architecture directly: same version, same binary, one platform.
-install -d -m 0755 /opt/opencode
-npm install --prefix /opt/opencode --omit=optional --no-audit --no-fund --loglevel=error \
-  --registry "$NPM_REGISTRY" "$OPENCODE_NPM_PKG@$OPENCODE_VERSION"
-OPENCODE_BIN=/opt/opencode/node_modules/$OPENCODE_NPM_PKG/bin/opencode
-[ -x "$OPENCODE_BIN" ] || fail "opencode is not at $OPENCODE_BIN after npm install"
-ln -sfn "$OPENCODE_BIN" /usr/local/bin/opencode
-opencode --version
-
+# --- the executors --------------------------------------------------------------
+# The image installs no executor. prime-agent, opencode (and any other) come from
+# the platform bundle the node mounts at /opt/box: they change far more often
+# than a base image should, and an image that shipped them would have to be
+# rebuilt and republished for every executor release. images/pins.sh holds the
+# versions a bundle built by images/platform.sh carries, and docs/guest-image.md
+# is what a bundle has to look like.
+#
 # /etc/opencode is opencode's system configuration directory, which outranks the
 # user's and the project's files: a box cannot be talked into updating itself
 # while the coordinator runs it. Providers and credentials are not set here; the
-# box's own config file comes from the executors variable (see boxd).
+# box's own config file comes from the executors variable (see boxd). It stays in
+# the image so that the setting applies to whatever opencode the bundle carries.
 install -d -m 0755 /etc/opencode
 cat > /etc/opencode/opencode.json <<'EOF'
 {
@@ -311,9 +288,6 @@ cat > /etc/opencode/opencode.json <<'EOF'
   "update": "disable"
 }
 EOF
-
-# There is no claude executor in this image (the owner's decision, phase 7):
-# boxctl info reports it unavailable, naming the npm package a box would need.
 
 # --- uv -----------------------------------------------------------------------
 log "uv $UV_VERSION"
@@ -373,8 +347,11 @@ chmod 0644 /etc/profile.d/box-sources.sh
 # /etc/environment is what sshd (and so 'limactl shell' and the box driver)
 # applies to a session that is not a login shell.
 cat > /etc/environment <<EOF
-# Written by images/provision.sh: the package sources of this box, for sshd
-# sessions.
+# Written by images/provision.sh: the package sources of this box, and the PATH
+# of its platform bundle, for sshd sessions. sshd reads this file through PAM and
+# not /etc/profile.d, so a command the driver runs with 'limactl shell' finds
+# boxctl at /opt/box/bin/boxctl only because the PATH is here too.
+PATH=/opt/box/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 GOPROXY=$GOPROXY_URL
 GOSUMDB=$GOSUMDB
 GOTOOLCHAIN=local
@@ -427,10 +404,27 @@ EOF
 systemctl enable box-grow-rootfs.service >/dev/null
 chmod 0644 /etc/systemd/system/box-grow-rootfs.service
 
-# --- the directory boxd uses: guest/boxd-install.sh installs into /usr/local/bin
-# and boxd keeps its durable state in /var/lib/boxd. Nothing runs from here in
-# the build VM; the unit is enabled for the first boot.
+# --- the platform bundle's mount point ----------------------------------------
+# boxd and the executors are not in this image: the node downloads a versioned
+# platform bundle and mounts it read-only at /opt/box before the guest boots
+# (docs/guest-image.md). The image provides the empty mount point and the PATH
+# that finds what the mount holds. boxd keeps its durable state in /var/lib/boxd,
+# which its unit creates; nothing runs from /opt/box in the build VM.
 install -d -m 0755 /opt/box
+cat > /etc/profile.d/box-platform.sh <<'EOF'
+# Written by images/provision.sh: the platform bundle the node mounts read-only
+# at /opt/box is where this box's boxd, boxctl and executors are. An image
+# without a bundle mounted leaves the PATH alone.
+if [ -d /opt/box/bin ]; then
+  PATH=/opt/box/bin:$PATH
+  export PATH
+fi
+EOF
+chmod 0644 /etc/profile.d/box-platform.sh
+
+# box and the driver call the guest through this path, on every image: an image
+# with its own boxd has the binary here, and this one has a link into the bundle.
+ln -sfn /opt/box/bin/boxctl /usr/local/bin/boxctl
 
 # --- checks: they fail the build, so a published image is a checked image -----
 log "checks"
@@ -452,9 +446,8 @@ log "checks"
   printf 'docker     %s\n' "$(docker --version)"
   printf 'buildx     %s\n' "$(docker buildx version 2>/dev/null || echo absent)"
   printf 'compose    %s\n' "$(docker compose version --short 2>/dev/null || echo absent)"
-  printf 'prime-agent %s\n' "$(prime-agent --version 2>&1 | head -1)"
-  printf 'opencode   %s\n' "$(opencode --version 2>&1 | head -1)"
   printf 'opencode cfg %s\n' "$(tr -d '\n ' < /etc/opencode/opencode.json)"
+  printf 'platform   mount (the node mounts a bundle at /opt/box)\n'
 } | tee "$GUEST_CHECKS"
 
 # apt must only talk to the sources this image configures. 'apt-get update'
@@ -521,12 +514,14 @@ TOOL_PYTHON=$(python3 --version | cut -d' ' -f2)
 TOOL_UV=$(uv --version | cut -d' ' -f2)
 TOOL_DOCKER=$(docker --version | cut -d' ' -f3 | tr -d ,)
 TOOL_GIT=$(git --version | cut -d' ' -f3)
-TOOL_PRIME=$(prime-agent --version 2>&1 | head -1)
-TOOL_OPENCODE=$(opencode --version 2>&1 | head -1)
 BASE_PRETTY=$(grep -m1 PRETTY_NAME /etc/os-release | cut -d= -f2- | tr -d '"')
 KERNEL=$(uname -r)
 BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+# "platform": "mount" is the image saying it expects a platform bundle at
+# /opt/box. images/build.sh copies it into /etc/box/image.json and
+# images/publish.sh into the image's index entry, so the driver only mounts a
+# bundle into an image that says it wants one.
 cat > "$MANIFEST" <<EOF
 {
   "version": "$BOX_VERSION",
@@ -534,6 +529,7 @@ cat > "$MANIFEST" <<EOF
   "built_at": "$BUILT_AT",
   "base_image": "$BASE_PRETTY",
   "kernel": "$KERNEL",
+  "platform": "mount",
   "tools": {
     "node": "$TOOL_NODE",
     "npm": "$TOOL_NPM",
@@ -541,14 +537,11 @@ cat > "$MANIFEST" <<EOF
     "python3": "$TOOL_PYTHON",
     "uv": "$TOOL_UV",
     "docker": "$TOOL_DOCKER",
-    "git": "$TOOL_GIT",
-    "prime_agent": "$TOOL_PRIME",
-    "opencode": "$TOOL_OPENCODE"
+    "git": "$TOOL_GIT"
   },
   "sources": {
     "apt": ["$APT_ARCHIVE_URL", "$APT_SECURITY_URL"],
     "npm": "$NPM_REGISTRY",
-    "opencode_package": "$OPENCODE_NPM_PKG@$OPENCODE_VERSION",
     "pypi": "$PIP_INDEX",
     "go": "$GOPROXY_URL",
     "go_dist": "$GO_DIST_URL",
@@ -561,7 +554,7 @@ cat > "$MANIFEST" <<EOF
 EOF
 # Every tool version must be there: an empty string would silently publish an
 # index entry that says nothing about the image.
-for name in node npm go python3 uv docker git prime_agent opencode; do
+for name in node npm go python3 uv docker git; do
   python3 - "$MANIFEST" "$name" <<'PY' || fail "the manifest has no version for $name"
 import json, sys
 value = json.load(open(sys.argv[1]))["tools"][sys.argv[2]]
@@ -606,13 +599,11 @@ systemctl stop docker.service docker.socket 2>/dev/null || true
 rm -rf /var/lib/docker/* /var/lib/containerd/* 2>/dev/null || true
 apt-get clean
 rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* "$STATE/apt-update.txt"
-# The npm cache of the opencode install is build state, not image content.
-rm -rf /root/.npm /opt/opencode/package-lock.json
-# Running `opencode --version` and `prime-agent --version` as root leaves data
-# directories behind. An image carries no executor configuration at all (the box
-# gets it from the Nomad driver at run time, onto a tmpfs), so they go.
-rm -rf /root/.local/share/opencode /root/.config/opencode /root/.local/state/opencode \
-       /root/.prime /root/.cache/opencode /root/.cache/prime-agent
+# The npm cache the npm check below fills is build state, not image content. No
+# executor runs in this build -- they are not in the image -- so there is no
+# executor home or configuration to remove; guest/no-secrets.sh checks that
+# anyway, in the build VM and in a booted image.
+rm -rf /root/.npm
 journalctl --rotate --vacuum-time=1s >/dev/null 2>&1 || true
 rm -rf /var/log/journal/* /var/log/*.log /var/log/apt/* /var/log/nginx/* 2>/dev/null || true
 rm -f /root/.bash_history /root/.wget-hsts /home/*/.bash_history /home/*/.wget-hsts /home/*/.npmrc /home/*/.config/pip/pip.conf

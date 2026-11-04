@@ -2,10 +2,15 @@
 # images/guest-checks.sh -- the checks a box image must pass, in a booted guest.
 #
 # Runs as root inside a booted box (by images/verify.sh, through 'limactl
-# shell'), and proves the properties the image exists for: it booted and its
-# daemon answers, the tool versions are the ones the image says it carries, the
-# executor credentials live on a tmpfs and nowhere else, a rotation reaches boxd,
-# and no secret is baked into the image.
+# shell'), and proves the properties the image exists for: it booted, the
+# platform bundle is mounted at /opt/box and its daemon answers, the tool
+# versions are the ones the image and the bundle say they carry, the executor
+# credentials live on a tmpfs and nowhere else, a rotation reaches boxd, and no
+# secret is baked into the image.
+#
+# The bundle is what the node mounts before the guest boots (docs/guest-image.md);
+# verify.sh mounts one, and an image whose /etc/box/image.json says
+# "platform": "mount" is failed here if there is none.
 #
 # Every check prints one line -- "PASS" or "FAIL", with the value expected and the
 # value found -- and the script exits non-zero when any of them failed. Nothing
@@ -13,16 +18,19 @@
 # /run/box/secrets, which is a tmpfs, and it is removed again at the end.
 #
 # Usage (inside the guest, as root):
-#   images/guest-checks.sh [--manifest PATH]
+#   images/guest-checks.sh [--manifest PATH] [--platform DIR]
 #
 # --manifest is the build manifest of the image (its "tools" are what the checks
 # compare against). Without it the image's own record, /etc/box/image.json, is
-# used: an image carries the same three answers -- version, boxd source, tool
+# used: an image carries the same answers -- version, platform field, tool
 # versions -- so a published image can be checked against its manifest and a
 # booted box against itself.
+#
+# --platform is where the platform bundle is mounted (default /opt/box).
 set -uo pipefail
 
 MANIFEST=/etc/box/image.json
+BUNDLE=${BOX_PLATFORM_DIR:-/opt/box}
 while [[ $# -gt 0 ]]; do
   case $1 in
     --manifest)
@@ -30,8 +38,13 @@ while [[ $# -gt 0 ]]; do
       MANIFEST=$2
       shift 2
       ;;
+    --platform)
+      [[ $# -ge 2 ]] || { echo "guest-checks: --platform needs a path" >&2; exit 2; }
+      BUNDLE=$2
+      shift 2
+      ;;
     -h|--help)
-      sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -89,31 +102,49 @@ else
 fi
 IMAGE_VERSION=$(jget version)
 IMAGE_ARCH=$(jget arch)
+IMAGE_PLATFORM=$(jget platform)
 info "image        $IMAGE_VERSION $IMAGE_ARCH (built $(jget built_at))"
 info "base image   $(jget base_image.name), kernel $(short "$(jget kernel)")"
-info "boxd source  $(jget boxd.kind), $(jget boxd.tag)$(jget boxd.resolved_commit), version $(jget boxd.version)"
+info "stub unit    from boxd $(jget unit_from.kind) $(jget unit_from.tag)$(jget unit_from.resolved_commit) version $(jget unit_from.version)"
+info "platform     ${IMAGE_PLATFORM:-none (the image runs its own boxd)}"
 
-# --- what boxd the image carries ----------------------------------------------
-BOXD_WANT_SHA=$(jget boxd.sha256)
-BOXD_WANT_VERSION=$(jget boxd.version)
-BOXD_BIN=/usr/local/bin/boxd
-if [[ -x $BOXD_BIN ]]; then
-  BOXD_GOT_SHA=$(sha256sum "$BOXD_BIN" | cut -d' ' -f1)
-  if [[ -n $BOXD_WANT_SHA ]]; then
-    check "the installed boxd is the binary the image records" "$BOXD_WANT_SHA" "$BOXD_GOT_SHA"
-  else
-    info "the manifest records no boxd sha256; the installed boxd is $BOXD_GOT_SHA"
-  fi
-  # A probe writes into HOME; it runs on the tmpfs, never in root's home.
-  BOXD_VERSION=$(HOME=/run/boxd boxd --version 2>&1 | head -1)
-  if [[ -n $BOXD_WANT_VERSION ]]; then
-    check "boxd reports the version the image records" "$BOXD_WANT_VERSION" "$BOXD_VERSION"
-  else
-    info "the manifest records no boxd version; boxd reports $BOXD_VERSION"
-  fi
-  check "boxctl is installed next to boxd" "present" "$([[ -x /usr/local/bin/boxctl ]] && echo present || echo missing)"
+# --- what runs the daemon ------------------------------------------------------
+# An image with "platform": "mount" carries no boxd: its unit runs the one the
+# mounted bundle holds. An image without the field is the older shape, where
+# guest/boxd-install.sh put boxd in /usr/local/bin; both are checked, and the
+# check says which shape the image is.
+UNIT=$(systemctl cat boxd.service 2>/dev/null || true)
+if [[ $IMAGE_PLATFORM == mount ]]; then
+  check "the stub unit runs the daemon of the platform bundle" "present" \
+    "$(grep -q '^ExecStart=/opt/box/bin/boxd' <<<"$UNIT" && echo present || echo missing)"
+  # The unit's RequiresMountsFor names /opt/box among its mounts; the list is
+  # space-separated, so it is read as one, not matched with a word boundary.
+  UNIT_REQ=$(sed -n 's/^RequiresMountsFor=//p' <<<"$UNIT" | tr -s '[:space:]' ' ')
+  check "the stub unit requires the bundle's mount" "present" \
+    "$([[ $UNIT_REQ == *"/opt/box "* || $UNIT_REQ == *"/opt/box" ]] && echo present || echo missing)"
+  check "the image carries no boxd of its own" "absent" \
+    "$([[ -e /usr/local/bin/boxd ]] && echo present || echo absent)"
 else
-  fail "boxd is installed" "executable $BOXD_BIN" "missing"
+  BOXD_WANT_SHA=$(jget boxd.sha256)
+  BOXD_WANT_VERSION=$(jget boxd.version)
+  BOXD_BIN=/usr/local/bin/boxd
+  if [[ -x $BOXD_BIN ]]; then
+    BOXD_GOT_SHA=$(sha256sum "$BOXD_BIN" | cut -d' ' -f1)
+    if [[ -n $BOXD_WANT_SHA ]]; then
+      check "the installed boxd is the binary the image records" "$BOXD_WANT_SHA" "$BOXD_GOT_SHA"
+    else
+      info "the manifest records no boxd sha256; the installed boxd is $BOXD_GOT_SHA"
+    fi
+    BOXD_VERSION=$(HOME=/run/boxd "$BOXD_BIN" --version 2>&1 | head -1)
+    if [[ -n $BOXD_WANT_VERSION ]]; then
+      check "boxd reports the version the image records" "$BOXD_WANT_VERSION" "$BOXD_VERSION"
+    else
+      info "the manifest records no boxd version; boxd reports $BOXD_VERSION"
+    fi
+    check "boxctl is installed next to boxd" "present" "$([[ -x /usr/local/bin/boxctl ]] && echo present || echo missing)"
+  else
+    fail "boxd is installed" "executable $BOXD_BIN" "missing"
+  fi
 fi
 
 # --- the guest booted ---------------------------------------------------------
@@ -135,29 +166,150 @@ fi
 BOX_ACTIVE=$(systemctl is-active boxd.service 2>/dev/null || true)
 check "boxd.service is active" "active" "$BOX_ACTIVE"
 
-BOXCTL_INFO=$(boxctl info 2>&1)
+# boxctl is where the image keeps it: the bundle for a platform image, and
+# /usr/local/bin for the older shape. Every call below names the path, so the
+# result does not depend on this shell's PATH.
+if [[ -x $BUNDLE/bin/boxctl ]]; then
+  BOXCTL=$BUNDLE/bin/boxctl
+elif [[ -x /usr/local/bin/boxctl ]]; then
+  BOXCTL=/usr/local/bin/boxctl
+else
+  BOXCTL=$(command -v boxctl || true)
+fi
+check "boxctl is reachable" "present" "$([[ -n $BOXCTL ]] && echo present || echo missing)"
+
+BOXCTL_INFO=$("${BOXCTL:-false}" info 2>&1)
 BOXCTL_STATUS=$?
 if [[ $BOXCTL_STATUS -eq 0 ]] && python3 -c 'import json,sys; json.loads(sys.argv[1])' "$BOXCTL_INFO" 2>/dev/null; then
   pass "boxctl info answers with JSON" "JSON" "$(short "$BOXCTL_INFO")"
 else
   fail "boxctl info answers with JSON" "JSON" "$(short "$BOXCTL_INFO")"
 fi
-EXECUTORS_OK=$(python3 - "$BOXCTL_INFO" 2>/dev/null <<'PY'
+
+# --- the platform bundle the node mounts --------------------------------------
+printf '\n== the platform bundle\n'
+# The bundle's root is what the guest sees at /opt/box: a read-only mount the
+# node made before the boot, whose manifest names the version, the boxd and the
+# tools (docs/guest-image.md). An image that says "platform": "mount" is failed
+# without one, because its stub unit has nothing to run.
+if [[ $IMAGE_PLATFORM == mount ]]; then
+  check "the image says it takes a platform bundle" "mount" "$IMAGE_PLATFORM"
+  MOUNT_TARGET=$(findmnt -no TARGET --target "$BUNDLE" 2>/dev/null || echo none)
+  check "$BUNDLE is a mount, not a directory on the box disk" "$BUNDLE" "${MOUNT_TARGET:-none}"
+  MOUNT_OPTS=$(findmnt -no OPTIONS --target "$BUNDLE" 2>/dev/null || echo none)
+  if [[ $MOUNT_OPTS == *ro* ]]; then
+    pass "the bundle is mounted read-only" "ro in its mount options" "ro in its mount options"
+  else
+    fail "the bundle is mounted read-only" "ro in its mount options" "${MOUNT_OPTS:-no mount}"
+  fi
+  info "bundle       $(findmnt -no FSTYPE,OPTIONS --target "$BUNDLE" 2>/dev/null || echo 'not mounted')"
+else
+  info "the image records no platform field: it runs the boxd it carries"
+fi
+
+BUNDLE_MANIFEST=$BUNDLE/manifest.json
+if [[ -r $BUNDLE_MANIFEST ]] && python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$BUNDLE_MANIFEST" 2>/dev/null; then
+  pass "the bundle's manifest is readable ($BUNDLE_MANIFEST)" "readable" "readable"
+else
+  fail "the bundle's manifest is readable ($BUNDLE_MANIFEST)" "readable" "missing"
+fi
+bget() {
+  python3 - "$BUNDLE_MANIFEST" "$1" <<'PY'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+cur = doc
+for part in sys.argv[2].split("."):
+    if isinstance(cur, dict) and part in cur:
+        cur = cur[part]
+    else:
+        cur = ""
+        break
+if cur is None:
+    cur = ""
+print(cur if isinstance(cur, str) else json.dumps(cur))
+PY
+}
+BUNDLE_SCHEMA=$(bget schema)
+BUNDLE_VERSION=$(bget version)
+BUNDLE_BOXD=$(bget boxd)
+check "the bundle's manifest is schema 1" "1" "$BUNDLE_SCHEMA"
+info "bundle       $BUNDLE_VERSION (boxd $BUNDLE_BOXD)"
+check "the bundle holds the boxd binary its unit runs" "present" \
+  "$([[ -x $BUNDLE/bin/boxd ]] && echo present || echo missing)"
+check "$BUNDLE/bin/boxctl is the same binary" "present" \
+  "$([[ -x $BUNDLE/bin/boxctl ]] && echo present || echo missing)"
+# A probe writes into HOME; it runs on the tmpfs, never in root's home.
+if [[ -x $BUNDLE/bin/boxd ]]; then
+  BUNDLE_BOXD_VERSION=$(HOME=/run/boxd "$BUNDLE/bin/boxd" --version 2>&1 | head -1)
+  check "the bundle's boxd reports the version its manifest names" "$BUNDLE_BOXD" "$BUNDLE_BOXD_VERSION"
+fi
+# Every tool the manifest names is on the PATH the bundle gives a shell, and it
+# is the bundle's own copy: the image carries none of them.
+BUNDLE_TOOLS=$(bget tools)
+BUNDLE_TOOLS_OK=$(python3 - "$BUNDLE_TOOLS" "$BUNDLE/bin" <<'PY'
+import json, os, sys
+try:
+    tools = json.loads(sys.argv[1] or "{}")
+except Exception:
+    print("the manifest's tools are not an object")
+    raise SystemExit(0)
+bindir = sys.argv[2]
+bad = []
+for name in sorted(tools):
+    path = os.path.join(bindir, name)
+    if not os.access(path, os.X_OK):
+        bad.append(f"{name}: no executable at {path}")
+print("every tool is in the bundle's bin" if not bad else "; ".join(bad))
+PY
+)
+check "every tool the bundle names is in its bin" "every tool is in the bundle's bin" "$BUNDLE_TOOLS_OK"
+# The daemon reports the bundle it is running out of, which is how a person
+# answers "which bundle is this box on".
+PLATFORM_REPORT=$(python3 - "$BOXCTL_INFO" "$BUNDLE_VERSION" "$BUNDLE_BOXD" <<'PY' 2>/dev/null
 import json, sys
 try:
     info = json.loads(sys.argv[1])
 except Exception:
     print("boxctl info is not JSON")
     raise SystemExit(0)
-bad = []
-for name in ("prime", "opencode"):
-    ex = {e.get("name"): e for e in info.get("executors", [])}.get(name)
-    if not ex or not ex.get("available"):
-        bad.append(f"{name}: {ex}")
-print("prime and opencode available" if not bad else "; ".join(bad))
+want_version, want_boxd = sys.argv[2], sys.argv[3]
+got = info.get("platform") or {}
+if not got.get("mounted"):
+    print(f"not mounted: {got.get('reason') or got}")
+elif want_version and got.get("version") != want_version:
+    print(f"version {got.get('version')}, the bundle's manifest says {want_version}")
+elif want_boxd and got.get("boxd") != want_boxd:
+    print(f"boxd {got.get('boxd')}, the bundle's manifest says {want_boxd}")
+else:
+    print(f"bundle {got.get('version')} (boxd {got.get('boxd')})")
 PY
 )
-check "the executors the image installs are available" "prime and opencode available" "$EXECUTORS_OK"
+check "boxctl info reports the bundle it runs from" "bundle $BUNDLE_VERSION (boxd $BUNDLE_BOXD)" "$PLATFORM_REPORT"
+
+# The executors the box can run: the ones the bundle carries, which boxd finds
+# on the PATH of the bundle. boxd names no executor itself, so what is available
+# is what the bundle holds.
+EXECUTORS_OK=$(python3 - "$BOXCTL_INFO" <<'PY' 2>/dev/null
+import json, sys
+try:
+    info = json.loads(sys.argv[1])
+except Exception:
+    print("boxctl info is not JSON")
+    raise SystemExit(0)
+execs = info.get("executors") or []
+found = [e.get("name") for e in execs if e.get("available")]
+print(", ".join(found) if found else "none")
+PY
+)
+info "executors    ${EXECUTORS_OK}"
+if [[ $EXECUTORS_OK == none ]]; then
+  fail "the box can run an executor out of the bundle" "at least one" "none"
+else
+  pass "the box can run an executor out of the bundle" "at least one" "$EXECUTORS_OK"
+fi
 
 # --- the tool versions the image records --------------------------------------
 printf '\n== the tool versions the image records\n'
@@ -173,17 +325,14 @@ tool_version() {
     uv) uv --version 2>&1 | cut -d' ' -f2 ;;
     docker) docker --version 2>&1 | cut -d' ' -f3 | tr -d , ;;
     git) git --version 2>&1 | cut -d' ' -f3 ;;
-    # An executor's --version is not a read-only question: opencode creates its
-    # data directory and a log in HOME, so the probe gets a scratch HOME on the
-    # tmpfs and never writes onto the box disk.
-    prime_agent) HOME=/run/box-checks-home prime-agent --version 2>&1 | head -1 ;;
-    opencode) HOME=/run/box-checks-home opencode --version 2>&1 | head -1 ;;
     *) return 1 ;;
   esac
 }
+# The executors are not here: they are in the platform bundle, and the section
+# above checks the versions the bundle's manifest names.
 mkdir -p /run/box-checks-home
 TOOLS_CHECKED=0
-for tool in node npm go python3 uv docker git prime_agent opencode; do
+for tool in node npm go python3 uv docker git; do
   want=$(jget "tools.$tool")
   if [[ -z $want ]]; then
     info "$tool: the manifest records no version, skipped"
@@ -196,31 +345,29 @@ done
 rmdir /run/box-checks-home 2>/dev/null || true
 [[ $TOOLS_CHECKED -gt 0 ]] || fail "the manifest names at least one tool version" "at least one" "none"
 
-# --- the add-ons the image carries -------------------------------------------
+# --- the add-ons the bundle carries -------------------------------------------
 printf '\n== the add-ons\n'
-# /opt/box/addons is where the build puts the operator's extra files, and it is
-# only there when the image was built with them. They are files at a fixed path:
-# which guest program reads them, and how it is told the path, is that program's
-# own configuration, so the checks here stop at who owns them, whether they are
-# writable, and how many there are.
-ADDONS=/opt/box/addons
+# /opt/box/addons is the bundle's addons directory, and it is there only when the
+# bundle was built with one (images/platform.sh --addons DIR). They are files at
+# a fixed path: which guest program reads them, and how it is told the path, is
+# that program's own configuration, so the checks here stop at whether boxd's
+# default path is the one the bundle uses, how many files there are, and that the
+# mount made them root-owned and not writable.
+ADDONS=$BUNDLE/addons
+ADDONS_WANT=$(bget addons)
 if [[ -e $ADDONS ]]; then
-  ADDONS_SHA=$(jget addons.sha256)
-  [[ -n $ADDONS_SHA ]] && info "add-ons      sha256 $ADDONS_SHA"
-  ADDONS_NOT_ROOT=$(find "$ADDONS" \( ! -uid 0 -o ! -gid 0 \) -printf '%U:%G %p\n' 2>/dev/null | head -3 | tr '\n' ' ')
-  check_none "everything in $ADDONS is owned by root" "$ADDONS_NOT_ROOT"
+  ADDONS_FILES=$(find "$ADDONS" -type f 2>/dev/null | wc -l | tr -d ' ')
+  info "add-ons      $ADDONS_FILES file(s) in $ADDONS"
   ADDONS_WRITABLE=$(find "$ADDONS" -perm /022 -printf '%m %p\n' 2>/dev/null | head -3 | tr '\n' ' ')
   check_none "nothing in $ADDONS is group- or world-writable" "$ADDONS_WRITABLE"
-  ADDONS_FILES=$(find "$ADDONS" -type f | wc -l | tr -d ' ')
-  info "add-ons      $ADDONS_FILES file(s) in $ADDONS"
-  ADDONS_WANT_FILES=$(jget addons.files)
+  ADDONS_WANT_FILES=$(bget addons.files)
   if [[ -n $ADDONS_WANT_FILES ]]; then
-    check "the add-ons are the ones the image records" "$ADDONS_WANT_FILES file(s)" "$ADDONS_FILES file(s)"
+    check "the add-ons are the ones the bundle records" "$ADDONS_WANT_FILES file(s)" "$ADDONS_FILES file(s)"
   else
-    info "the image records no add-on count, so $ADDONS_FILES file(s) are reported as found"
+    info "the bundle records no add-on count, so $ADDONS_FILES file(s) are reported as found"
   fi
 else
-  info "no add-ons: $ADDONS does not exist"
+  info "no add-ons: the bundle has no $ADDONS (its manifest says ${ADDONS_WANT:-null})"
 fi
 
 # --- apt only talks to the sources the image configures -----------------------
@@ -316,7 +463,7 @@ check "a credential written into $SECRETS is root-only" "600" "$(stat -c %a "$SE
 
 # boxd reads the secrets directory: a reload reports which executors have
 # credentials now, and it copies them below the runtime directory (on the tmpfs).
-RELOAD=$(boxctl reload 2>&1)
+RELOAD=$("$BOXCTL" reload 2>&1)
 RELOAD_STATUS=$?
 check "boxctl reload succeeds" "exit 0" "exit $RELOAD_STATUS"
 RELOAD_PRIME=$(python3 - "$RELOAD" 2>/dev/null <<'PY'
@@ -377,7 +524,7 @@ EOF
 chmod 0600 "$SECRETS/prime/env"
 touch -r "$SECRETS/.env.mtime" "$SECRETS/prime/env"
 rm -f "$SECRETS/.env.mtime"
-RELOAD2=$(boxctl reload 2>&1)
+RELOAD2=$("$BOXCTL" reload 2>&1)
 RELOAD2_PRIME=$(python3 - "$RELOAD2" 2>/dev/null <<'PY'
 import json, sys
 try:
@@ -396,7 +543,7 @@ check "boxd picked up the rotated credential (same mtime as the old one)" "$ROTA
 # Leave nothing behind: the box is thrown away, but a check that cleans up after
 # itself is a check that can run twice.
 rm -rf "$SECRETS/prime"
-boxctl reload >/dev/null 2>&1 || true
+"$BOXCTL" reload >/dev/null 2>&1 || true
 
 # --- the image is a box: disk, identity, hygiene ------------------------------
 printf '\n== disk and identity\n'

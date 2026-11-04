@@ -1,0 +1,45 @@
+[Unit]
+Description=boxd: box guest agent-session daemon
+Documentation=https://github.com/shady2k/nomad-driver-lima
+After=local-fs.target network.target
+Wants=local-fs.target
+# The task files and the executor credentials are read-only mounts of the
+# host (the box driver's files.go); boxd reads them as it starts.
+RequiresMountsFor=/run/box/secrets /etc/box/local
+
+[Service]
+Type=simple
+# Sessions and transcripts live on the box disk (/var/lib/boxd). Nothing secret
+# does: the executor credentials are /run/box/secrets, a read-only mount of the
+# box's files on the host's tmpfs, and everything boxd derives from them lives
+# in the runtime directory (/run/boxd), which a reboot removes. The
+# socket is recreated per boot too.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+StateDirectory=boxd
+StateDirectoryMode=0700
+RuntimeDirectory=boxd
+RuntimeDirectoryMode=0755
+ExecStart=/usr/local/bin/boxd \
+    --socket /run/boxd/boxd.sock \
+    --state-dir /var/lib/boxd \
+    --runtime-dir /run/boxd \
+    --secrets-dir /run/box/secrets \
+    --local-dir /etc/box/local
+# The event feed is stdout: one JSON line per event, which the driver streams
+# into the Nomad task log through `journalctl -f -o cat -u boxd`.
+StandardOutput=journal
+StandardError=journal
+Restart=always
+# An agent's build can run the guest out of memory. The kernel then kills one
+# process, and boxd and the other sessions go on: systemd's default would stop
+# the whole unit for it. boxd itself is the last the kernel picks; it sets its
+# executors back to the ordinary score (oom.go).
+OOMPolicy=continue
+OOMScoreAdjust=-800
+RestartSec=1
+# boxd stops its executors itself; mixed mode cleans up any stragglers.
+KillMode=mixed
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

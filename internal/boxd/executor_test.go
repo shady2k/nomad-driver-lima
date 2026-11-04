@@ -87,17 +87,53 @@ func TestOpenCodeACPHandshake(t *testing.T) {
 	}
 }
 
+// TestUnitFile checks the two units boxd ships: the bundle layout, which runs
+// the daemon out of /opt/box, and the installed layout, which is the image's own
+// /usr/local/bin/boxd.
 func TestUnitFile(t *testing.T) {
-	for _, want := range []string{
-		"Restart=always",
-		"ExecStart=/usr/local/bin/boxd",
+	bundle := []string{
+		"ExecStart=/opt/box/bin/boxd",
+		"--socket /run/boxd/boxd.sock",
 		"--state-dir /var/lib/boxd",
+		"--runtime-dir /run/boxd",
+		"--secrets-dir /run/box/secrets",
+		"--local-dir /etc/box/local",
+		"RequiresMountsFor=/opt/box /run/box/secrets /etc/box/local",
+		"Environment=PATH=/opt/box/bin:",
+		"Restart=always",
 		"StateDirectory=boxd",
 		"RuntimeDirectory=boxd",
+		"OOMPolicy=continue",
+		"OOMScoreAdjust=-800",
 		"WantedBy=multi-user.target",
-	} {
+	}
+	for _, want := range bundle {
 		if !strings.Contains(UnitFile, want) {
-			t.Fatalf("unit file is missing %q", want)
+			t.Errorf("the bundle unit is missing %q", want)
 		}
+	}
+	if strings.Contains(UnitFile, "/usr/local/bin/boxd") {
+		t.Errorf("the bundle unit must not start /usr/local/bin/boxd:\n%s", UnitFile)
+	}
+
+	installed := []string{
+		"ExecStart=/usr/local/bin/boxd",
+		"--state-dir /var/lib/boxd",
+		"RequiresMountsFor=/run/box/secrets /etc/box/local",
+		"Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"Restart=always",
+		"StateDirectory=boxd",
+		"RuntimeDirectory=boxd",
+		"OOMPolicy=continue",
+		"OOMScoreAdjust=-800",
+		"WantedBy=multi-user.target",
+	}
+	for _, want := range installed {
+		if !strings.Contains(InstalledUnitFile, want) {
+			t.Errorf("the installed unit is missing %q", want)
+		}
+	}
+	if strings.Contains(InstalledUnitFile, "/opt/box") {
+		t.Errorf("the installed unit belongs to an image without a bundle, so it must not name /opt/box:\n%s", InstalledUnitFile)
 	}
 }

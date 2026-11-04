@@ -52,7 +52,10 @@ func runDaemon(args []string) int {
 	opencode := fs.String("opencode", "opencode", "opencode binary")
 	claudeACP := fs.String("claude-acp", "claude-code-acp", "claude-code-acp binary")
 	showVersion := fs.Bool("version", false, "print the version and exit")
-	printUnit := fs.Bool("print-unit", false, "print the systemd unit and exit")
+	printUnit := fs.Bool("print-unit", false,
+		"print the systemd unit for a box that mounts the platform bundle at /opt/box and exit (it runs /opt/box/bin/boxd)")
+	printUnitInstalled := fs.Bool("print-unit-installed", false,
+		"print the systemd unit for an image that carries boxd itself at /usr/local/bin/boxd and mounts no bundle, and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -62,6 +65,10 @@ func runDaemon(args []string) int {
 	}
 	if *printUnit {
 		fmt.Print(boxd.UnitFile)
+		return 0
+	}
+	if *printUnitInstalled {
+		fmt.Print(boxd.InstalledUnitFile)
 		return 0
 	}
 

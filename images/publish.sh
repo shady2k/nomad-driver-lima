@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# images/publish.sh -- publish a built image to an HTTP PUT store.
+# images/publish.sh -- publish a built image or platform bundle to an HTTP PUT store.
 #
-# Usage: images/publish.sh <arch> <version>
+# Usage: images/publish.sh [--platform ARCHIVE] <arch> <version>
+#
+#   images/publish.sh amd64 1.0.0                    the image of out/ (images/build.sh)
+#   images/publish.sh --platform out/box-platform-1.0.0-linux-amd64.tar.gz amd64 1.0.0
+#                                                    the platform bundle (images/platform.sh)
 #
 # The store is any server that accepts PUT, GET and HEAD on a path below a base
 # URL (a raw repository, an object store with an S3-style endpoint, a static
@@ -10,7 +14,17 @@
 #   box-base/<version>/<arch>/box-base-<version>-<arch>.qcow2
 #   box-base/<version>/<arch>/box-base-<version>-<arch>.qcow2.sha256
 #   box-base/<version>/<arch>/box-base-<version>-<arch>.json    (build manifest)
-# and then updates   box-base/index.json   (versions x arches, with tool versions).
+# or, for a platform bundle:
+#   box-platform/<version>/<arch>/box-platform-<version>-linux-<arch>.tar.gz
+#   box-platform/<version>/<arch>/box-platform-<version>-linux-<arch>.tar.gz.sha256
+#   box-platform/<version>/<arch>/box-platform-<version>-linux-<arch>.tar.gz.json
+#                                                    (the bundle's own manifest)
+# and then updates   box-base/index.json   (images under "images", bundles under
+# "platforms", both with the versions a reader shows).
+#
+# An image is published with its own "platform" field when it has one, so that a
+# CLI offers a bundle only for an image that expects one; a bundle is published
+# for the version and arch its name and manifest carry.
 #
 # A published version is immutable. The script refuses a version that already
 # exists (HEAD on all three files) and there is no override: an upload usually
@@ -63,14 +77,42 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 log() { printf '\n==> %s\n' "$*" >&2; }
 die() { printf 'publish: %s\n' "$*" >&2; exit 1; }
 
-ARCH=${1:-}
-VERSION=${2:-}
+PLATFORM_ARCHIVE=
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --platform)
+      [[ $# -ge 2 && -n $2 ]] || die "--platform needs the bundle archive"
+      PLATFORM_ARCHIVE=$2
+      shift 2
+      ;;
+    --platform=*)
+      PLATFORM_ARCHIVE=${1#--platform=}
+      [[ -n $PLATFORM_ARCHIVE ]] || die "--platform needs the bundle archive"
+      shift
+      ;;
+    -h|--help)
+      sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    -*)
+      die "unknown argument '$1'"
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+ARCH=${POSITIONAL[0]:-}
+VERSION=${POSITIONAL[1]:-}
 case $ARCH in
   amd64|arm64) ;;
-  "") die "usage: images/publish.sh <amd64|arm64> <version>" ;;
+  "") die "usage: images/publish.sh [--platform ARCHIVE] <amd64|arm64> <version>" ;;
   *) die "unsupported arch '$ARCH' (want amd64 or arm64)" ;;
 esac
-[[ -n $VERSION ]] || die "usage: images/publish.sh <arch> <version>"
+[[ -n $VERSION ]] || die "usage: images/publish.sh [--platform ARCHIVE] <arch> <version>"
+[[ ${#POSITIONAL[@]} -le 2 ]] || die "unexpected argument '${POSITIONAL[2]}'"
 [[ $VERSION =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]] || die "version '$VERSION' is not a safe path component"
 
 OUT=${OUT:-$ROOT/out}
@@ -82,30 +124,74 @@ BOX_STORE_TOKEN_HEADER=${BOX_STORE_TOKEN_HEADER:-Authorization}
 BOX_STORE_TOKEN_SCHEME=${BOX_STORE_TOKEN_SCHEME-Bearer}
 [[ -n $BOX_STORE_URL ]] || die "BOX_STORE_URL is not set: it is the base URL of the HTTP PUT store to publish under (an index goes to <url>/box-base/index.json)"
 
-IMAGE=$OUT/box-base-$VERSION-$ARCH.qcow2
-SHA_FILE=$IMAGE.sha256
-MANIFEST=$OUT/box-base-$VERSION-$ARCH.json
-
-[[ -s $IMAGE ]] || die "missing $IMAGE: run images/build.sh $ARCH $VERSION first"
-[[ -s $SHA_FILE ]] || die "missing $SHA_FILE"
-[[ -s $MANIFEST ]] || die "missing $MANIFEST"
+# --- what is published --------------------------------------------------------
+# Two kinds of artifact go into the same store and the same index: the image
+# under "images", the platform bundle under "platforms". Everything below works
+# on the one this run was asked for.
+REPO_URL=$BOX_STORE_URL
+WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/box-publish.XXXXXX")
+if [[ -n $PLATFORM_ARCHIVE ]]; then
+  MODE=platform
+  [[ -s $PLATFORM_ARCHIVE ]] || die "missing $PLATFORM_ARCHIVE: run images/platform.sh --arch $ARCH --version $VERSION first"
+  ARTIFACT=$(cd "$(dirname "$PLATFORM_ARCHIVE")" && pwd)/$(basename "$PLATFORM_ARCHIVE")
+  case $(basename "$ARTIFACT") in
+    box-platform-"$VERSION"-linux-"$ARCH".tar.gz) ;;
+    *) die "$(basename "$ARTIFACT") is not box-platform-$VERSION-linux-$ARCH.tar.gz: the bundle's name, its version and its arch are one thing" ;;
+  esac
+  # The bundle's own manifest travels with it: it is what the index entry and a
+  # reader show without downloading 100 MiB.
+  tar -xzOf "$ARTIFACT" ./manifest.json > "$WORK_DIR/manifest.json" 2>/dev/null \
+    || tar -xzOf "$ARTIFACT" manifest.json > "$WORK_DIR/manifest.json" 2>/dev/null \
+    || die "$ARTIFACT has no manifest.json: not a platform bundle"
+  MANIFEST=$WORK_DIR/manifest.json
+  MANIFEST_NAME=$(basename "$ARTIFACT").json
+  SHA_FILE=$WORK_DIR/$(basename "$ARTIFACT").sha256
+  SHA256=$(sha256sum "$ARTIFACT" | cut -d' ' -f1)
+  printf '%s  %s\n' "$SHA256" "$(basename "$ARTIFACT")" > "$SHA_FILE"
+  BASE_PATH=box-platform
+else
+  MODE=image
+  ARTIFACT=$OUT/box-base-$VERSION-$ARCH.qcow2
+  [[ -s $ARTIFACT ]] || die "missing $ARTIFACT: run images/build.sh $ARCH $VERSION first"
+  SHA_FILE=$ARTIFACT.sha256
+  [[ -s $SHA_FILE ]] || die "missing $SHA_FILE"
+  MANIFEST=$OUT/box-base-$VERSION-$ARCH.json
+  [[ -s $MANIFEST ]] || die "missing $MANIFEST"
+  SHA256=$(cut -d' ' -f1 "$SHA_FILE")
+  [[ $(sha256sum "$ARTIFACT" | cut -d' ' -f1) == "$SHA256" ]] \
+    || die "$SHA_FILE does not match $ARTIFACT"
+  BASE_PATH=box-base
+  MANIFEST_NAME=box-base-$VERSION-$ARCH.json
+fi
 python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$MANIFEST" \
   || die "$MANIFEST is not valid JSON"
-SHA256=$(cut -d' ' -f1 "$SHA_FILE")
-[[ $(sha256sum "$IMAGE" | cut -d' ' -f1) == "$SHA256" ]] \
-  || die "$SHA_FILE does not match $IMAGE"
+if [[ $MODE == platform ]]; then
+  python3 - "$MANIFEST" "$VERSION" "$ARCH" <<'PY' || die "the bundle's manifest is not the one its name promises"
+import json, sys
 
-REPO_URL=$BOX_STORE_URL
-BASE_PATH=box-base
+doc = json.load(open(sys.argv[1]))
+version, arch = sys.argv[2], sys.argv[3]
+if doc.get("schema") != 1:
+    sys.exit(f"the bundle's manifest is schema {doc.get('schema')!r}, want 1")
+if doc.get("version") != version:
+    sys.exit(f"the bundle's manifest says version {doc.get('version')!r}, this run publishes {version!r}")
+if doc.get("arch") != arch:
+    sys.exit(f"the bundle's manifest says arch {doc.get('arch')!r}, this run publishes {arch!r}")
+for key in ("boxd", "tools", "built_at"):
+    if key not in doc:
+        sys.exit(f"the bundle's manifest has no {key!r}")
+PY
+fi
+
 VERSION_PATH=$BASE_PATH/$VERSION/$ARCH
-IMAGE_NAME=$(basename "$IMAGE")
-SHA_NAME=$IMAGE_NAME.sha256
-MANIFEST_NAME=$(basename "$MANIFEST")
-INDEX_PATH=$BASE_PATH/index.json
-LOCK_PATH=$BASE_PATH/.lock
+ARTIFACT_NAME=$(basename "$ARTIFACT")
+SHA_NAME=$ARTIFACT_NAME.sha256
+MANIFEST_PUBLISHED=$WORK_DIR/manifest-published.json
+cp "$MANIFEST" "$MANIFEST_PUBLISHED"
+INDEX_PATH=box-base/index.json
+LOCK_PATH=box-base/.lock
 LOCK_STALE_SECONDS=${LOCK_STALE_SECONDS:-1800}
 
-WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/box-publish.XXXXXX")
 chmod 0700 "$WORK_DIR"
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT INT TERM
@@ -214,7 +300,7 @@ lock_acquire
 # A version is immutable: every file of it must be absent before anything is
 # uploaded. There is no replace switch on purpose.
 log "checking that $VERSION $ARCH is not published yet"
-for name in "$IMAGE_NAME" "$SHA_NAME" "$MANIFEST_NAME"; do
+for name in "$ARTIFACT_NAME" "$SHA_NAME" "$MANIFEST_NAME"; do
   status=$(head_status "$REPO_URL/$VERSION_PATH/$name")
   case $status in
     200) die "$REPO_URL/$VERSION_PATH/$name already exists: $VERSION $ARCH is published and immutable. Build and publish a new version instead." ;;
@@ -237,16 +323,17 @@ read_index() {
 
 INDEX_SEEN=$WORK_DIR/index-seen.json
 read_index "$INDEX_SEEN"
-if [[ -f $INDEX_SEEN ]] && python3 - "$INDEX_SEEN" "$VERSION" "$ARCH" <<'PY'
+if [[ -f $INDEX_SEEN ]] && python3 - "$INDEX_SEEN" "$VERSION" "$ARCH" "$MODE" <<'PY'
 import json, sys
 try:
     doc = json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(0)
-sys.exit(0 if sys.argv[2] in doc.get("images", {}) and sys.argv[3] in doc["images"][sys.argv[2]] else 1)
+section = "images" if sys.argv[4] == "image" else "platforms"
+sys.exit(0 if sys.argv[2] in doc.get(section, {}) and sys.argv[3] in doc[section][sys.argv[2]] else 1)
 PY
 then
-  die "index.json already lists $VERSION $ARCH: the version is published, build a new one"
+  die "index.json already lists $VERSION $ARCH under $MODE: the version is published, build a new one"
 fi
 
 # --- upload ------------------------------------------------------------------
@@ -278,24 +365,24 @@ upload_put() {
   die "uploading $label failed: HTTP $code"
 }
 
-log "uploading $IMAGE_NAME ($(stat -c %s "$IMAGE") bytes)"
-upload_put "$IMAGE" "$REPO_URL/$VERSION_PATH/$IMAGE_NAME" "$IMAGE_NAME"
+log "uploading $ARTIFACT_NAME ($(stat -c %s "$ARTIFACT") bytes)"
+upload_put "$ARTIFACT" "$REPO_URL/$VERSION_PATH/$ARTIFACT_NAME" "$ARTIFACT_NAME"
 lock_refresh
 log "uploading $SHA_NAME"
 upload_put "$SHA_FILE" "$REPO_URL/$VERSION_PATH/$SHA_NAME" "$SHA_NAME"
 lock_refresh
 log "uploading $MANIFEST_NAME"
-upload_put "$MANIFEST" "$REPO_URL/$VERSION_PATH/$MANIFEST_NAME" "$MANIFEST_NAME"
+upload_put "$MANIFEST_PUBLISHED" "$REPO_URL/$VERSION_PATH/$MANIFEST_NAME" "$MANIFEST_NAME"
 lock_refresh
 
 # --- verify what arrived, before the index names it --------------------------
-log "downloading the published image back and comparing its sha256"
-TMP_DL=$WORK_DIR/download.qcow2
-curl -fL --retry 3 -sS -o "$TMP_DL" "${CURL_AUTH[@]}" "$REPO_URL/$VERSION_PATH/$IMAGE_NAME"
+log "downloading the published $ARTIFACT_NAME back and comparing its sha256"
+TMP_DL=$WORK_DIR/download
+curl -fL --retry 3 -sS -o "$TMP_DL" "${CURL_AUTH[@]}" "$REPO_URL/$VERSION_PATH/$ARTIFACT_NAME"
 GOT_SHA=$(sha256sum "$TMP_DL" | cut -d' ' -f1)
-[[ $GOT_SHA == "$SHA256" ]] || die "the published image has sha256 $GOT_SHA, want $SHA256: index.json was not touched"
-[[ $(stat -c %s "$TMP_DL") == $(stat -c %s "$IMAGE") ]] \
-  || die "the published image is $(stat -c %s "$TMP_DL") bytes, want $(stat -c %s "$IMAGE"): index.json was not touched"
+[[ $GOT_SHA == "$SHA256" ]] || die "the published $ARTIFACT_NAME has sha256 $GOT_SHA, want $SHA256: index.json was not touched"
+[[ $(stat -c %s "$TMP_DL") == $(stat -c %s "$ARTIFACT") ]] \
+  || die "the published $ARTIFACT_NAME is $(stat -c %s "$TMP_DL") bytes, want $(stat -c %s "$ARTIFACT"): index.json was not touched"
 rm -f "$TMP_DL"
 
 compare_small_file() {
@@ -307,19 +394,22 @@ compare_small_file() {
   rm -f "$WORK_DIR/small"
 }
 compare_small_file "$SHA_FILE" "$SHA_NAME"
-compare_small_file "$MANIFEST" "$MANIFEST_NAME"
+compare_small_file "$MANIFEST_PUBLISHED" "$MANIFEST_NAME"
 
 # --- index: re-read, merge, write, read back ---------------------------------
 log "updating $INDEX_PATH"
 INDEX_FRESH=$WORK_DIR/index-fresh.json
 read_index "$INDEX_FRESH"
 NEW_INDEX=$WORK_DIR/index-new.json
-python3 - "$INDEX_FRESH" "$MANIFEST" "$NEW_INDEX" "$REPO_URL" "$VERSION_PATH" "$VERSION" "$ARCH" "$IMAGE_NAME" "$SHA_NAME" "$MANIFEST_NAME" <<'PY'
+python3 - "$MODE" "$INDEX_FRESH" "$MANIFEST" "$NEW_INDEX" "$REPO_URL" "$VERSION_PATH" "$VERSION" "$ARCH" \
+  "$ARTIFACT_NAME" "$SHA_NAME" "$MANIFEST_NAME" "$SHA256" "$(stat -c %s "$ARTIFACT")" <<'PY'
 import datetime, json, os, sys
 
-old_path, manifest_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
-repo_url, version_path, version, arch = sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7]
-image_name, sha_name, manifest_name = sys.argv[8], sys.argv[9], sys.argv[10]
+(
+    mode, old_path, manifest_path, out_path,
+    repo_url, version_path, version, arch,
+    artifact_name, sha_name, manifest_name, sha256, artifact_size,
+) = sys.argv[1:14]
 
 doc = None
 if os.path.exists(old_path):
@@ -332,28 +422,56 @@ if not isinstance(doc, dict) or "images" not in doc:
 
 manifest = json.load(open(manifest_path))
 now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-tools = manifest.get("tools", {})
-contents = {
-    "base_image": manifest.get("base_image", {}).get("name", ""),
-    "kernel": manifest.get("kernel", ""),
-    "tools": tools,
-    "sources": manifest.get("sources", {}),
-    "gaps": manifest.get("gaps", []),
-}
 base_url = f"{repo_url}/{version_path}"
-doc["images"].setdefault(version, {})[arch] = {
-    "url": f"{base_url}/{image_name}",
-    "sha256": manifest["sha256"],
-    "sha256_url": f"{base_url}/{sha_name}",
-    "size": manifest["size"],
-    "built_at": manifest["built_at"],
-    "manifest_url": f"{base_url}/{manifest_name}",
-    "disk": manifest.get("disk", {}),
-    "contents": contents,
-}
+
+if mode == "image":
+    tools = manifest.get("tools", {})
+    contents = {
+        "base_image": manifest.get("base_image", {}).get("name", ""),
+        "kernel": manifest.get("kernel", ""),
+        "tools": tools,
+        "sources": manifest.get("sources", {}),
+        "gaps": manifest.get("gaps", []),
+    }
+    entry = {
+        "url": f"{base_url}/{artifact_name}",
+        "sha256": manifest["sha256"],
+        "sha256_url": f"{base_url}/{sha_name}",
+        "size": manifest["size"],
+        "built_at": manifest["built_at"],
+        "manifest_url": f"{base_url}/{manifest_name}",
+        "disk": manifest.get("disk", {}),
+        "contents": contents,
+    }
+    # "platform": "mount" on an image says it expects a bundle at /opt/box (and
+    # it decides whether a CLI offers --platform). An older image has no field,
+    # and the entry then has none either.
+    platform = manifest.get("platform")
+    if platform:
+        entry["platform"] = platform
+        contents["platform"] = platform
+    doc.setdefault("images", {}).setdefault(version, {})[arch] = entry
+else:
+    # A platform bundle's entry is what a reader needs to mount one: where it is,
+    # its digest and size (the archive's, not the manifest's), what it was built
+    # from and what it holds.
+    entry = {
+        "url": f"{base_url}/{artifact_name}",
+        "sha256": sha256,
+        "sha256_url": f"{base_url}/{sha_name}",
+        "size": int(artifact_size),
+        "built_at": manifest["built_at"],
+        "manifest_url": f"{base_url}/{manifest_name}",
+        "boxd": manifest.get("boxd", ""),
+        "tools": manifest.get("tools", {}),
+        "schema": manifest.get("schema", 1),
+    }
+    doc.setdefault("platforms", {}).setdefault(version, {})[arch] = entry
+
 doc["schema"] = doc.get("schema", 1)
 doc["updated_at"] = now
+
+
 def version_key(text):
     # numeric components sort numerically, anything else after them
     parts = []
@@ -363,12 +481,12 @@ def version_key(text):
 
 
 # newest version first keeps the file readable as it grows
-doc["images"] = {v: doc["images"][v] for v in sorted(doc["images"], key=version_key, reverse=True)}
+for section in ("images", "platforms"):
+    if isinstance(doc.get(section), dict):
+        doc[section] = {v: doc[section][v] for v in sorted(doc[section], key=version_key, reverse=True)}
 json.dump(doc, open(out_path, "w"), indent=2, sort_keys=False)
 open(out_path, "a").write("\n")
 PY
-
-hash_before=$(sha256sum "$INDEX_FRESH" 2>/dev/null | cut -d' ' -f1 || echo none)
 with_auth -X PUT --upload-file "$NEW_INDEX" -o /dev/null -w 'PUT %{http_code}\n' \
   "$REPO_URL/$INDEX_PATH"
 
@@ -376,47 +494,57 @@ log "reading $INDEX_PATH back and verifying it"
 INDEX_BACK=$WORK_DIR/index-back.json
 status=$(curl -sS -o "$INDEX_BACK" --max-time 60 -w '%{http_code}' "${CURL_AUTH[@]}" "$REPO_URL/$INDEX_PATH" || true)
 [[ $status == 200 ]] || die "cannot read index.json back (HTTP $status): the index may be half written, check $REPO_URL/$INDEX_PATH"
-python3 - "$NEW_INDEX" "$INDEX_BACK" "$VERSION" "$ARCH" "$SHA256" "$hash_before" "$INDEX_FRESH" <<'PY'
-import json, sys
+python3 - "$NEW_INDEX" "$INDEX_BACK" "$VERSION" "$ARCH" "$SHA256" "$INDEX_FRESH" "$MODE" <<'PY'
+import json, os, sys
 
-written_path, back_path, version, arch, sha256, hash_before, before_path = sys.argv[1:8]
+written_path, back_path, version, arch, sha256, before_path, mode = sys.argv[1:8]
 written = json.load(open(written_path))
 back = json.load(open(back_path))
 
 if not isinstance(back, dict) or not isinstance(back.get("images"), dict):
     raise SystemExit("index.json read back is not an index document")
+section = "images" if mode == "image" else "platforms"
+label = "image" if mode == "image" else "platform bundle"
 
-entry = back["images"].get(version, {}).get(arch)
+entry = (back.get(section) or {}).get(version, {}).get(arch)
 if not isinstance(entry, dict):
-    raise SystemExit(f"index.json read back does not list {version} {arch}")
+    raise SystemExit(f"index.json read back does not list {version} {arch} (the {label})")
 if entry.get("sha256") != sha256:
     raise SystemExit(f"index.json lists sha256 {entry.get('sha256')} for {version} {arch}, wrote {sha256}")
+if written.get(section, {}).get(version, {}).get(arch) != entry:
+    raise SystemExit(f"index.json read back changed the {label} entry {version} {arch}")
 
-# Every entry that was there before our merge must still be there, unchanged:
-# a concurrent writer that overwrote the file must not drop a version.
-import os
+# Every entry that was there before our merge must still be there, unchanged --
+# images and platform bundles alike: a concurrent writer that overwrote the file
+# must not drop a version, and publishing a bundle must not drop an image.
 if os.path.exists(before_path):
     try:
         before = json.load(open(before_path))
     except Exception:
         before = {}
-    for ver, arches in (before.get("images") or {}).items():
-        for arc, old in arches.items():
-            if ver == version and arc == arch:
-                continue
-            now = back["images"].get(ver, {}).get(arc)
-            if not isinstance(now, dict) or now.get("sha256") != (old or {}).get("sha256"):
-                raise SystemExit(f"index.json lost or changed the entry {ver} {arc} during this publish")
-print(f"index.json lists {version} {arch}, sha256 {sha256[:16]}..., and every earlier entry is intact")
+    for other in ("images", "platforms"):
+        for ver, arches in (before.get(other) or {}).items():
+            for arc, old in arches.items():
+                if other == section and ver == version and arc == arch:
+                    continue
+                now = (back.get(other) or {}).get(ver, {}).get(arc)
+                if not isinstance(now, dict) or now.get("sha256") != (old or {}).get("sha256"):
+                    raise SystemExit(f"index.json lost or changed the {other} entry {ver} {arc} during this publish")
+print(f"index.json lists the {label} {version} {arch}, sha256 {sha256[:16]}..., and every earlier entry is intact")
 PY
 
 lock_release
 
+if [[ $MODE == image ]]; then
+  WHAT=image
+else
+  WHAT="platform bundle"
+fi
 cat <<EOF
 
-published $VERSION $ARCH
-  image    $REPO_URL/$VERSION_PATH/$IMAGE_NAME
+published $VERSION $ARCH ($WHAT)
+  $WHAT    $REPO_URL/$VERSION_PATH/$ARTIFACT_NAME
   sha256   $SHA256
-  size     $(stat -c %s "$IMAGE") bytes
+  size     $(stat -c %s "$ARTIFACT") bytes
   index    $REPO_URL/$INDEX_PATH
 EOF

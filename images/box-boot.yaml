@@ -1,7 +1,22 @@
-# Lima template that boots a published box image exactly the way the box driver
-# does: qemu, no host mounts, no containerd, cloud-init enabled and no
-# provision step. images/verify.sh uses it to prove that the image published as
-# 'image { url, sha256 }' boots and passes images/guest-checks.sh.
+# Lima template that boots a box image the way the box driver does: qemu,
+# no containerd, cloud-init enabled and no provision step, and one read-only
+# mount of the platform bundle at /opt/box. images/verify.sh fills in the
+# placeholders and uses it to prove that an image boots, with a bundle mounted,
+# and passes images/guest-checks.sh.
+#
+# The mounts value is the bundle's mount and nothing else (verify.sh fills it in):
+#
+#   mounts:
+#   - location: /some/short/path/bundle
+#     mountPoint: /opt/box
+#     writable: false
+#     9p:
+#       securityModel: none
+#       cache: fscache
+#
+# The bundle's directory never changes under the guest -- a new bundle is a new
+# directory, named by its sha256 -- so 9p may cache it (fscache). A node running
+# macOS (vmType vz) mounts the same directory with virtiofs instead.
 minimumLimaVersion: 2.0.0
 vmType: qemu
 arch: __LIMA_ARCH__
@@ -11,7 +26,7 @@ images:
 cpus: 2
 memory: 2GiB
 disk: 20GiB
-mounts: []
+mounts: __MOUNTS__
 containerd:
   system: false
   user: false

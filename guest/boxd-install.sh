@@ -14,6 +14,10 @@
 # The release ships it next to boxd_linux_amd64 and boxd_linux_arm64;
 # docs/guest-image.md says what the rest of an image has to provide.
 #
+# This is the layout for an image that carries boxd itself. An image built for a
+# platform bundle carries none: its boxd.service runs /opt/box/bin/boxd, which
+# the node mounts, and `boxd -print-unit` prints that unit instead.
+#
 # usage-begin
 # usage: guest/boxd-install.sh --from /path/to/boxd [--prefix /usr/local/bin]
 #                              [--no-start] [--dry-run]
@@ -109,7 +113,9 @@ install -m 0755 "$BIN" "$DESTDIR$PREFIX/boxd"
 ln -sf boxd "$DESTDIR$PREFIX/boxctl"
 
 # The unit is embedded in the binary, so the image and the daemon never drift.
-"$DESTDIR$PREFIX/boxd" -print-unit >"$DESTDIR/etc/systemd/system/boxd.service"
+# -print-unit-installed is the unit for a boxd at $PREFIX: the same binary also
+# carries the platform-bundle unit, which runs /opt/box/bin/boxd.
+"$DESTDIR$PREFIX/boxd" -print-unit-installed >"$DESTDIR/etc/systemd/system/boxd.service"
 chmod 0644 "$DESTDIR/etc/systemd/system/boxd.service"
 
 if [ -z "$DESTDIR" ] && [ -d /run/systemd/system ]; then

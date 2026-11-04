@@ -52,7 +52,7 @@ jobs:
         run: go test -race ./...
 
   image-tools:
-    name: Image tools (publish.sh against a fake store, addons-pack.sh)
+    name: Image tools (publish.sh against a fake store, addons-pack.sh, platform.sh)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -68,6 +68,12 @@ jobs:
       # directory, no Lima, no image, nothing installed anywhere.
       - name: images/addons_pack_test.sh
         run: images/addons_pack_test.sh
+
+      # The platform bundle's builder, tested against fixtures served on
+      # 127.0.0.1: the archive's tree, links, manifest and modes, determinism,
+      # an arm64 build on an amd64 host, and the refusals.
+      - name: images/platform_test.sh
+        run: images/platform_test.sh
 
   shellcheck:
     name: shellcheck

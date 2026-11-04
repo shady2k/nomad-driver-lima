@@ -35,8 +35,11 @@ which is how the tests run it. If boxd is down, every command answers
 
 | path | what it is |
 | --- | --- |
-| `/usr/local/bin/boxd` | the daemon; `boxd.service` runs it |
-| `/usr/local/bin/boxctl` | the same binary, by `argv[0]` or the `boxctl` subcommand |
+| `/opt/box/` | the platform bundle, a read-only mount the node made before the boot: `bin/boxd`, `bin/boxctl`, `bin/<executor>`, `tools/<executor>/`, `addons/`, `manifest.json`. An image of the older shape has no such mount and carries boxd itself |
+| `/opt/box/bin/boxd` | the daemon in a box with a bundle; `boxd.service` runs it |
+| `/opt/box/bin/boxctl` | the same binary, by `argv[0]` or the `boxctl` subcommand |
+| `/usr/local/bin/boxd` | the daemon in an image that carries its own boxd (no bundle) |
+| `/usr/local/bin/boxctl` | that same binary |
 | `/var/lib/boxd/` | durable state on the box disk: sessions and their transcripts; survives a restart of the VM and a reallocation |
 | `/var/lib/boxd/sessions/<id>/events.jsonl` | one session's event feed |
 | `/var/lib/boxd/homes/<executor>/` | the executor's `HOME`, on the box disk: caches, downloaded runtimes, virtual environments, logs. Programs run from there (the guest's `/run` is a small tmpfs mounted `noexec`) and it survives a reboot. No credential goes there |
@@ -71,7 +74,9 @@ report is in boxd's own lines.
 
 Besides sessions, the journal says what helps to diagnose a box: what boxd
 starts with (its version, the executors and whether they have credentials,
-whether the task files are mounted), every line an executor writes to stderr
+whether the task files are mounted, and which platform bundle it runs from --
+`platform 1.2.0 (boxd 1.2.0)` or `no bundle mounted at /opt/box`), every line an
+executor writes to stderr
 (at most 40 a minute, all of them in its `executor.log`), the log files of
 prime's background workers, how an executor exited and its last lines, the
 guest kernel's lines about memory and the disk (out of memory, I/O errors,
@@ -100,7 +105,7 @@ timeout with the state as it is. `boxctl info` carries the same document as
 
 | command | stdin | result |
 | --- | --- | --- |
-| `boxctl info` | – | `{"boxd_version","executors":[ExecutorInfo],"sessions":N,"mem_total_mib","mem_free_mib","cpus"}` |
+| `boxctl info` | – | `{"boxd_version","executors":[ExecutorInfo],"sessions":N,"mem_total_mib","mem_free_mib","cpus","platform":PlatformInfo}` |
 | `boxctl session new --executor prime\|opencode\|claude --model <provider>/<model> [--cwd DIR] [--title T]` | – | `{"session":"<id>"}` |
 | `boxctl session ls` | – | `{"sessions":[Session]}` |
 | `boxctl session get <id>` | – | `Session` |
@@ -112,6 +117,14 @@ timeout with the state as it is. `boxctl info` carries the same document as
 | `boxctl reload` | – | re-reads the executor credentials without touching the sessions: it answers `{"configured":[...],"restarted":[...],"deferred":[...]}` — idle sessions restart their executor now, a session in a turn defers to the end of that turn |
 
 ## Objects
+
+`PlatformInfo`: `{"path","mounted","version","boxd","tools","reason"}` -- the
+platform bundle the node mounted at `path` (`/opt/box`), out of its
+`manifest.json`. `mounted` is false when there is no bundle, and `reason` then
+says so in words ("no bundle is mounted at /opt/box", or that the manifest is not
+readable). `version`, `boxd` and `tools` (`{"<executor>": "<version>"}`, as the
+bundle records them) are present only when it is mounted. It is how a person
+answers "which bundle is this box on".
 
 `ExecutorInfo`: `{"name","version","available","configured","reason"}`.
 `available` says the binary is installed. `configured` says the box holds
@@ -145,6 +158,13 @@ An executor is one agent product, driven over the Agent Client Protocol. Three
 are known: `prime` (prime-agent), `opencode` and `claude` (claude-code-acp).
 Each one runs as one process per session, with its own home below `/run/boxd`,
 its own `--provider`/`--model` and its own transcript.
+
+An executor is not installed by the image: the image's `/opt/box` mount holds the
+bundle's `bin/`, and boxd puts that directory first on the `PATH` it gives an
+executor (and on the `PATH` a version probe runs with). So the executors a box
+has are the ones its bundle carries, and `boxctl info` says which of them are
+available. The add-ons a bundle may hold are at `/opt/box/addons`, which is where
+boxd looks for an addon that declares a model catalog.
 
 `boxctl session new` names the executor and a model as `<provider>/<model>`: the
 provider is whatever the operator configured, never a fixed one.

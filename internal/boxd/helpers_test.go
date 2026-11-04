@@ -81,7 +81,8 @@ func moduleRoot() (string, error) {
 }
 
 // testConfig is a daemon config pointed at a temp state dir, a temp runtime
-// directory (a real box uses /run/boxd, a tmpfs) and the fake agent.
+// directory (a real box uses /run/boxd, a tmpfs), a temp platform directory (a
+// real box mounts the bundle at /opt/box) and the fake agent.
 func testConfig(t *testing.T) DaemonConfig {
 	t.Helper()
 	dir := t.TempDir()
@@ -92,6 +93,7 @@ func testConfig(t *testing.T) DaemonConfig {
 		SecretsDir:   filepath.Join(dir, "secrets"),
 		LocalDir:     filepath.Join(dir, "local"),
 		AddonsDir:    filepath.Join(dir, "addons"),
+		PlatformDir:  filepath.Join(dir, "platform"),
 		PrimeAgent:   buildFake(t),
 		Journal:      io.Discard,
 		Logf:         func(format string, args ...any) { t.Logf(format, args...) },

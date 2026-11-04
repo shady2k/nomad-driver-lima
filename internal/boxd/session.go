@@ -33,8 +33,12 @@ type DaemonConfig struct {
 	OpenCode   string    // opencode binary (default: PATH)
 	ClaudeACP  string    // claude-code-acp binary (default: PATH)
 	Journal    io.Writer // event feed destination (stdout in the guest)
-	// AddonsDir is the image's addons directory (default /opt/box/addons).
+	// AddonsDir is the image's addons directory (default <platform dir>/addons,
+	// i.e. /opt/box/addons).
 	AddonsDir string
+	// PlatformDir is the platform bundle mounted read-only here (default
+	// /opt/box): a directory with a manifest.json and the executors in its bin/.
+	PlatformDir string
 	// ProgressEvery is how long a running turn may be silent in the journal
 	// before it writes a progress line (default two minutes).
 	ProgressEvery time.Duration
@@ -78,13 +82,13 @@ func (c DaemonConfig) primeConfigDir() string {
 // (executorDirs).
 func (c DaemonConfig) executorsDir() string { return filepath.Join(c.RuntimeDir, "executors") }
 
-// addonsDir is where the image keeps the operator's addons (see
+// addonsDir is where the platform bundle keeps the operator's addons (see
 // images/README.md); an addon there may declare a model catalog.
 func (c DaemonConfig) addonsDir() string {
 	if c.AddonsDir != "" {
 		return c.AddonsDir
 	}
-	return "/opt/box/addons"
+	return filepath.Join(c.platformDir(), "addons")
 }
 
 // Defaults fills in every unset field.
