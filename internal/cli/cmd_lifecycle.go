@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/hashicorp/nomad/api"
 )
 
 // lifecycleOutput is the JSON document of stop, start, rm and resize.
@@ -251,7 +253,7 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 		return err
 	}
 	if diskGrew {
-		if err := a.growVolume(ctx, id, spec.DiskGiB); err != nil {
+		if err := a.growStoppedVolume(ctx, box, job, spec.DiskGiB, *timeout); err != nil {
 			return err
 		}
 	}
@@ -274,6 +276,31 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 	}
 	out.Box = rec
 	return a.printLifecycle(&out)
+}
+
+// growStoppedVolume grows the volume of a box that is not running. Nomad refuses
+// to update a volume in use ("cannot update a volume in use"), and a resize
+// restarts the box anyway, so a running box is stopped first. If the volume then
+// cannot grow, the box goes back to running with its old size.
+func (a *App) growStoppedVolume(ctx context.Context, box BoxRecord, job *api.Job, diskGiB int, timeout time.Duration) error {
+	id := box.ID
+	running := box.State != "stopped"
+	if running {
+		if err := a.Nomad.StopJob(ctx, BoxJobName(id), false); err != nil {
+			return wrapf(err, "Nomad could not stop the job %s to grow its disk", BoxJobName(id))
+		}
+		if _, err := a.waitForBoxState(ctx, id, "stopped", timeout); err != nil {
+			return err
+		}
+	}
+	err := a.growVolume(ctx, id, diskGiB)
+	if err == nil || !running {
+		return err
+	}
+	if _, restartErr := a.Nomad.RegisterJob(ctx, job); restartErr != nil {
+		return wrapf(err, "the box %s is stopped and could not be started again (%v): `box start %s`", id, restartErr, id)
+	}
+	return wrapf(err, "the box %s was started again with its old size", id)
 }
 
 // growVolume raises the capacity Nomad records for the box disk.

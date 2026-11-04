@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/nomad/api"
@@ -449,6 +450,45 @@ func TestResizeDisk(t *testing.T) {
 		require.Equal(t, int64(16)<<30, volume.CapacityBytes, "the volume grows with the disk")
 	}
 	require.Equal(t, 16, ta.cluster.jobs["box-dev1"].TaskGroups[0].Tasks[0].Config["disk_gib"])
+}
+
+// Nomad refuses to update a volume in use: a running box is stopped first, and
+// it runs again afterwards.
+func TestResizeDiskStopsARunningBoxFirst(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.addBox(t, "dev1")
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
+	require.Equal(t, ExitOK, ta.run(t, "resize", "dev1", "--disk-gib", "16"), ta.errOut.String())
+
+	stop, grow, register := -1, -1, -1
+	for i, call := range ta.cluster.calls {
+		switch {
+		case strings.HasPrefix(call, "StopJob box-dev1"):
+			stop = i
+		case strings.HasPrefix(call, "RegisterHostVolume"):
+			grow = i
+		case strings.HasPrefix(call, "RegisterJob"):
+			register = i
+		}
+	}
+	require.True(t, stop >= 0 && stop < grow && grow < register, "calls: %v", ta.cluster.calls)
+	require.Equal(t, ExitOK, ta.run(t, "status", "dev1"))
+	require.Contains(t, ta.errOut.String()+ta.out.String(), "running")
+}
+
+// A volume that cannot grow leaves the box running as it was, and says so.
+func TestResizeDiskFailureRestartsTheBox(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.addBox(t, "dev1")
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
+	ta.cluster.volumeRegisterErr = errors.New("plugin said no")
+
+	require.NotEqual(t, ExitOK, ta.run(t, "resize", "dev1", "--disk-gib", "16"))
+	require.Contains(t, ta.errOut.String(), "started again with its old size")
+	require.Contains(t, ta.errOut.String(), "plugin said no")
+	job := ta.cluster.jobs["box-dev1"]
+	require.NotEqual(t, 16, job.TaskGroups[0].Tasks[0].Config["disk_gib"])
+	require.False(t, job.Stop != nil && *job.Stop)
 }
 
 func TestResizeDiskCannotShrink(t *testing.T) {

@@ -109,6 +109,9 @@ refuses to ask from a non-interactive shell.
 
 ### `box resize <id> [--cpus N] [--memory-mib N] [--disk-gib N] [--timeout D] [--wait]`
 
+Growing the disk of a running box stops it first: Nomad does not update a volume
+in use. If the volume cannot grow, the box runs again with its old size.
+
 Changes the size of a box. It is an **offline** change: the VM stops, is edited
 and starts again. Memory must be at least 256 MiB, and the disk can only grow.
 More than a quarter of the node needs `--large`, as with `box create`.

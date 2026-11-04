@@ -75,6 +75,8 @@ type fakeCluster struct {
 	logData map[string]string
 	// calls records what the command asked Nomad for.
 	calls []string
+	// volumeRegisterErr fails the update of an existing volume.
+	volumeRegisterErr error
 	// callsMu guards calls. The streaming calls (Exec, Logs) run in a goroutine
 	// of their own and must not take mu, so record has a lock of its own.
 	callsMu sync.Mutex
@@ -319,6 +321,16 @@ func (c *fakeCluster) RegisterHostVolume(ctx context.Context, volume *api.HostVo
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.record("RegisterHostVolume " + volume.Name)
+	if _, exists := c.volumes[volume.ID]; exists && c.volumeRegisterErr != nil {
+		return nil, c.volumeRegisterErr
+	}
+	if _, exists := c.volumes[volume.ID]; exists {
+		for _, alloc := range c.allocs {
+			if !isTerminalAlloc(alloc.ClientStatus) {
+				return nil, fmt.Errorf("cannot update a volume in use")
+			}
+		}
+	}
 	volume.CapacityBytes = volume.RequestedCapacityMaxBytes
 	c.volumes[volume.ID] = volume
 	return volume, nil
