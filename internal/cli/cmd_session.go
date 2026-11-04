@@ -250,6 +250,11 @@ func (a *App) cmdWait(ctx context.Context, args []string) error {
 			fmt.Fprintln(a.Out, turn.Text)
 		}
 		a.note("session %s turn %d finished: %s%s", sessionID, turn.Turn, dash(turn.State), turnSuffix(turn))
+		if turn.State == "done" && strings.TrimSpace(turn.Text) == "" {
+			// An agent may end a turn on a tool call with nothing to say; an
+			// empty answer is that, not a lost one.
+			a.note("the agent ended the turn without a final message; `box events %s %s` shows what it did", id, sessionID)
+		}
 	}
 	// A script tells a failed turn from a good one by the exit code alone.
 	if turn.State != "done" {

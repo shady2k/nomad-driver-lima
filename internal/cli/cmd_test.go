@@ -785,3 +785,15 @@ func TestRunStopsTheGuestCommandWhenItsTimeoutEnds(t *testing.T) {
 
 	require.Equal(t, ExitUsage, ta.run(t, "run", "dev1", "--timeout", "soon", "--", "true"))
 }
+
+// TestWaitSaysATurnEndedWithoutAMessage: a done turn with no text says so,
+// instead of printing nothing.
+func TestWaitSaysATurnEndedWithoutAMessage(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.addBox(t, "dev1")
+	ta.guest.responses["wait s-1 --timeout 599"] = `{"session":"s-1","turn":2,"state":"done"}`
+	rc := ta.run(t, "wait", "dev1", "s-1")
+	require.Equal(t, ExitOK, rc, ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "without a final message")
+	require.Contains(t, ta.errOut.String(), "box events dev1 s-1")
+}
