@@ -124,6 +124,8 @@ if [[ $IMAGE_PLATFORM == mount ]]; then
     "$([[ $UNIT_REQ == *"/opt/box "* || $UNIT_REQ == *"/opt/box" ]] && echo present || echo missing)"
   check "the image carries no boxd of its own" "absent" \
     "$([[ -e /usr/local/bin/boxd ]] && echo present || echo absent)"
+  check "boxctl answers at the path box and the driver call" "/opt/box/bin/boxctl" \
+    "$(readlink /usr/local/bin/boxctl)"
 else
   BOXD_WANT_SHA=$(jget boxd.sha256)
   BOXD_WANT_VERSION=$(jget boxd.version)

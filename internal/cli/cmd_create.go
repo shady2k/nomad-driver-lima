@@ -203,15 +203,15 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 
 	spec := BoxSpec{
 		CPUMHzPerVCPU: int(node.vcpuMHz()),
-		ID:           id,
-		ImageVersion: image.Version,
-		ImageURL:     image.URL,
-		ImageSHA256:  image.SHA256,
-		Arch:         image.Arch,
-		CPUs:         *cpus,
-		MemoryMiB:    *memoryMiB,
-		DiskGiB:      *diskGiB,
-		NodeID:       node.NodeID,
+		ID:            id,
+		ImageVersion:  image.Version,
+		ImageURL:      image.URL,
+		ImageSHA256:   image.SHA256,
+		Arch:          image.Arch,
+		CPUs:          *cpus,
+		MemoryMiB:     *memoryMiB,
+		DiskGiB:       *diskGiB,
+		NodeID:        node.NodeID,
 	}
 	if bundle != nil {
 		spec.PlatformVersion = bundle.Version
