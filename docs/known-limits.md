@@ -143,6 +143,13 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   OpenAI-compatible `/models` does not say how large a model's context is: an
   addon catalog (`docs/guest-image.md`) or the staged definition has to, and a
   model neither sizes runs with the executor's default.
+- **`--repo` clones without credentials.** A box has no git credentials of the
+  caller's, so `box prepare --repo` reaches public repositories and those the
+  box's network may read anonymously. A private one goes in with `--from` (a
+  checkout, or `git bundle create` and clone from it in the recipe).
+- **A preparation is a full clone.** There is no shallow or partial clone: a
+  repository with a long history takes as long as its pack, which is minutes on
+  a slow route.
 - **prime runs no extension code, so per-request headers are static.**
   prime-agent 0.10.2 packages carry skills, prompts and themes; an extension's
   code that adds a header per request never runs. An addon catalog's `headers`

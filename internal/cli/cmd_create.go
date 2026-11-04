@@ -17,6 +17,8 @@ type createOutput struct {
 	Image  *ImageArtifact `json:"image"`
 	Node   string         `json:"node"`
 	Warn   string         `json:"warning,omitempty"`
+	// Prepare is the box's preparation, when create was given its sources.
+	Prepare *PrepareState `json:"prepare,omitempty"`
 }
 
 // Defaults of `box create`, also what `box images` suggests. 2048 MiB because
@@ -39,6 +41,8 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	diskGiB := fs.Int("disk-gib", defaultDiskGiB, "box disk size in GiB (on a dynamic host volume)")
 	nodeName := fs.String("node", "", "pin the box to this node")
 	large := fs.Bool("large", false, "allow more than a quarter of a node's CPU, memory or disk")
+	src := addPrepareFlags(fs)
+	prepTimeout := fs.Duration("prepare-timeout", defaultPrepareTimeout, "time limit of the preparation, and how long create waits for it")
 	vaultRole := fs.String("vault-role", a.VaultRole(), "the Vault role the box reads its secrets with "+
 		"(default: $BOX_VAULT_ROLE, else the cluster's default role)")
 	timeout := fs.Duration("timeout", defaultWaitTimeout, "how long to wait for the box to run")
@@ -55,6 +59,16 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	}
 	if *timeout <= 0 {
 		return usagef("--timeout must be positive, got %s", *timeout)
+	}
+	if err := src.check(); err != nil {
+		return err
+	}
+	if src.given() && !*wait {
+		return usagef("box create %s: --repo and --from need the box running, so they do not go with --wait=false; "+
+			"`box prepare %s` does it later", id, id)
+	}
+	if *prepTimeout <= 0 {
+		return usagef("--prepare-timeout must be positive, got %s", *prepTimeout)
 	}
 	for name, value := range map[string]int{"cpus": *cpus, "memory-mib": *memoryMiB, "disk-gib": *diskGiB} {
 		if err := requirePositive(name, value); err != nil {
@@ -239,7 +253,35 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	if resp != nil && resp.Warnings != "" {
 		repo.Warn = joinNotes(lost, oneLine(resp.Warnings, 300))
 	}
-	return a.printCreate(repo)
+	if !src.given() {
+		return a.printCreate(repo)
+	}
+	// The box runs; now its sources, and the box is ready when they are. A
+	// preparation that fails keeps the box: it says why, and `box prepare`
+	// runs it again.
+	if !a.JSON {
+		if err := a.printCreate(repo); err != nil {
+			return err
+		}
+	}
+	opts, err := src.options(*prepTimeout)
+	if err != nil {
+		return err
+	}
+	client, _, err := a.boxctlFor(ctx, id)
+	if err != nil {
+		return wrapKeep(err, "the box %s runs but could not be prepared; `box prepare %s` tries again", id, id)
+	}
+	prepErr := a.prepareBox(ctx, client, id, opts, *prepTimeout, false)
+	if a.JSON {
+		if st, err := client.PrepareGet(ctx); err == nil {
+			repo.Prepare = st
+		}
+		if err := a.printJSON(repo); err != nil {
+			return err
+		}
+	}
+	return prepErr
 }
 
 // printCreate writes the result of `box create`.

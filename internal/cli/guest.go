@@ -8,6 +8,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/nomad/api"
 )
@@ -113,6 +114,8 @@ type BoxInfo struct {
 	MemTotalMiB int64          `json:"mem_total_mib"`
 	MemFreeMiB  int64          `json:"mem_free_mib"`
 	CPUs        int            `json:"cpus"`
+	// Prepare is the box's preparation; nil from a boxd that has none.
+	Prepare *PrepareState `json:"prepare,omitempty"`
 }
 
 // Session is one agent session in a box.
@@ -369,4 +372,83 @@ func (b *Boxctl) Cancel(ctx context.Context, id string) (*Turn, error) {
 		return nil, err
 	}
 	return &turn, nil
+}
+
+// PrepareState is where a box's preparation is (boxctl prepare get).
+type PrepareState struct {
+	State      string   `json:"state"`
+	Step       string   `json:"step,omitempty"`
+	Source     string   `json:"source,omitempty"`
+	Repo       string   `json:"repo,omitempty"`
+	Ref        string   `json:"ref,omitempty"`
+	Dest       string   `json:"dest,omitempty"`
+	Recipe     string   `json:"recipe,omitempty"`
+	LimitSec   int      `json:"limit_sec,omitempty"`
+	StartedAt  string   `json:"started_at,omitempty"`
+	FinishedAt string   `json:"finished_at,omitempty"`
+	Error      string   `json:"error,omitempty"`
+	LastLine   string   `json:"last_line,omitempty"`
+	Tail       []string `json:"tail,omitempty"`
+}
+
+// PrepareOptions starts a preparation: a repository, files (a tar stream), or
+// neither, which runs the recipe again on the sources there are.
+type PrepareOptions struct {
+	Repo, Ref, Dest string
+	Files           io.Reader
+	Limit           time.Duration
+}
+
+// PrepareStart runs `boxctl prepare start`.
+func (b *Boxctl) PrepareStart(ctx context.Context, opts PrepareOptions) (*PrepareState, error) {
+	args := []string{"prepare", "start"}
+	if opts.Dest != "" {
+		args = append(args, "--dest", opts.Dest)
+	}
+	if opts.Repo != "" {
+		args = append(args, "--repo", opts.Repo)
+	}
+	if opts.Ref != "" {
+		args = append(args, "--ref", opts.Ref)
+	}
+	if opts.Files != nil {
+		args = append(args, "--files")
+	}
+	if opts.Limit > 0 {
+		args = append(args, "--limit", strconv.Itoa(int(opts.Limit.Seconds())))
+	}
+	return b.prepareCall(ctx, opts.Files, args...)
+}
+
+// PrepareGet runs `boxctl prepare get`.
+func (b *Boxctl) PrepareGet(ctx context.Context) (*PrepareState, error) {
+	return b.prepareCall(ctx, nil, "prepare", "get")
+}
+
+// PrepareWait runs `boxctl prepare wait`: it returns when the preparation is
+// not running, or after timeout.
+func (b *Boxctl) PrepareWait(ctx context.Context, timeout time.Duration) (*PrepareState, error) {
+	return b.prepareCall(ctx, nil, "prepare", "wait", "--timeout", strconv.Itoa(int(timeout.Seconds())))
+}
+
+// PrepareCancel runs `boxctl prepare cancel`.
+func (b *Boxctl) PrepareCancel(ctx context.Context) (*PrepareState, error) {
+	return b.prepareCall(ctx, nil, "prepare", "cancel")
+}
+
+// PrepareSkip runs `boxctl prepare skip`.
+func (b *Boxctl) PrepareSkip(ctx context.Context) (*PrepareState, error) {
+	return b.prepareCall(ctx, nil, "prepare", "skip")
+}
+
+func (b *Boxctl) prepareCall(ctx context.Context, stdin io.Reader, args ...string) (*PrepareState, error) {
+	out, err := b.call(ctx, stdin, args...)
+	if err != nil {
+		return nil, err
+	}
+	st, err := decodeJSON[PrepareState](out, "boxctl "+strings.Join(args[:2], " "))
+	if err != nil {
+		return nil, err
+	}
+	return &st, nil
 }

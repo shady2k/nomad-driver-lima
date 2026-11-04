@@ -471,7 +471,9 @@ func TestRunReturnsTheGuestExitCode(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	ta.addBox(t, "dev1")
 	require.Equal(t, ExitOK, ta.run(t, "run", "dev1", "--", "true"))
-	require.Equal(t, []string{"true"}, ta.guest.calls[len(ta.guest.calls)-1])
+	last := ta.guest.calls[len(ta.guest.calls)-1]
+	require.Equal(t, []string{"setsid", "-w", "sh", "-c", runWrapper}, last[:5], "the command runs in a session of its own")
+	require.Equal(t, "true", last[len(last)-1])
 
 	ta.guest.runExit = 42
 	require.Equal(t, 42, ta.run(t, "run", "dev1", "--", "false"))
@@ -729,7 +731,7 @@ func TestRunKeepsTheFlagsAfterTheSeparator(t *testing.T) {
 	rc := ta.run(t, "run", "dev1", "--", "df", "-h", "/")
 	require.Equal(t, ExitOK, rc, ta.errOut.String())
 	require.Len(t, ta.guest.calls, 1)
-	require.Equal(t, []string{"df", "-h", "/"}, ta.guest.calls[0])
+	require.Equal(t, []string{"df", "-h", "/"}, ta.guest.calls[0][6:])
 }
 
 func TestGlobalFlagsStillWorkBeforeTheCommand(t *testing.T) {
@@ -738,7 +740,7 @@ func TestGlobalFlagsStillWorkBeforeTheCommand(t *testing.T) {
 	rc := ta.run(t, "--json", "run", "dev1", "--", "uname", "-a")
 	require.Equal(t, ExitOK, rc, ta.errOut.String())
 	require.True(t, ta.JSON)
-	require.Equal(t, []string{"uname", "-a"}, ta.guest.calls[0])
+	require.Equal(t, []string{"uname", "-a"}, ta.guest.calls[0][6:])
 }
 
 // TestCreateRefusesMoreThanAQuarterOfANode: a box that would take a large part
@@ -763,4 +765,23 @@ func TestResizeRefusesMoreThanAQuarterOfTheNode(t *testing.T) {
 	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
 	require.Equal(t, ExitUsage, ta.run(t, "resize", "dev1", "--cpus", "8"))
 	require.Contains(t, ta.errOut.String(), "more than a quarter of the node")
+}
+
+// TestRunStopsTheGuestCommandWhenItsTimeoutEnds: a silent command that runs
+// out of --timeout is stopped in the box too, and the run says so with exit 4.
+func TestRunStopsTheGuestCommandWhenItsTimeoutEnds(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.addBox(t, "dev1")
+	ta.guest.block = true
+	rc := ta.run(t, "run", "dev1", "--timeout", "50ms", "--", "git", "clone", "-q", "https://example.com/x")
+	require.Equal(t, ExitTimeout, rc, ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "ran out of its --timeout 50ms")
+	require.Contains(t, ta.errOut.String(), "stopped too")
+	stop := ta.guest.calls[len(ta.guest.calls)-1]
+	run := ta.guest.calls[len(ta.guest.calls)-2]
+	require.Equal(t, "sh", stop[0])
+	require.Contains(t, stop[2], "kill -TERM")
+	require.Equal(t, run[5], stop[3], "the stop names the pid file of that run")
+
+	require.Equal(t, ExitUsage, ta.run(t, "run", "dev1", "--timeout", "soon", "--", "true"))
 }

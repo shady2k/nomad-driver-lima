@@ -70,6 +70,19 @@ its exit code, with the command cut to 200 characters.
 
 Every command prints one JSON document.
 
+### `boxctl prepare start|get|wait|cancel|skip`
+
+The box's preparation (`docs/cli.md`, "Preparing a box"). `start --dest DIR
+--repo URL [--ref R]` clones, `start --dest DIR --files` unpacks the tar stream
+on stdin, `start` alone runs the recipe again on the last sources; `--limit SEC`
+is the time limit. The sources belong to the uid and gid boxctl runs as. Each
+prints the state: `{"state", "step", "source", "repo", "ref", "dest", "recipe",
+"limit_sec", "started_at", "finished_at", "error", "last_line", "tail"}`.
+`wait [--timeout SEC]` returns when the state is not `preparing`, or after the
+timeout with the state as it is. `boxctl info` carries the same document as
+`prepare`. `session new` refuses with `busy` while preparing and with
+`invalid_argument` after a failure, naming the ways out.
+
 | command | stdin | result |
 | --- | --- | --- |
 | `boxctl info` | – | `{"boxd_version","executors":[ExecutorInfo],"sessions":N,"mem_total_mib","mem_free_mib","cpus"}` |

@@ -130,6 +130,63 @@ func (d *Daemon) Handler() http.Handler {
 		d.cfg.logf("new session %s (%s %s)", s.ID, s.Executor, s.Model)
 		writeJSON(w, 200, map[string]any{"session": s.ID})
 	})
+	mux.HandleFunc("GET /v1/prepare", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, d.mgr.Prepare().State())
+	})
+	mux.HandleFunc("GET /v1/prepare/wait", func(w http.ResponseWriter, r *http.Request) {
+		timeout := 30 * time.Second
+		if v := r.URL.Query().Get("timeout"); v != "" {
+			sec, err := strconv.Atoi(v)
+			if err != nil || sec < 0 {
+				fail(w, Errorf(CodeInvalid, "timeout %q is not a number of seconds", v))
+				return
+			}
+			timeout = time.Duration(sec) * time.Second
+		}
+		writeJSON(w, 200, d.mgr.Prepare().Wait(r.Context(), timeout))
+	})
+	mux.HandleFunc("POST /v1/prepare", func(w http.ResponseWriter, r *http.Request) {
+		var req PrepareRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			fail(w, Errorf(CodeInvalid, "bad request body: %v", err))
+			return
+		}
+		st, err := d.mgr.Prepare().Start(req)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, st)
+	})
+	// The files come as the request body, a tar stream; the rest of the
+	// request is in the query.
+	mux.HandleFunc("POST /v1/prepare/files", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		limit, _ := strconv.Atoi(q.Get("limit_sec"))
+		req := PrepareRequest{Dest: q.Get("dest"), Owner: q.Get("owner"), LimitSec: limit}
+		st, err := d.mgr.Prepare().StartFiles(req, r.Body)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, st)
+	})
+	mux.HandleFunc("POST /v1/prepare/cancel", func(w http.ResponseWriter, r *http.Request) {
+		st, err := d.mgr.Prepare().Cancel()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, st)
+	})
+	mux.HandleFunc("POST /v1/prepare/skip", func(w http.ResponseWriter, r *http.Request) {
+		st, err := d.mgr.Prepare().Skip()
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, st)
+	})
 	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"sessions": d.mgr.List()})
 	})
@@ -265,6 +322,8 @@ func (d *Daemon) Info(ctx context.Context) Info {
 	}
 	total, free := memoryMiB()
 	info.MemTotalMiB, info.MemFreeMiB = total, free
+	st := d.mgr.Prepare().State()
+	info.Prepare = &st
 	for _, name := range []string{"prime", "opencode", "claude"} {
 		ex, err := buildExecutor(name, d.cfg)
 		if err != nil {

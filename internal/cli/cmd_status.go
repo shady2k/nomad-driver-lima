@@ -236,6 +236,17 @@ func (a *App) printStatus(out *statusOutput) {
 			a.note("  unconfigured %s (no credentials in /run/box/secrets: box executors set --from-dir DIR --provider NAME)",
 				strings.Join(unconfigured, ", "))
 		}
+		if p := out.Guest.Prepare; p != nil && p.State != "none" {
+			switch p.State {
+			case "preparing":
+				a.note("  prepare preparing: %s (`box prepare %s` waits, --cancel stops it)", prepareDoing(p), out.Box.ID)
+			case "failed":
+				a.note("  prepare failed in the %s step: %s (`box prepare %s` runs it again, --skip goes without)",
+					dash(p.Step), p.Error, out.Box.ID)
+			default:
+				a.note("  prepare %s%s", p.State, prepareWhere(p))
+			}
+		}
 	} else if out.GuestError != "" {
 		a.note("  guest   %s", out.GuestError)
 	}

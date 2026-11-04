@@ -126,7 +126,13 @@ type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]*session
 	order    []string
+
+	// prep is the box's preparation (prepare.go); sessions wait for it.
+	prep *preparer
 }
+
+// Prepare is the box's preparation.
+func (m *Manager) Prepare() *preparer { return m.prep }
 
 // NewManager loads the persisted sessions and prepares the state directory.
 func NewManager(cfg DaemonConfig) (*Manager, error) {
@@ -138,7 +144,7 @@ func NewManager(cfg DaemonConfig) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Manager{cfg: cfg, store: store, sessions: map[string]*session{}}
+	m := &Manager{cfg: cfg, store: store, sessions: map[string]*session{}, prep: newPreparer(cfg)}
 	if err := m.load(); err != nil {
 		return nil, err
 	}
@@ -462,11 +468,19 @@ func (m *Manager) NewSession(executor, model, cwd, title string) (Session, error
 	if model == "" {
 		return Session{}, Errorf(CodeInvalid, "a model is required (--model <provider>/<model>)")
 	}
+	// A session works in the prepared sources: it does not start before they
+	// are there, nor on a preparation that failed.
+	if err := m.prep.sessionGate(); err != nil {
+		return Session{}, err
+	}
 	// The list is what the provider offers to this box's key (discoverModels),
 	// so a model outside it would only fail the first turn.
 	if models, ok := ExecutorModels(m.cfg, executor); ok && !containsString(models, model) {
 		return Session{}, Errorf(CodeInvalid, "model %s is not offered to this box's %s key; the models are: %s",
 			model, executor, strings.Join(models, ", "))
+	}
+	if cwd == "" {
+		cwd = m.prep.workdir()
 	}
 	if cwd == "" {
 		cwd = filepath.Join(m.cfg.StateDir, "work")

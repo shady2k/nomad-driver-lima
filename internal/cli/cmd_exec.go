@@ -3,9 +3,12 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/nomad/api"
 )
@@ -74,11 +77,27 @@ func (a *App) cmdRun(ctx context.Context, args []string) error {
 	}
 	id := args[0]
 	rest := args[1:]
+	var limit time.Duration
+	for len(rest) > 0 && rest[0] != "--" && strings.HasPrefix(rest[0], "--timeout") {
+		value := strings.TrimPrefix(strings.TrimPrefix(rest[0], "--timeout"), "=")
+		rest = rest[1:]
+		if value == "" {
+			if len(rest) == 0 {
+				return usagef("box run %s: --timeout needs a duration, for example --timeout 20m", id)
+			}
+			value, rest = rest[0], rest[1:]
+		}
+		d, err := time.ParseDuration(value)
+		if err != nil || d <= 0 {
+			return usagef("box run %s: --timeout %q is not a positive duration (for example 20m)", id, value)
+		}
+		limit = d
+	}
 	if len(rest) > 0 && rest[0] == "--" {
 		rest = rest[1:]
 	}
 	if len(rest) == 0 {
-		return usagef("box run %s: no command was given; use: box run %s -- cmd [args...]", id, id)
+		return usagef("box run %s: no command was given; use: box run %s [--timeout D] -- cmd [args...]", id, id)
 	}
 	box, _, err := a.findBox(ctx, id)
 	if err != nil {
@@ -100,16 +119,60 @@ func (a *App) cmdRun(ctx context.Context, args []string) error {
 	if stdin == nil {
 		stdin = strings.NewReader("")
 	}
-	code, err := tr.Exec(ctx, ExecOpts{
-		Command: rest,
+	// Nomad does not tell the box that the caller has gone while the command
+	// prints nothing, so the command would run on with no one to read how it
+	// ended. It runs in a session of its own whose leader writes its pid to a
+	// file; a run that is interrupted or runs out of --timeout stops that
+	// whole session before it returns.
+	pidFile := fmt.Sprintf("/tmp/box-run-%d-%d.pid", os.Getpid(), time.Now().UnixNano())
+	command := append([]string{"setsid", "-w", "sh", "-c", runWrapper, pidFile}, rest...)
+	runCtx := ctx
+	if limit > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, limit)
+		defer cancel()
+	}
+	code, err := tr.Exec(runCtx, ExecOpts{
+		Command: command,
 		Stdin:   stdin,
 		Stdout:  a.Out,
 		Stderr:  a.ErrOut,
 	})
+	if runCtx.Err() != nil {
+		stopped := a.stopGuestRun(tr, pidFile)
+		if limit > 0 && errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return timeoutf("box run %s: %q ran out of its --timeout %s; %s", id, strings.Join(rest, " "), limit, stopped)
+		}
+		return errorf("box run %s: interrupted; %s", id, stopped)
+	}
 	if err != nil {
 		return wrapf(err, "cannot run %q in box %s", strings.Join(rest, " "), id)
 	}
 	return guestExitCode(code)
+}
+
+// runWrapper runs the command ("$@") as a child of the session leader, which
+// notes its pid in "$0" and removes the note when the command ends.
+const runWrapper = `echo $$ > "$0"; "$@"; c=$?; rm -f "$0"; exit $c`
+
+// stopGuestRun stops a `box run` command left in the guest: TERM to its whole
+// session, then KILL to what is left. It says what happened, in words.
+func (a *App) stopGuestRun(tr ExecTransport, pidFile string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	script := `p=$(cat "$0" 2>/dev/null) || exit 3; kill -TERM -"$p" 2>/dev/null; ` +
+		`for i in 1 2 3 4 5; do kill -0 -"$p" 2>/dev/null || break; sleep 1; done; ` +
+		`kill -KILL -"$p" 2>/dev/null; rm -f "$0"`
+	code, err := tr.Exec(ctx, ExecOpts{Command: []string{"sh", "-c", script, pidFile}})
+	switch {
+	case err != nil:
+		return "the command may still run in the box: it could not be stopped (" + oneLine(err.Error(), 160) + ")"
+	case code == 3:
+		return "the command had already ended in the box"
+	case code != 0:
+		return fmt.Sprintf("the command may still run in the box: stopping it exited %d", code)
+	}
+	return "the command in the box was stopped too"
 }
 
 // cmdLogs streams the task log of a box, which is the boxd event stream.

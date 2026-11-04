@@ -24,8 +24,9 @@ polling loop**: `box wait` and `box events` report progress.
 box capacity                      # 1. where can a box go, and how much is free
 box images                        # 2. which base images exist: take the newest
 box executors show                # 3. which executors have credentials, and their models
-box create dev1 --image <newest> --arch amd64 --disk-gib 16   # 2 vCPU, 2048 MiB by default
-box session new dev1 --executor prime --model <provider>/<model> --title "fix the tests"
+box create dev1 --image <newest> --arch amd64 --disk-gib 16 \
+    --repo https://github.com/org/proj        # 2 vCPU, 2048 MiB by default; returns when the box is ready
+box session new dev1 --executor prime --model <provider>/<model> --title "fix the tests"   # starts in /work/proj
 box send dev1 s-7f3a2c --file prompt.md   # or the prompt as one argument
 box wait dev1 s-7f3a2c --timeout 15m      # blocks until the turn ends, prints the answer
 box events dev1 s-7f3a2c --since 12       # what happened, resumable
@@ -81,10 +82,19 @@ running). A non-zero exit is always a sentence you can act on.
 - **A resize restarts the box and kills a running turn.** `box resize
   --cpus/--memory-mib` stops the VM, edits it and starts it again; wait for
   every session's turn to end first. The disk is kept and can only grow.
-- **A repository goes in by clone or by bundle.** What is pushed, the box clones
-  itself (`box run <id> -- git clone ...`), which is the fastest. Commits you
-  have not pushed go in as a bundle: `git bundle create repo.bundle --all`,
-  `box cp repo.bundle <id>:/root/`, then clone from it in the box.
+- **The box prepares itself; you do not clone in a shell.** `box create --repo
+  URL [--ref R]` (or `box prepare <id> --repo ...` later) clones in the box,
+  runs the project's `.box/prepare.sh` and returns when the box is ready, or
+  fails with the reason and the last lines. Files that are not pushed, or not
+  in git at all, go in with `--from PATH` instead. Sessions refuse to start
+  while a preparation runs or after it failed; the refusal names the way out
+  (`box prepare <id>` waits or runs it again, `--cancel` stops it, `--skip`
+  goes on without it). A big repository takes minutes: the command prints its
+  progress, wait for it.
+- **Check every step's exit code.** Chain setup commands with `&&`, never `;`,
+  and do not start a session after a step that failed. Give `box run` its own
+  `--timeout D` instead of wrapping it in `timeout`: both stop the command in
+  the box, but `--timeout` says so with exit 4.
 - **Results travel by git or `box cp`.** A box is disposable; its disk is not
   backed up. Push a branch, or copy the files out with `box cp`, before you
   stop or delete the box. `box cp` streams a tar over `alloc exec`, so it works

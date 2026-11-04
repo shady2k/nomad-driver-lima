@@ -539,6 +539,9 @@ type fakeGuest struct {
 	errors map[string]boxctlAnswer
 	// runExit is the exit code of any command that is not boxctl, tar, mkdir.
 	runExit int
+	// block makes a `box run` command run until its context ends, as a
+	// silent long command does.
+	block bool
 	// tty records whether a command asked for a terminal.
 	tty bool
 	// calls records every command that ran.
@@ -598,6 +601,9 @@ func (g *fakeGuest) Exec(ctx context.Context, opts ExecOpts) (int, error) {
 	case opts.Command[0] == "mkdir":
 		dir := opts.Command[len(opts.Command)-1]
 		return 0, os.MkdirAll(g.path(dir), 0o755)
+	case g.block && opts.Command[0] == "setsid":
+		<-ctx.Done()
+		return -1, ctx.Err()
 	default:
 		return g.runExit, nil
 	}

@@ -95,6 +95,8 @@ type Info struct {
 	MemTotalMiB int            `json:"mem_total_mib"`
 	MemFreeMiB  int            `json:"mem_free_mib"`
 	CPUs        int            `json:"cpus"`
+	// Prepare is where the box's preparation is.
+	Prepare *PrepareState `json:"prepare,omitempty"`
 }
 
 // ErrorBody is the failure document boxctl prints to stdout and exits 1 with.

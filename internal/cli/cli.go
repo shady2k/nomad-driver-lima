@@ -312,6 +312,7 @@ func (a *App) commands() map[string]command {
 		"run":       {usage: "run a command in a box: box run <id> -- cmd...", run: a.cmdRun, noFlags: true},
 		"cp":        {usage: "copy files or directories in and out: box cp <src> <dst>", run: a.cmdCP, noFlags: true},
 		"logs":      {usage: "task logs of a box (the boxd event stream): box logs <id> [-f]", run: a.cmdLogs},
+		"prepare":   {usage: "put sources in a box and run their recipe: box prepare <id> [--repo URL [--ref R] | --from PATH] [--cancel | --skip | --again]", run: a.cmdPrepare},
 		"session":   {usage: "sessions in a box: box session new|ls|close <id> ...", run: a.cmdSession, subcommands: true},
 		"send":      {usage: "send a prompt to a session: box send <id> <session> [--file F | text]", run: a.cmdSend},
 		"wait":      {usage: "wait for a session turn to finish: box wait <id> <session> [--timeout D]", run: a.cmdWait},

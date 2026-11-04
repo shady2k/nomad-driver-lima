@@ -26,6 +26,9 @@ const BoxctlUsage = `usage:
   boxctl events <id> [--since SEQ] [--limit N]
   boxctl cancel <id>
   boxctl reload              (re-read the executor credentials, keep the sessions)
+  boxctl prepare start --dest DIR [--repo URL [--ref REF] | --files] [--limit SEC]
+                             (--files: a tar stream on stdin; neither: the recipe again)
+  boxctl prepare get | wait [--timeout SEC] | cancel | skip
 
 global: --socket PATH (default $BOXD_SOCKET or ` + DefaultSocket + `)
 Every command prints one JSON document on stdout and exits 0, or prints
@@ -76,6 +79,8 @@ func RunBoxctl(args []string, in io.Reader, out, errw io.Writer) int {
 		return cmdCancel(ctx, c, rest[1:], out, errw)
 	case "reload":
 		return cmdReload(ctx, c, rest[1:], out, errw)
+	case "prepare":
+		return cmdPrepare(ctx, c, rest[1:], in, out, errw)
 	}
 	return printError(out, errw, Errorf(CodeInvalid, "unknown command %q", rest[0]))
 }
@@ -321,4 +326,77 @@ func splitID(args []string) (string, []string, error) {
 		return "", nil, Errorf(CodeInvalid, "a session id is required")
 	}
 	return args[0], args[1:], nil
+}
+
+// cmdPrepare drives the box's preparation (prepare.go). The sources belong to
+// the user boxctl runs as: the one `box run` and `box cp` use.
+func cmdPrepare(ctx context.Context, c *Client, args []string, in io.Reader, out, errw io.Writer) int {
+	if len(args) == 0 {
+		return printError(out, errw, Errorf(CodeInvalid, "prepare needs a subcommand (start, get, wait, cancel, skip)"))
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "start":
+		fs := flag.NewFlagSet("prepare start", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		dest := fs.String("dest", "", "where the sources go in the box")
+		repo := fs.String("repo", "", "git repository to clone")
+		ref := fs.String("ref", "", "branch, tag or commit to check out")
+		files := fs.Bool("files", false, "the sources are a tar stream on stdin")
+		limit := fs.Int("limit", 0, "time limit of the preparation in seconds")
+		if err := fs.Parse(rest); err != nil {
+			return printError(out, errw, Errorf(CodeInvalid, "prepare start: %v", err))
+		}
+		if *files && *repo != "" {
+			return printError(out, errw, Errorf(CodeInvalid, "prepare start: --repo and --files are two sources, give one"))
+		}
+		req := PrepareRequest{Repo: *repo, Ref: *ref, Dest: *dest, LimitSec: *limit,
+			Owner: fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())}
+		var (
+			st  PrepareState
+			err error
+		)
+		if *files {
+			st, err = c.PrepareFiles(ctx, req, in)
+		} else {
+			st, err = c.Prepare(ctx, req)
+		}
+		if err != nil {
+			return printError(out, errw, err)
+		}
+		return printJSON(out, st)
+	case "get":
+		st, err := c.PrepareState(ctx)
+		if err != nil {
+			return printError(out, errw, err)
+		}
+		return printJSON(out, st)
+	case "wait":
+		fs := flag.NewFlagSet("prepare wait", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		timeout := fs.Int("timeout", 30, "seconds to wait")
+		if err := fs.Parse(rest); err != nil {
+			return printError(out, errw, Errorf(CodeInvalid, "prepare wait: %v", err))
+		}
+		callCtx, cancel := context.WithTimeout(ctx, time.Duration(*timeout+30)*time.Second)
+		defer cancel()
+		st, err := c.PrepareWait(callCtx, time.Duration(*timeout)*time.Second)
+		if err != nil {
+			return printError(out, errw, err)
+		}
+		return printJSON(out, st)
+	case "cancel":
+		st, err := c.PrepareCancel(ctx)
+		if err != nil {
+			return printError(out, errw, err)
+		}
+		return printJSON(out, st)
+	case "skip":
+		st, err := c.PrepareSkip(ctx)
+		if err != nil {
+			return printError(out, errw, err)
+		}
+		return printJSON(out, st)
+	}
+	return printError(out, errw, Errorf(CodeInvalid, "unknown prepare subcommand %q", sub))
 }

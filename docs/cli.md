@@ -93,15 +93,57 @@ Changes the size of a box. It is an **offline** change: the VM stops, is edited
 and starts again. Memory must be at least 256 MiB, and the disk can only grow.
 More than a quarter of the node needs `--large`, as with `box create`.
 
+## Preparing a box
+
+Before agents work in a box, the box gets its sources and the project's recipe
+runs in them. boxd does it inside the guest, not a shell of the caller's, so it
+goes on when the caller goes away and always says how it ended.
+
+### `box prepare <id> [--repo URL [--ref R] | --from PATH] [--dest DIR] [--timeout D]`
+
+- `--repo URL` clones the repository in the box (`--ref` checks out a branch,
+  tag or commit). `--from PATH` sends a directory or a file from this machine
+  instead, as a tar stream: no git is needed on either side.
+- The sources go to `--dest`, by default `/work/<name>` (the repository's or the
+  directory's name). A destination that exists is never written over.
+- Then `.box/prepare.sh` in the sources runs, if there is one, as root with
+  `BOX_WORKSPACE` set to the sources: what to install is the project's to say.
+  The sources then belong to the box's user, so `box run` and `box cp` work in
+  them.
+- The command waits until it is done and prints what the step is doing while it
+  runs. `--timeout` (default 1h) is the preparation's time limit in the box and
+  how long the command waits; `--no-wait` returns at once.
+- `box create` takes the same flags (`--repo`, `--ref`, `--from`, `--dest`,
+  `--prepare-timeout`) and returns when the box is ready.
+
+The states and the way out of each:
+
+| state | sessions | out |
+| --- | --- | --- |
+| `none` | start | `box prepare --repo/--from` |
+| `preparing` | refused, with the step and its last line | ends by itself at the time limit; `box prepare <id>` waits, `--cancel` stops it now |
+| `failed` | refused, with the reason | `box prepare <id>` runs the recipe again on the sources there are (or new ones with `--repo/--from`); `--skip` lets sessions start without it |
+| `ready`, `skipped` | start | `box prepare <id> --again` runs the recipe again; new sources go to a new `--dest` |
+
+A box whose boxd restarts in the middle of a preparation has it `failed`: no
+process is left to finish it. A failure prints its reason and the last lines
+the step wrote; `box status` and the task log show them too. A session started
+with no `--cwd` starts in the prepared sources.
+
 ## Inside a box
 
 ### `box ssh <id>`
 
 An interactive shell in the box, over `alloc exec`. It needs a terminal.
 
-### `box run <id> -- cmd [args...]`
+### `box run <id> [--timeout D] -- cmd [args...]`
 
-Runs one command in the box and returns its exit code and output.
+Runs one command in the box and returns its exit code and output. The command
+runs in a session of its own in the guest: a `box run` that is interrupted
+(Ctrl-C, SIGTERM, an outer `timeout`) or runs out of `--timeout` stops that
+whole session before it returns, so nothing keeps running in the box with no
+one to read how it ended. Nomad itself does not tell the box that the caller
+went away while the command prints nothing. `--timeout` ends with exit 4.
 
 ### `box cp <src> <dst>`
 
