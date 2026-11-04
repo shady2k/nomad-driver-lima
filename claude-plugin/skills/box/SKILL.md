@@ -34,6 +34,7 @@ box run dev1 -- python3 /root/repo/check.py   # one command in the guest, to che
 box cp ./results dev1:/root/in            # files in
 box cp dev1:/root/repo/out ./out          # files out
 box status dev1                           # state, task events, guest, sessions, disk used
+box top dev1 -f                           # CPU, iowait, load, memory, disk, the biggest processes
 box stop dev1                             # keep the disk, free the RAM
 box start dev1                            # same disk, same files
 box rm dev1 --yes                         # the disk is deleted
@@ -160,6 +161,15 @@ starts, so no key lands on a disk.
   `box logs <id> -f` shows the guest log, `box status <id>` shows the task
   events.
 - `session <id> is still working on a turn` - exactly that; `box wait`.
+- **A box is slow, hangs or restarted by itself.** `box top <id>` says whether it
+  is busy, waiting on its disk (iowait) or out of memory, and which processes
+  hold it. `box logs <id>` has the guest kernel's lines (out of memory, I/O
+  errors), low memory and disk, and what each executor printed; `box status
+  <id>` has the driver's task events, which say when the kernel OOM-killed
+  something in the box's cgroup. A box out of room gets more with `box resize`.
+- **Inside the box everything is yours to fix.** Install what is missing, fix
+  apt, rebuild a cache: `box run <id> -- sudo ...`. Report to the operator only
+  what you cannot reach from inside: the VM, its credentials, the node.
 
 ## For the coordinator agent
 

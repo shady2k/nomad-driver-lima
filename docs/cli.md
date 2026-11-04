@@ -152,6 +152,14 @@ Copies files or directories in or out, exactly one side inside a box:
 tar over `alloc exec`, refuses a `..` entry, and never writes outside the
 destination.
 
+### `box top <id> [-f]`
+
+What the guest is doing, as boxd measures it every five seconds: CPU and the
+part of it waiting on the disk (iowait), the load average, memory used and
+available, the disk's use, and the three processes with the most resident
+memory. `-f` prints it again every five seconds; `box status` shows the same
+line as `usage`.
+
 ### `box logs <id> [-f]`
 
 The task log of the box, which is the boxd event stream from the guest.

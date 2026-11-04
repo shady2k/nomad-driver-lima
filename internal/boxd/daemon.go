@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -21,11 +22,12 @@ import (
 
 // Daemon is the boxd HTTP server on the unix socket.
 type Daemon struct {
-	cfg  DaemonConfig
-	mgr  *Manager
-	ln   net.Listener
-	srv  *http.Server
-	once sync.Once
+	cfg   DaemonConfig
+	mgr   *Manager
+	ln    net.Listener
+	srv   *http.Server
+	once  sync.Once
+	usage usageSampler
 }
 
 // NewDaemon loads the persisted sessions and builds the HTTP handler.
@@ -71,6 +73,17 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	}
 	d.ln = ln
 	d.cfg.logf("listening on %s (state %s)", d.cfg.Socket, d.cfg.StateDir)
+	d.cfg.logf("%s", d.startLine(ctx))
+	var usageLog func(string, ...any)
+	if d.cfg.Diagnostics {
+		usageLog = d.cfg.logf
+	}
+	go d.usage.run(ctx, usageLog)
+	if d.cfg.Diagnostics {
+		go watchKernel(ctx, d.cfg.logf)
+		go watchResources(ctx, d.cfg.logf, []string{"/"})
+		go tailDir(ctx, d.cfg.logf, "prime log", filepath.Join(d.cfg.executorsDir(), "prime", "logs"))
+	}
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- d.srv.Serve(ln) }()
@@ -324,6 +337,9 @@ func (d *Daemon) Info(ctx context.Context) Info {
 	info.MemTotalMiB, info.MemFreeMiB = total, free
 	st := d.mgr.Prepare().State()
 	info.Prepare = &st
+	if u := d.usage.Last(); !u.At.IsZero() {
+		info.Usage = &u
+	}
 	for _, name := range []string{"prime", "opencode", "claude"} {
 		ex, err := buildExecutor(name, d.cfg)
 		if err != nil {
@@ -391,4 +407,29 @@ func fail(w http.ResponseWriter, err error) {
 		status = http.StatusGatewayTimeout
 	}
 	writeJSON(w, status, ErrorResponse{Error: ErrorBody{Code: code, Message: msg}})
+}
+
+// startLine says what this boxd runs with: its version, the executors and
+// whether they have credentials, and whether the task files are mounted.
+func (d *Daemon) startLine(ctx context.Context) string {
+	var parts []string
+	for _, name := range []string{"prime", "opencode", "claude"} {
+		ex, err := buildExecutor(name, d.cfg)
+		if err != nil {
+			continue
+		}
+		state := "no credentials"
+		if c, ok := ex.(interface{ Configured() bool }); ok && c.Configured() {
+			state = "credentials"
+		}
+		parts = append(parts, name+" ("+state+")")
+	}
+	mounted := "not mounted"
+	if out, err := exec.CommandContext(ctx, "findmnt", "-no", "FSTYPE,OPTIONS", "--target", d.cfg.SecretsDir).Output(); err == nil {
+		if f := strings.Fields(string(out)); len(f) > 0 && f[0] != "tmpfs" && f[0] != "ext4" {
+			mounted = "mounted (" + f[0] + ")"
+		}
+	}
+	return fmt.Sprintf("boxd %s: executors %s; task files at %s %s",
+		version.Version, strings.Join(parts, ", "), d.cfg.SecretsDir, mounted)
 }

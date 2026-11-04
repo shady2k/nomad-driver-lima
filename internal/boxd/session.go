@@ -38,11 +38,15 @@ type DaemonConfig struct {
 	// ProgressEvery is how long a running turn may be silent in the journal
 	// before it writes a progress line (default two minutes).
 	ProgressEvery time.Duration
-	Logf          func(string, ...any)
-	Now           func() time.Time
-	CancelGrace   time.Duration // how long a cancel waits for the executor to agree
-	StartTimeout  time.Duration // initialize + session/new budget
-	TurnLimit     time.Duration // hard ceiling on one turn (0 = none)
+	// Diagnostics follows the guest kernel, memory and disk and the
+	// executors' own log files into the journal (diag.go); boxd in a box sets
+	// it, tests leave it off.
+	Diagnostics  bool
+	Logf         func(string, ...any)
+	Now          func() time.Time
+	CancelGrace  time.Duration // how long a cancel waits for the executor to agree
+	StartTimeout time.Duration // initialize + session/new budget
+	TurnLimit    time.Duration // hard ceiling on one turn (0 = none)
 }
 
 func (c DaemonConfig) logf(format string, args ...any) {
@@ -252,6 +256,11 @@ type session struct {
 	// reloadPending is set when new executor credentials arrived while a turn was
 	// running; the executor is restarted when the turn ends (see finishTurn).
 	reloadPending bool
+
+	// toolsMu guards toolTitles: tool calls announced without their input yet,
+	// by id, which are written out when the input or the result arrives.
+	toolsMu    sync.Mutex
+	toolTitles map[string]string
 }
 
 type turnState struct {
@@ -341,7 +350,7 @@ func (l *eventLog) emit(kind string, turn int, summary string, data map[string]a
 		Session: l.session,
 		Turn:    turn,
 		Kind:    kind,
-		Summary: oneLine(summary, 300),
+		Summary: oneLine(summary, 600),
 		Data:    data,
 	}
 	l.last = ev
@@ -778,13 +787,26 @@ func (s *session) finishTurn(ts *turnState, state, stopReason, text, errMsg stri
 		s.mu.Unlock()
 
 		summary := fmt.Sprintf("turn %d %s", cur.Turn, state)
+		took := ""
+		if !cur.StartedAt.IsZero() && cur.EndedAt != nil {
+			took = " after " + cur.EndedAt.Sub(cur.StartedAt).Round(time.Second).String()
+		}
 		switch {
 		case state == TurnDone && strings.TrimSpace(text) != "":
 			summary = oneLine(text, 160)
+		case state == TurnDone:
+			reason := stopReason
+			if reason == "" {
+				reason = "no stop reason"
+			}
+			summary = fmt.Sprintf("turn %d done%s (%s) without a final message", cur.Turn, took, reason)
 		case state == TurnError && errMsg != "":
 			summary = fmt.Sprintf("turn %d error: %s", cur.Turn, oneLine(errMsg, 160))
 		case state == TurnCancelled:
 			summary = fmt.Sprintf("turn %d cancelled", cur.Turn)
+		}
+		if took != "" && !strings.HasPrefix(summary, "turn ") {
+			summary = strings.TrimPrefix(took, " ") + ": " + summary
 		}
 		s.log.emit(KindTurnEnd, cur.Turn, summary, map[string]any{
 			"state":       state,
@@ -1092,7 +1114,11 @@ func (s *session) ensureExecutor() (*proc, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	cmd.Stderr = logFile
+	// The executor's stderr is its log file, and its lines are in the
+	// journal too: what it does outside a turn (installing its Python,
+	// downloading packages, failing to start) is no event of the session.
+	cmd.Stderr = io.MultiWriter(logFile,
+		newStderrLines(s.m.cfg.logf, "session "+meta.ID+" "+meta.Executor, s.m.store.ExecutorLog(meta.ID)))
 	client, err := acp.NewClient(cmd)
 	if err != nil {
 		logFile.Close()
@@ -1188,7 +1214,13 @@ func (s *session) watchExit(p *proc) {
 	if cur := s.curTurn(); cur != nil {
 		turn = cur.Turn.Turn
 	}
-	s.log.emit(KindExecutorExit, turn, fmt.Sprintf("%s executor exited with code %d", p.name, code), map[string]any{
+	exitLine := fmt.Sprintf("%s executor exited with code %d", p.name, code)
+	if code != 0 {
+		if tail := lastLines(s.m.store.ExecutorLog(s.meta.ID), 5); len(tail) > 0 {
+			exitLine += "; its last lines: " + strings.Join(tail, " | ")
+		}
+	}
+	s.log.emit(KindExecutorExit, turn, exitLine, map[string]any{
 		"pid":       p.pid,
 		"exit_code": code,
 	})
@@ -1211,7 +1243,137 @@ type updateParams struct {
 		Kind          string          `json:"kind"`
 		Status        string          `json:"status"`
 		Content       json.RawMessage `json:"content"`
+		RawInput      json.RawMessage `json:"rawInput"`
+		RawOutput     json.RawMessage `json:"rawOutput"`
 	} `json:"update"`
+}
+
+// allContentText is the text of every block of ACP content, in order.
+func allContentText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var many []json.RawMessage
+	if json.Unmarshal(raw, &many) != nil {
+		return contentText(raw)
+	}
+	var parts []string
+	for _, b := range many {
+		if t := contentText(b); strings.TrimSpace(t) != "" {
+			parts = append(parts, t)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// resultLine is the journal summary of a tool's result: the exit code and the
+// time when the tool reports them, then its output -- the beginning and, of a
+// long one, the end, where errors and test totals are.
+func resultLine(content, rawOutput json.RawMessage) string {
+	text := allContentText(content)
+	var prefix []string
+	var out map[string]any
+	if json.Unmarshal(rawOutput, &out) == nil {
+		for _, k := range []string{"exit_code", "exitCode", "returncode", "code"} {
+			if v, ok := out[k].(float64); ok {
+				prefix = append(prefix, fmt.Sprintf("exit %d", int(v)))
+				break
+			}
+		}
+		for _, k := range []string{"elapsed", "duration", "elapsed_s", "seconds"} {
+			if v, ok := out[k].(float64); ok {
+				prefix = append(prefix, fmt.Sprintf("%.1fs", v))
+				break
+			}
+		}
+		if text == "" {
+			var parts []string
+			for _, k := range []string{"output", "stdout", "stderr", "result"} {
+				if v, ok := out[k].(string); ok && strings.TrimSpace(v) != "" {
+					parts = append(parts, v)
+				}
+			}
+			text = strings.Join(parts, "\n")
+		}
+	} else if text == "" && len(rawOutput) > 0 {
+		_ = json.Unmarshal(rawOutput, &text)
+	}
+	line := oneLine(text, 0)
+	const head, tail = 120, 280
+	if len(line) > head+tail+5 {
+		h, t := head, len(line)-tail
+		for h > 0 && !utf8Start(line[h]) {
+			h--
+		}
+		for t < len(line) && !utf8Start(line[t]) {
+			t++
+		}
+		line = line[:h] + " … " + line[t:]
+	}
+	if len(prefix) > 0 {
+		if line == "" {
+			return strings.Join(prefix, ", ")
+		}
+		return strings.Join(prefix, ", ") + ": " + line
+	}
+	return line
+}
+
+// toolInput is what a tool call does, in one line: the code of a Python cell,
+// the command of a shell, the path or the query of the others. Comment-only
+// and empty lines are left out, so the line starts with what runs.
+func toolInput(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var text string
+	var obj map[string]any
+	if json.Unmarshal(raw, &obj) == nil {
+		for _, key := range []string{"code", "command", "cmd", "script", "file_path", "path", "pattern", "url", "query", "prompt"} {
+			if v, ok := obj[key].(string); ok && strings.TrimSpace(v) != "" {
+				text = v
+				break
+			}
+			if v, ok := obj[key].([]any); ok && len(v) > 0 {
+				parts := make([]string, 0, len(v))
+				for _, p := range v {
+					parts = append(parts, fmt.Sprint(p))
+				}
+				text = strings.Join(parts, " ")
+				break
+			}
+		}
+		if text == "" {
+			for _, k := range sortedKeys(obj) {
+				if v, ok := obj[k].(string); ok && strings.TrimSpace(v) != "" {
+					text = v
+					break
+				}
+			}
+		}
+	} else {
+		_ = json.Unmarshal(raw, &text)
+	}
+	var lines []string
+	for _, l := range strings.Split(text, "\n") {
+		t := strings.TrimSpace(l)
+		if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "//") {
+			continue
+		}
+		lines = append(lines, t)
+	}
+	return oneLine(strings.Join(lines, " ⏎ "), 240)
+}
+
+// toolLine is the journal summary of a tool call.
+func toolLine(title, input string) string {
+	if title == "" {
+		title = "tool call"
+	}
+	if input == "" {
+		return title
+	}
+	return title + ": " + input
 }
 
 // contentText pulls plain text out of ACP content, which is either one content
@@ -1284,18 +1446,35 @@ func (s *session) handleUpdate(params json.RawMessage) {
 		}
 	case "tool_call":
 		s.flushText(ts)
-		title := u.Title
-		if title == "" {
-			title = "tool call"
+		input := toolInput(u.RawInput)
+		s.log.emit(KindTool, turn, toolLine(u.Title, input), data)
+		if input == "" && u.ToolCallID != "" {
+			// The input may come with an update: it gets its own line then.
+			s.toolsMu.Lock()
+			if s.toolTitles == nil {
+				s.toolTitles = map[string]string{}
+			}
+			s.toolTitles[u.ToolCallID] = u.Title
+			s.toolsMu.Unlock()
 		}
-		s.log.emit(KindTool, turn, title, data)
 	case "tool_call_update":
-		if u.Status == "completed" || u.Status == "failed" {
+		s.toolsMu.Lock()
+		title, waiting := s.toolTitles[u.ToolCallID]
+		input := toolInput(u.RawInput)
+		done := u.Status == "completed" || u.Status == "failed"
+		if waiting && (input != "" || done) {
+			delete(s.toolTitles, u.ToolCallID)
+		}
+		s.toolsMu.Unlock()
+		if waiting && input != "" {
+			s.log.emit(KindTool, turn, toolLine(firstNonEmpty(title, u.Title), input), data)
+		}
+		if done {
 			summary := "tool finished"
 			if u.Status == "failed" {
 				summary = "tool failed"
 			}
-			if t := contentText(u.Content); t != "" {
+			if t := resultLine(u.Content, u.RawOutput); t != "" {
 				summary = t
 			}
 			s.log.emit(KindToolResult, turn, summary, data)

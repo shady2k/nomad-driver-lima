@@ -236,6 +236,9 @@ func (a *App) printStatus(out *statusOutput) {
 			a.note("  unconfigured %s (no credentials in /run/box/secrets: box executors set --from-dir DIR --provider NAME)",
 				strings.Join(unconfigured, ", "))
 		}
+		if u := out.Guest.Usage; u != nil {
+			a.note("  usage   %s", u.Line())
+		}
 		if p := out.Guest.Prepare; p != nil && p.State != "none" {
 			switch p.State {
 			case "preparing":

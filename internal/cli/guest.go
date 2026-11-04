@@ -116,6 +116,35 @@ type BoxInfo struct {
 	CPUs        int            `json:"cpus"`
 	// Prepare is the box's preparation; nil from a boxd that has none.
 	Prepare *PrepareState `json:"prepare,omitempty"`
+	// Usage is the guest's load as boxd last measured it.
+	Usage *GuestUsage `json:"usage,omitempty"`
+}
+
+// GuestUsage is what the guest is doing: CPU, disk wait, memory and disk.
+type GuestUsage struct {
+	At            string  `json:"at"`
+	CPUPercent    float64 `json:"cpu_percent"`
+	IOWaitPercent float64 `json:"iowait_percent"`
+	Load1         float64 `json:"load1"`
+	Load5         float64 `json:"load5"`
+	MemTotalMiB   uint64  `json:"mem_total_mib"`
+	MemAvailMiB   uint64  `json:"mem_available_mib"`
+	DiskPath      string  `json:"disk_path"`
+	DiskTotalMiB  uint64  `json:"disk_total_mib"`
+	DiskFreeMiB   uint64  `json:"disk_free_mib"`
+	Top           string  `json:"top,omitempty"`
+}
+
+// Line is the usage in one line, the way box status and box top print it.
+func (u *GuestUsage) Line() string {
+	used := u.MemTotalMiB - u.MemAvailMiB
+	s := fmt.Sprintf("CPU %.0f%% (iowait %.0f%%), load %.1f %.1f, memory %d of %d MiB used (%d available), disk %s %.1f of %.1f GiB used",
+		u.CPUPercent, u.IOWaitPercent, u.Load1, u.Load5, used, u.MemTotalMiB, u.MemAvailMiB,
+		dash(u.DiskPath), float64(u.DiskTotalMiB-u.DiskFreeMiB)/1024, float64(u.DiskTotalMiB)/1024)
+	if u.Top != "" {
+		s += "; the most resident: " + u.Top
+	}
+	return s
 }
 
 // Session is one agent session in a box.

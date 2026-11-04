@@ -30,6 +30,10 @@ type taskHandle struct {
 	tc  *drivers.TaskConfig
 	cfg TaskConfig
 
+	// oomKills is the box cgroup's oom_kill count as the watcher last read
+	// it, -1 before the first read; only the watcher goroutine uses it.
+	oomKills int64
+
 	boxID       string
 	volumeDir   string
 	diskPath    string
@@ -64,12 +68,13 @@ type taskHandle struct {
 
 func newTaskHandle(tc *drivers.TaskConfig, cfg TaskConfig) *taskHandle {
 	return &taskHandle{
-		tc:    tc,
-		cfg:   cfg,
-		boxID: cfg.BoxID,
-		state: drivers.TaskStateUnknown,
-		done:  make(chan struct{}),
-		stats: newTaskStats(),
+		tc:       tc,
+		cfg:      cfg,
+		boxID:    cfg.BoxID,
+		state:    drivers.TaskStateUnknown,
+		done:     make(chan struct{}),
+		oomKills: -1,
+		stats:    newTaskStats(),
 	}
 }
 

@@ -77,8 +77,9 @@ func runDaemon(args []string) int {
 		// Events go to stdout as one readable line each: under systemd that is
 		// the journal, which is what the driver streams into the Nomad task
 		// log. The structured events stay in each session's events.jsonl.
-		Journal: boxd.NewStampedWriter(os.Stdout),
-		Logf:    log.Printf,
+		Journal:     boxd.NewStampedWriter(os.Stdout),
+		Logf:        log.Printf,
+		Diagnostics: true,
 	}
 	d, err := boxd.NewDaemon(cfg)
 	if err != nil {

@@ -69,6 +69,18 @@ that only read state (`info`, `session ls|get`, `wait`, `events`, `prepare
 get|wait`) are not listed: the CLI repeats them while it waits, and what they
 report is in boxd's own lines.
 
+Besides sessions, the journal says what helps to diagnose a box: what boxd
+starts with (its version, the executors and whether they have credentials,
+whether the task files are mounted), every line an executor writes to stderr
+(at most 40 a minute, all of them in its `executor.log`), the log files of
+prime's background workers, how an executor exited and its last lines, the
+guest kernel's lines about memory and the disk (out of memory, I/O errors,
+ext4 errors, hung tasks), and when memory or a disk is low or the guest has
+waited on its disk for a minute. A tool call names what it runs (the code of a
+Python cell, the command of a shell) and its result says its exit code, its
+time and the beginning and the end of its output. The driver adds to the task
+events when the kernel OOM-killed something in the box's cgroup.
+
 ## Commands
 
 Every command prints one JSON document.

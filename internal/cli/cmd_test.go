@@ -797,3 +797,18 @@ func TestWaitSaysATurnEndedWithoutAMessage(t *testing.T) {
 	require.Contains(t, ta.errOut.String(), "without a final message")
 	require.Contains(t, ta.errOut.String(), "box events dev1 s-1")
 }
+
+// TestTopPrintsWhatTheGuestIsDoing: box top is one line of the guest's load.
+func TestTopPrintsWhatTheGuestIsDoing(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.addBox(t, "dev1")
+	ta.guest.responses["info"] = `{"boxd_version":"0.1.15","usage":{"at":"2026-11-04T16:44:00Z","cpu_percent":91.5,"iowait_percent":42,` +
+		`"load1":3.2,"load5":2.1,"mem_total_mib":1960,"mem_available_mib":120,"disk_path":"/","disk_total_mib":15360,` +
+		`"disk_free_mib":11264,"top":"go 900 MiB, node 300 MiB"}}`
+	require.Equal(t, ExitOK, ta.run(t, "top", "dev1"), ta.errOut.String())
+	out := ta.errOut.String()
+	for _, want := range []string{"16:44:00", "CPU 92% (iowait 42%)", "load 3.2 2.1", "memory 1840 of 1960 MiB used (120 available)",
+		"disk / 4.0 of 15.0 GiB used", "go 900 MiB"} {
+		require.Contains(t, out, want)
+	}
+}

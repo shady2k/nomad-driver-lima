@@ -615,12 +615,17 @@ func (d *Driver) startWatcher(h *taskHandle, b *box.Box) {
 			// are gone, to tell a clean stop from a crash.
 			if live := b.Liveness(); live.Known {
 				if live.DriverAlive && live.HostAgentAlive {
+					d.watchMemory(h, live.DriverPID)
 					continue
 				}
 				d.stopGuestLogs(h)
 				reason := "its VM process is gone"
 				if live.DriverAlive && !live.HostAgentAlive {
 					reason = "its lima hostagent is gone"
+				}
+				if h.oomKills > 0 {
+					reason += fmt.Sprintf("; the kernel had OOM-killed %d process(es) in the box's cgroup, whose memory.max is %d MiB "+
+						"(guest RAM plus the driver's memory_overhead_mib)", h.oomKills, h.cfg.MemoryMiB+d.config.MemoryOverheadMiB)
 				}
 				d.emit(h.tc, "exit", fmt.Sprintf("Box %s stopped: %s", h.boxID, reason))
 				h.finish(&drivers.ExitResult{ExitCode: 1, Err: fmt.Errorf("box %s stopped: %s", h.boxID, reason)})
@@ -897,3 +902,20 @@ var (
 	_ drivers.DriverShutdowner        = (*Driver)(nil)
 	_ drivers.ExecTaskStreamingDriver = (*Driver)(nil)
 )
+
+// watchMemory reads the box cgroup's memory.events and says when the kernel
+// OOM-killed something in it: that is a box out of its memory.max, which shows
+// in the guest only as a crash or an I/O error.
+func (d *Driver) watchMemory(h *taskHandle, qemuPID int) {
+	ev := box.MemoryEvents(qemuPID)
+	if ev == nil {
+		return
+	}
+	kills := int64(ev["oom_kill"])
+	if h.oomKills >= 0 && kills > h.oomKills && h.tc != nil && h.tc.AllocID != "" {
+		d.emit(h.tc, "memory", fmt.Sprintf("Box %s: the kernel OOM-killed %d process(es) in the box's cgroup (memory.max %d MiB = "+
+			"guest RAM + memory_overhead_mib %d); the qemu of the box needs more room than the overhead gives it",
+			h.boxID, kills-h.oomKills, h.cfg.MemoryMiB+d.config.MemoryOverheadMiB, d.config.MemoryOverheadMiB))
+	}
+	h.oomKills = kills
+}

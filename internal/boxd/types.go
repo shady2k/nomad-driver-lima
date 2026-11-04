@@ -97,6 +97,8 @@ type Info struct {
 	CPUs        int            `json:"cpus"`
 	// Prepare is where the box's preparation is.
 	Prepare *PrepareState `json:"prepare,omitempty"`
+	// Usage is the guest's load, measured every few seconds.
+	Usage *Usage `json:"usage,omitempty"`
 }
 
 // ErrorBody is the failure document boxctl prints to stdout and exits 1 with.
