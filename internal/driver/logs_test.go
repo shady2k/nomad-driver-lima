@@ -56,3 +56,43 @@ func TestExecLabelOfABoxRun(t *testing.T) {
 		t.Fatalf("label = %q", got)
 	}
 }
+
+// TestJournalArgv: the configured journalctl runs in JSON, after the cursor of
+// the last line shown, else from the boot or from now.
+func TestJournalArgv(t *testing.T) {
+	base := []string{"sudo", "-n", "journalctl", "-f", "-o", "cat", "-u", "boxd"}
+	if !journalStream(base) || journalStream([]string{"tail", "-f", "/var/log/x"}) {
+		t.Fatal("journalStream")
+	}
+	want := map[string][]string{
+		"cursor": {"sudo", "-n", "journalctl", "-f", "-u", "boxd", "-o", "json", "--after-cursor=s=abc"},
+		"boot":   {"sudo", "-n", "journalctl", "-f", "-u", "boxd", "-o", "json", "-b", "-n", "all"},
+		"now":    {"sudo", "-n", "journalctl", "-f", "-u", "boxd", "-o", "json", "-n", "0"},
+	}
+	got := map[string][]string{
+		"cursor": journalArgv(base, "s=abc", true),
+		"boot":   journalArgv(base, "", true),
+		"now":    journalArgv(base, "", false),
+	}
+	for k := range want {
+		if strings.Join(got[k], " ") != strings.Join(want[k], " ") {
+			t.Errorf("%s: %q, want %q", k, got[k], want[k])
+		}
+	}
+}
+
+// TestJournalWriter: the messages go out as lines, a line split across writes
+// is whole, and the cursor is the last one's.
+func TestJournalWriter(t *testing.T) {
+	var out bytes.Buffer
+	j := &journalWriter{out: &out}
+	_, _ = io.WriteString(j, `{"__CURSOR":"c1","MESSAGE":"started boxd"}`+"\n"+`{"__CURSOR":"c2","MESS`)
+	_, _ = io.WriteString(j, `AGE":[104,105]}`+"\n"+`not json`+"\n")
+	j.flush()
+	if got := out.String(); got != "started boxd\nhi\n" {
+		t.Fatalf("out = %q", got)
+	}
+	if j.cursor != "c2" {
+		t.Fatalf("cursor = %q", j.cursor)
+	}
+}

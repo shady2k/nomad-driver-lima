@@ -479,6 +479,7 @@ func (p *preparer) command(ctx context.Context, dir string, env []string, name s
 	}()
 	err := cmd.Start()
 	if err == nil {
+		relaxOOM(cmd.Process.Pid)
 		err = cmd.Wait()
 	}
 	_ = pw.Close()

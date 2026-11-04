@@ -512,7 +512,7 @@ func (d *Driver) StartTask(tc *drivers.TaskConfig) (*drivers.TaskHandle, *driver
 	// changes this digest and the watcher puts them in place again.
 	h.setFilesDigest(taskFilesDigest(tc))
 
-	d.startGuestLogs(d.ctx, h)
+	d.startGuestLogs(d.ctx, h, true)
 	d.startWatcher(h, b)
 	d.tasks.Add(h)
 	rep("ready", fmt.Sprintf("Box %s is ready: VM %s with %d vCPU and %d MiB RAM; task files in %s, credentials on the tmpfs in %s",
@@ -721,7 +721,7 @@ func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
 		return fmt.Errorf("cannot re-attach to box %s: %s", st.BoxID, reason)
 	}
 	h.markRunning(time.Now())
-	d.startGuestLogs(d.ctx, h)
+	d.startGuestLogs(d.ctx, h, false)
 	d.startWatcher(h, b)
 	d.tasks.Add(h)
 	d.emit(handle.Config, "recover", fmt.Sprintf("Re-attached to the running box %s (pid %d); the VM was not restarted", st.BoxID, inst.DriverPID))

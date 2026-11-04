@@ -1128,6 +1128,7 @@ func (s *session) ensureExecutor() (*proc, bool, error) {
 		logFile.Close()
 		return nil, false, Errorf(CodeExecutor, "start %s: %v", meta.Executor, err)
 	}
+	relaxOOM(client.Pid())
 	s.m.cfg.logf("session %s: started %s pid %d", meta.ID, argv[0], client.Pid())
 
 	startCtx, cancel := context.WithTimeout(context.Background(), s.m.cfg.StartTimeout)

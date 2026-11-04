@@ -3,10 +3,12 @@ package driver
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +24,13 @@ const logRestartDelay = 5 * time.Second
 // startGuestLogs streams the output of guestLogCommand into the task's stdout
 // and stderr streams, which is what makes `nomad alloc logs` show guest logs.
 // The command is restarted while the VM runs; the stream ends when ctx ends.
-func (d *Driver) startGuestLogs(parent context.Context, h *taskHandle) {
+//
+// A journalctl command is run in JSON so the driver keeps the cursor of the
+// last line it wrote: a restarted stream goes on after it (--after-cursor)
+// instead of writing the last lines again. A box that has just booted is
+// streamed from the start of its boot; one the driver re-attached to after a
+// restart of its own, from now.
+func (d *Driver) startGuestLogs(parent context.Context, h *taskHandle, fromBoot bool) {
 	ctx, cancel := context.WithCancel(parent)
 	h.mu.Lock()
 	h.logCancel = cancel
@@ -57,14 +65,35 @@ func (d *Driver) startGuestLogs(parent context.Context, h *taskHandle) {
 				h.mu.Unlock()
 			}()
 		}
+		journal := journalStream(h.cfg.GuestLogCommand)
+		cursor := ""
 		for {
 			if ctx.Err() != nil {
 				return
 			}
-			cmd := d.boxm.Lima().ShellCmd(ctx, h.boxID, h.cfg.GuestLogCommand)
+			argv := h.cfg.GuestLogCommand
+			var jw *journalWriter
+			if journal {
+				argv = journalArgv(argv, cursor, fromBoot)
+				jw = &journalWriter{out: out}
+			}
+			cmd := d.boxm.Lima().ShellCmd(ctx, h.boxID, argv)
 			cmd.Stdout = out
+			if jw != nil {
+				cmd.Stdout = jw
+			}
 			cmd.Stderr = writerOrDiscard(stderr)
 			err := cmd.Run()
+			if jw != nil {
+				jw.flush()
+				if jw.cursor != "" {
+					cursor = jw.cursor
+				}
+				if cursor == "" {
+					// Nothing was shown yet: from now on, not the boot again.
+					fromBoot = false
+				}
+			}
 			if ctx.Err() != nil {
 				return
 			}
@@ -237,4 +266,96 @@ func (l *lineWriter) flush() {
 		_, _ = l.w.Write(append(l.partial, '\n'))
 		l.partial = nil
 	}
+}
+
+// journalStream reports whether the guest log command is journalctl, which
+// the driver then runs in JSON to keep a cursor.
+func journalStream(argv []string) bool {
+	for _, a := range argv {
+		if filepath.Base(a) == "journalctl" {
+			return true
+		}
+	}
+	return false
+}
+
+// journalArgv is the journalctl command in JSON, from after cursor when there
+// is one, else from the start of the boot or from now.
+func journalArgv(argv []string, cursor string, fromBoot bool) []string {
+	out := make([]string, 0, len(argv)+4)
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		switch {
+		case (a == "-o" || a == "--output") && i+1 < len(argv):
+			i++
+			continue
+		case strings.HasPrefix(a, "--output="), strings.HasPrefix(a, "-o") && len(a) > 2:
+			continue
+		}
+		out = append(out, a)
+	}
+	out = append(out, "-o", "json")
+	switch {
+	case cursor != "":
+		out = append(out, "--after-cursor="+cursor)
+	case fromBoot:
+		out = append(out, "-b", "-n", "all")
+	default:
+		out = append(out, "-n", "0")
+	}
+	return out
+}
+
+// journalWriter turns journalctl's JSON lines into the messages they carry,
+// and keeps the cursor of the last one.
+type journalWriter struct {
+	out     io.Writer
+	partial []byte
+	cursor  string
+}
+
+func (j *journalWriter) Write(p []byte) (int, error) {
+	j.partial = append(j.partial, p...)
+	for {
+		i := bytes.IndexByte(j.partial, '\n')
+		if i < 0 {
+			break
+		}
+		j.line(j.partial[:i])
+		j.partial = j.partial[i+1:]
+	}
+	return len(p), nil
+}
+
+func (j *journalWriter) flush() {
+	if len(j.partial) > 0 {
+		j.line(j.partial)
+		j.partial = nil
+	}
+}
+
+func (j *journalWriter) line(b []byte) {
+	var e struct {
+		Cursor  string          `json:"__CURSOR"`
+		Message json.RawMessage `json:"MESSAGE"`
+	}
+	if json.Unmarshal(b, &e) != nil {
+		return
+	}
+	msg := ""
+	if json.Unmarshal(e.Message, &msg) != nil {
+		// journald gives a message that is not UTF-8 as an array of bytes.
+		var raw []byte
+		var nums []int
+		if json.Unmarshal(e.Message, &nums) == nil {
+			for _, n := range nums {
+				raw = append(raw, byte(n))
+			}
+			msg = strings.ToValidUTF8(string(raw), "?")
+		}
+	}
+	if e.Cursor != "" {
+		j.cursor = e.Cursor
+	}
+	_, _ = io.WriteString(j.out, strings.TrimRight(msg, "\n")+"\n")
 }

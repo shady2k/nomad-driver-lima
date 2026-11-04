@@ -30,6 +30,12 @@ ExecStart=/usr/local/bin/boxd \
 StandardOutput=journal
 StandardError=journal
 Restart=always
+# An agent's build can run the guest out of memory. The kernel then kills one
+# process, and boxd and the other sessions go on: systemd's default would stop
+# the whole unit for it. boxd itself is the last the kernel picks; it sets its
+# executors back to the ordinary score (oom.go).
+OOMPolicy=continue
+OOMScoreAdjust=-800
 RestartSec=1
 # boxd stops its executors itself; mixed mode cleans up any stragglers.
 KillMode=mixed
