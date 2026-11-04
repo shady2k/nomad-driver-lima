@@ -33,6 +33,8 @@ type DaemonConfig struct {
 	OpenCode   string    // opencode binary (default: PATH)
 	ClaudeACP  string    // claude-code-acp binary (default: PATH)
 	Journal    io.Writer // event feed destination (stdout in the guest)
+	// AddonsDir is the image's addons directory (default /opt/box/addons).
+	AddonsDir string
 	// ProgressEvery is how long a running turn may be silent in the journal
 	// before it writes a progress line (default two minutes).
 	ProgressEvery time.Duration
@@ -71,6 +73,15 @@ func (c DaemonConfig) primeConfigDir() string {
 // and each executor's XDG_CONFIG_HOME, on the tmpfs. HOMEs are on the disk
 // (executorDirs).
 func (c DaemonConfig) executorsDir() string { return filepath.Join(c.RuntimeDir, "executors") }
+
+// addonsDir is where the image keeps the operator's addons (see
+// images/README.md); an addon there may declare a model catalog.
+func (c DaemonConfig) addonsDir() string {
+	if c.AddonsDir != "" {
+		return c.AddonsDir
+	}
+	return "/opt/box/addons"
+}
 
 // Defaults fills in every unset field.
 func (c DaemonConfig) withDefaults() DaemonConfig {
@@ -450,6 +461,12 @@ func (m *Manager) NewSession(executor, model, cwd, title string) (Session, error
 	}
 	if model == "" {
 		return Session{}, Errorf(CodeInvalid, "a model is required (--model <provider>/<model>)")
+	}
+	// The list is what the provider offers to this box's key (discoverModels),
+	// so a model outside it would only fail the first turn.
+	if models, ok := ExecutorModels(m.cfg, executor); ok && !containsString(models, model) {
+		return Session{}, Errorf(CodeInvalid, "model %s is not offered to this box's %s key; the models are: %s",
+			model, executor, strings.Join(models, ", "))
 	}
 	if cwd == "" {
 		cwd = filepath.Join(m.cfg.StateDir, "work")

@@ -503,8 +503,8 @@ func TestExecutorsShowListsTheModels(t *testing.T) {
 	})
 	rc := ta.run(t, "executors", "show")
 	require.Equal(t, ExitOK, rc, ta.errOut.String())
-	require.Contains(t, ta.errOut.String(), "prime/models.json provider gateway, models: gateway/model-a, gateway/model-b")
-	require.Contains(t, ta.errOut.String(), "opencode/opencode.json provider gateway, models: gateway/model-c")
+	require.Contains(t, ta.errOut.String(), "prime/models.json provider gateway, staged models: gateway/model-a, gateway/model-b")
+	require.Contains(t, ta.errOut.String(), "opencode/opencode.json provider gateway, staged models: gateway/model-c")
 
 	ta.JSON = true
 	ta.out.Reset()

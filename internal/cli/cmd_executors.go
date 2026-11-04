@@ -244,12 +244,15 @@ func (a *App) cmdExecutorsShow(ctx context.Context, args []string) error {
 			if len(key.Models) > 0 {
 				models = strings.Join(prefixed(key.Name, key.Models), ", ")
 			}
-			a.note("  %-9s provider %s, models: %s", key.File, key.Name, models)
+			a.note("  %-9s provider %s, staged models: %s", key.File, key.Name, models)
 		case "template":
 			a.note("  %-9s template: Nomad reads the secret at render time", key.File)
 		default:
 			a.note("  %-9s not JSON", key.File)
 		}
+	}
+	if hasProvider(out.Keys) {
+		a.note("  a box asks its provider for the models its key may use when a session starts; the staged list is what it falls back to")
 	}
 	for _, key := range out.Missing {
 		a.note("  missing  %s (boxd needs it to start that executor)", key)
@@ -355,4 +358,14 @@ func prefixed(provider string, models []string) []string {
 		out = append(out, provider+"/"+m)
 	}
 	return out
+}
+
+// hasProvider reports whether any stored file is a provider definition.
+func hasProvider(keys []ExecutorKey) bool {
+	for _, k := range keys {
+		if k.Kind == "provider" {
+			return true
+		}
+	}
+	return false
 }

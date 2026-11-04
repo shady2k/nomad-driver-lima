@@ -91,6 +91,7 @@ func testConfig(t *testing.T) DaemonConfig {
 		RuntimeDir:   filepath.Join(dir, "run"),
 		SecretsDir:   filepath.Join(dir, "secrets"),
 		LocalDir:     filepath.Join(dir, "local"),
+		AddonsDir:    filepath.Join(dir, "addons"),
 		PrimeAgent:   buildFake(t),
 		Journal:      io.Discard,
 		Logf:         func(format string, args ...any) { t.Logf(format, args...) },

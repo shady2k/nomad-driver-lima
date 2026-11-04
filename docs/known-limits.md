@@ -138,8 +138,11 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   in a 64 KiB Nomad variable, so only the chosen provider's credential and
   definition fit. A second volume, an object store or a package inside the image
   would close it.
-- **The provider's model list is staged, not discovered live.** A model added to
-  the provider later needs a new `box executors set` and a reload.
+- **A model's size comes from an addon or from the staged definition.** A box
+  asks its provider for the models of its key at every session, but an
+  OpenAI-compatible `/models` does not say how large a model's context is: an
+  addon catalog (`docs/guest-image.md`) or the staged definition has to, and a
+  model neither sizes runs with the executor's default.
 - **A box whose executors hold a template item needs Vault on the node.** The task
   carries a `vault` block and a template that reads it, so a client without a
   `vault` block fails the allocation instead of starting the box. A variable with

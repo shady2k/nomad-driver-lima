@@ -64,9 +64,6 @@ func (a *App) cmdSessionNew(ctx context.Context, args []string) error {
 	if strings.TrimSpace(*model) == "" {
 		return usagef("box session new %s: --model is required, as <provider>/<model> (for example --model myprovider/mymodel)", id)
 	}
-	if err := a.checkModel(ctx, *executor, *model); err != nil {
-		return err
-	}
 	client, _, err := a.boxctlFor(ctx, id)
 	if err != nil {
 		return err
@@ -372,42 +369,4 @@ func readAllStdin(a *App) (string, error) {
 		return "", wrapf(err, "cannot read the prompt from stdin")
 	}
 	return string(data), nil
-}
-
-// modelFiles is the provider definition each executor reads its models from.
-var modelFiles = map[string]string{
-	"prime":    "prime/models.json",
-	"opencode": "opencode/opencode.json",
-}
-
-// checkModel refuses a model the cluster's provider definition does not list,
-// before a session is started on it: the executor would accept the session
-// and fail its first turn. A variable this CLI cannot read, or an executor
-// without a definition, is not a refusal; the box is the judge then.
-func (a *App) checkModel(ctx context.Context, executor, model string) error {
-	file, ok := modelFiles[executor]
-	if !ok {
-		return nil
-	}
-	variable, err := a.executorsVariable(ctx)
-	if err != nil || variable == nil {
-		return nil
-	}
-	var known []string
-	for _, key := range storedKeys(variable.Items) {
-		if key.File != file || key.Kind != "provider" {
-			continue
-		}
-		known = append(known, prefixed(key.Name, key.Models)...)
-	}
-	if len(known) == 0 {
-		return nil
-	}
-	for _, m := range known {
-		if m == model {
-			return nil
-		}
-	}
-	return usagef("model %s is not in the cluster's %s, so %s cannot use it; the models are: %s "+
-		"(an operator adds one with `box executors set`)", model, file, executor, strings.Join(known, ", "))
 }

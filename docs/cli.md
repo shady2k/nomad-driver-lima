@@ -191,9 +191,12 @@ File names, sizes and executors, never a value. A template item is shown with
 `(template)` next to its name, and as `template: Nomad reads the secret at render
 time`, so what the variable holds is visible as a path. A required file counts as
 present in either form: `prime/auth.json.tmpl` is the `auth.json` of `prime`.
-A provider definition is shown with its models as `--model` takes them
-(`prime/models.json provider myprovider, models: myprovider/model-a`); `--json`
-has them as `models` of that key.
+A provider definition is shown with the models staged in it, as `--model` takes
+them (`prime/models.json provider myprovider, staged models: myprovider/model-a`);
+`--json` has them as `models` of that key. The list a box offers is the one its
+provider gives its key when a session starts (see `docs/guest-image.md`, "Model
+catalog"); the staged list is the fallback, and its sizes are used for a model
+the provider names without one.
 
 ### `box executors delete [--yes]`
 

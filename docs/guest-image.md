@@ -180,6 +180,36 @@ operator's choice.
   `/root/.cache/opencode`. Running `<executor> --version` as root creates some of
   them, which is why `guest/no-secrets.sh` checks an image for them.
 
+## Model catalog
+
+The models a session may name are the ones the provider offers to the box's
+key. When a session starts, boxd rewrites the model list in its own copy of
+each executor's configuration on the tmpfs (`/run/boxd/executors/prime/models.json`,
+opencode's `opencode.json`), from the first of these that answers:
+
+1. **An addon's catalog.** An addon under `/opt/box/addons/<name>/` may declare
+   one in its `package.json`:
+
+   ```json
+   "box": {"catalog": {"providers": ["myprovider"], "command": ["node", "box-catalog.mjs"]}}
+   ```
+
+   boxd runs the command in the addon's directory, with
+   `{"provider", "baseUrl", "apiKey"}` as one JSON object on stdin (the key is
+   never in argv or the environment), and reads `{"models": [...]}` from stdout:
+   prime's model entries, each with an `id` and what the addon knows of it,
+   `contextWindow`, `maxTokens`, `reasoning`, `compat`. That answer is the list,
+   sizes included; opencode gets the sizes as `limit.context` and
+   `limit.output`. The command has 20 seconds.
+2. **The provider's own list**, `GET <baseUrl>/models` with the key. An
+   OpenAI-compatible provider names the models but not their size, so a model
+   keeps the size the staged definition gives it, and one the definition does
+   not size is named in the journal: the executor assumes its own default.
+3. **The staged list**, unchanged, when neither answers.
+
+The journal says which it was and which models there are. `boxctl session new`
+refuses a model outside the list and names the ones there are.
+
 ## Disk growth
 
 A box can be resized larger and the driver only stops, edits and starts the VM:

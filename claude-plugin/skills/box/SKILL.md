@@ -53,8 +53,9 @@ running). A non-zero exit is always a sentence you can act on.
 - **The defaults (2 vCPU, 2048 MiB, 8 GiB) fit an agent session.** Ask for more
   only for a real build or test run, and leave room for the other agents on
   the node.
-- **The model is one `box executors show` lists**, as `<provider>/<model>`: a
-  box can reach no other, and `box session new` refuses any other.
+- **The model is one the box's key may use**, as `<provider>/<model>`. The box
+  asks its provider when a session starts, and `box session new` refuses any
+  other model with the list there is; `box executors show` shows the staged list.
 - **`box <command> --help`** prints a command's arguments and every flag.
 
 ## Rules

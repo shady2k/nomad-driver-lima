@@ -429,7 +429,11 @@ func prepareExecutorDirs(cfg DaemonConfig) error {
 			return fmt.Errorf("copy %s: %w", src, err)
 		}
 	}
-	return prepareOpenCodeConfig(cfg)
+	if err := prepareOpenCodeConfig(cfg); err != nil {
+		return err
+	}
+	discoverModels(cfg)
+	return nil
 }
 
 // prepareOpenCodeConfig puts the box's opencode.json where opencode looks for
