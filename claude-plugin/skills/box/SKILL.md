@@ -54,7 +54,7 @@ running). A non-zero exit is always a sentence you can act on.
   only for a real build or test run, and leave room for the other agents on
   the node.
 - **The model is one `box executors show` lists**, as `<provider>/<model>`: a
-  box can reach no other.
+  box can reach no other, and `box session new` refuses any other.
 - **`box <command> --help`** prints a command's arguments and every flag.
 
 ## Rules
@@ -67,6 +67,8 @@ running). A non-zero exit is always a sentence you can act on.
   minutes; `box wait` returns the moment it ends, and `box events --since`
   resumes a stream you already read. Do not write `while ...; sleep 60; done`
   scripts around a box, and do not poll `box status` in a loop.
+- **`box wait` exits 1 when the turn ended in an error or was cancelled**, with
+  the turn's error; 0 means the turn is done.
 - **One turn at a time per session.** A `busy` answer means a turn is running:
   `box wait` for it, or `box cancel` to stop it; do not send a second prompt and
   do not restart the box.
@@ -75,6 +77,10 @@ running). A non-zero exit is always a sentence you can act on.
 - **A resize restarts the box and kills a running turn.** `box resize
   --cpus/--memory-mib` stops the VM, edits it and starts it again; wait for
   every session's turn to end first. The disk is kept and can only grow.
+- **A repository goes in by clone or by bundle.** What is pushed, the box clones
+  itself (`box run <id> -- git clone ...`), which is the fastest. Commits you
+  have not pushed go in as a bundle: `git bundle create repo.bundle --all`,
+  `box cp repo.bundle <id>:/root/`, then clone from it in the box.
 - **Results travel by git or `box cp`.** A box is disposable; its disk is not
   backed up. Push a branch, or copy the files out with `box cp`, before you
   stop or delete the box. `box cp` streams a tar over `alloc exec`, so it works
