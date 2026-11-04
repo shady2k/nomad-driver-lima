@@ -142,6 +142,17 @@ and versions named in "What was measured".
   boxd derives everything it needs below `/run/boxd`. Sessions and transcripts
   stay on the disk; no secret does. The image build and the guest checks fail if
   any executor credential location is non-empty.
+- **An executor's HOME is on the disk, its credentials and configuration are
+  not.** boxd gives each executor `HOME=/var/lib/boxd/homes/<executor>` and
+  `XDG_CONFIG_HOME=/run/boxd/executors/<executor>-config`; the credentials stay in
+  the runtime copy of the secrets and in the environment. An executor downloads a
+  Python, builds a virtual environment and runs it out of its HOME (prime's
+  Python tool does all three); the guest's `/run` is a tmpfs of a tenth of the RAM
+  mounted `noexec`, so with HOME there that tool never started. Rejected: a
+  larger tmpfs without `noexec`, which costs hundreds of MiB of a box's RAM and a
+  new download on every boot. The cost: what a harness writes into HOME by itself
+  reaches the disk, so a harness that stores a credential in HOME (a login
+  command, not the box's way of configuring it) would leave it there.
 - **Task files travel as a stream, never as a staged copy.** The driver reads
   the task's files and writes them as a tar stream into the stdin of one
   `limactl shell`; root in the guest unpacks it into a staging directory on the

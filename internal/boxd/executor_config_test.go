@@ -85,7 +85,8 @@ func TestInfoReportsConfiguredExecutors(t *testing.T) {
 }
 
 // TestOpenCodeSeesItsConfigFile checks where the box's opencode.json lands: the
-// HOME boxd gives the executor, which is where opencode reads it.
+// XDG_CONFIG_HOME boxd gives the executor, on the tmpfs, which is where opencode
+// reads it.
 func TestOpenCodeSeesItsConfigFile(t *testing.T) {
 	cfg := testConfig(t)
 	writeSecrets(t, cfg, "opencode", map[string]string{
@@ -95,7 +96,7 @@ func TestOpenCodeSeesItsConfigFile(t *testing.T) {
 	if _, err := NewManager(cfg); err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	config := filepath.Join(cfg.RuntimeDir, "executors", "opencode-home", ".config", "opencode", "opencode.json")
+	config := filepath.Join(cfg.RuntimeDir, "executors", "opencode-config", "opencode", "opencode.json")
 	b, err := os.ReadFile(config)
 	if err != nil {
 		t.Fatalf("opencode.json is not where opencode looks for it: %v", err)
@@ -115,12 +116,29 @@ func TestOpenCodeSeesItsConfigFile(t *testing.T) {
 	if !ex.Configured() {
 		t.Fatal("opencode reports itself unconfigured while its files are in place")
 	}
+	_, env, err := ex.Argv(ExecSpec{SessionID: "s-1", Model: "gateway/model", Cwd: cfg.StateDir, SessionDir: cfg.StateDir})
+	if err != nil {
+		t.Fatalf("Argv: %v", err)
+	}
+	if got := envValue(env, "XDG_CONFIG_HOME"); got != filepath.Join(cfg.RuntimeDir, "executors", "opencode-config") {
+		t.Fatalf("opencode's XDG_CONFIG_HOME must be its directory on the tmpfs, got %q", got)
+	}
+}
+
+// envValue returns the value of key in env ("" when it is not set).
+func envValue(env []string, key string) string {
+	for _, kv := range env {
+		if strings.HasPrefix(kv, key+"=") {
+			return strings.TrimPrefix(kv, key+"=")
+		}
+	}
+	return ""
 }
 
 // TestRuntimeConfigurationIsNotOnTheBoxDisk is C7 in one test: the credentials
-// arrive on a tmpfs, and everything boxd derives from them (the mutable copy, the
-// executors' HOME, opencode's config) stays in the runtime directory. The state
-// directory may hold sessions and transcripts and nothing else.
+// arrive on a tmpfs, and everything boxd derives from them (the mutable copy,
+// opencode's config) stays in the runtime directory. The state directory holds
+// sessions, transcripts and the executors' HOMEs, and no credential.
 func TestRuntimeConfigurationIsNotOnTheBoxDisk(t *testing.T) {
 	cfg := testConfig(t)
 	writeSecrets(t, cfg, "prime", map[string]string{
@@ -141,7 +159,7 @@ func TestRuntimeConfigurationIsNotOnTheBoxDisk(t *testing.T) {
 	for _, rel := range []string{
 		"executors/prime/auth.json",
 		"executors/prime/settings.json",
-		"executors/opencode-home/.config/opencode/opencode.json",
+		"executors/opencode-config/opencode/opencode.json",
 	} {
 		if _, err := os.Stat(filepath.Join(cfg.RuntimeDir, rel)); err != nil {
 			t.Fatalf("the runtime directory is missing %s: %v", rel, err)
@@ -166,8 +184,8 @@ func TestRuntimeConfigurationIsNotOnTheBoxDisk(t *testing.T) {
 
 // TestVersionProbeDoesNotWriteToTheDaemonsHome is why probeEnv exists: `opencode
 // --version` creates its data directory and a log in $HOME, and boxd runs as root
-// in the guest, whose home is on the box disk. Every probe therefore runs in the
-// executor's own home below the runtime directory (a tmpfs).
+// in the guest. Every probe therefore runs in the executor's own HOME, the one
+// its sessions get.
 func TestVersionProbeDoesNotWriteToTheDaemonsHome(t *testing.T) {
 	cfg := testConfig(t)
 	bin := filepath.Join(t.TempDir(), "opencode")
@@ -198,9 +216,9 @@ func TestVersionProbeDoesNotWriteToTheDaemonsHome(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(boxdHome, ".local", "share", "opencode")); !os.IsNotExist(err) {
 		t.Fatalf("a version probe wrote into the home of the user boxd runs as, which is on the box disk: %v", err)
 	}
-	probeLog := filepath.Join(cfg.RuntimeDir, "executors", "opencode-home", ".local", "share", "opencode", "log", "opencode.log")
+	probeLog := filepath.Join(cfg.StateDir, "homes", "opencode", ".local", "share", "opencode", "log", "opencode.log")
 	if _, err := os.Stat(probeLog); err != nil {
-		t.Fatalf("the probe did not run in the executor's home on the runtime directory: %v", err)
+		t.Fatalf("the probe did not run in the executor's own home: %v", err)
 	}
 }
 
@@ -272,16 +290,18 @@ func TestReloadDefersARunningTurn(t *testing.T) {
 	waitTurn(t, m, s.ID, 1)
 }
 
-// TestExecutorHomesExistWithoutCredentials keeps an executor from writing into the
-// box user's home (on the disk) when a box has no credentials: HOME always points
-// into the runtime directory.
+// TestExecutorHomesExistWithoutCredentials keeps an executor from writing into
+// root's home when a box has no credentials: HOME always points at the
+// executor's own directory. It is on the box disk, so what an executor downloads
+// there (a Python, a virtual environment) can run and survives a reboot; its
+// XDG_CONFIG_HOME stays on the tmpfs.
 func TestExecutorHomesExistWithoutCredentials(t *testing.T) {
 	cfg := testConfig(t)
 	if _, err := NewManager(cfg); err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	for _, name := range []string{"prime-home", "opencode-home", "claude-home"} {
-		dir := filepath.Join(cfg.RuntimeDir, "executors", name)
+	for _, name := range []string{"prime", "opencode", "claude"} {
+		dir := filepath.Join(cfg.StateDir, "homes", name)
 		st, err := os.Stat(dir)
 		if err != nil || !st.IsDir() {
 			t.Fatalf("the %s home must exist even without credentials: %v", name, err)
@@ -301,8 +321,11 @@ func TestExecutorHomesExistWithoutCredentials(t *testing.T) {
 			home = strings.TrimPrefix(kv, "HOME=")
 		}
 	}
-	if home != filepath.Join(cfg.RuntimeDir, "executors", "prime-home") {
-		t.Fatalf("prime's HOME must be on the tmpfs, got %q", home)
+	if home != filepath.Join(cfg.StateDir, "homes", "prime") {
+		t.Fatalf("prime's HOME must be its directory on the box disk, got %q", home)
+	}
+	if got := envValue(env, "XDG_CONFIG_HOME"); got != filepath.Join(cfg.RuntimeDir, "executors", "prime-config") {
+		t.Fatalf("prime's XDG_CONFIG_HOME must be on the tmpfs, got %q", got)
 	}
 }
 

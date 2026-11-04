@@ -52,23 +52,48 @@ func splitModel(s string) (provider, model string) {
 	return "", s
 }
 
-// probeEnv is the environment a version probe runs in: the executor's own home
-// below the runtime directory, exactly the HOME its sessions get.
+// probeEnv is the environment a version probe runs in: exactly the HOME and
+// XDG_CONFIG_HOME its sessions get.
 //
 // A probe is not a read-only question. `opencode --version` creates its data
 // directory and a log in $HOME, so a probe that inherits boxd's own HOME writes
-// onto the box disk (boxd runs as root there) the moment somebody asks
-// `boxctl info`. The home of an executor is on the tmpfs, and it exists whether
-// or not the box has credentials for that executor.
-func probeEnv(homeDir string) []string {
+// into root's home the moment somebody asks `boxctl info`.
+func probeEnv(dirs executorDirs) []string {
 	env := os.Environ()
-	if homeDir == "" {
+	if dirs.home == "" {
 		return env
 	}
-	if err := os.MkdirAll(homeDir, 0o700); err != nil {
+	if err := os.MkdirAll(dirs.home, 0o700); err != nil {
 		return env
 	}
-	return appendFiltered(env, "HOME", "HOME="+homeDir)
+	env = appendFiltered(env, "HOME", "HOME="+dirs.home)
+	if dirs.config != "" && os.MkdirAll(dirs.config, 0o700) == nil {
+		env = appendFiltered(env, "XDG_CONFIG_HOME", "XDG_CONFIG_HOME="+dirs.config)
+	}
+	return env
+}
+
+// executorDirs are the two directories an executor process writes into besides
+// its session directory.
+//
+// home is its HOME, on the box disk (below the state directory): an executor
+// keeps caches, downloaded runtimes and virtual environments there and runs
+// programs out of them, which the guest's /run cannot take -- it is a small tmpfs
+// mounted noexec. config is its XDG_CONFIG_HOME, on the tmpfs: a configuration an
+// executor writes for itself stays off the disk like the credentials it was
+// given. The credentials never go to home: they are in the runtime copy of the
+// secrets (and prime's PRIME_AGENT_CODING_AGENT_DIR points there) or in the
+// environment.
+type executorDirs struct {
+	home   string
+	config string
+}
+
+func (c DaemonConfig) dirsOf(name string) executorDirs {
+	return executorDirs{
+		home:   filepath.Join(c.StateDir, "homes", name),
+		config: filepath.Join(c.executorsDir(), name+"-config"),
+	}
 }
 
 // probeVersion runs "<bin> --version" with env and returns the first line.
@@ -116,8 +141,8 @@ func readEnvFile(path string) ([]string, error) {
 // buildExecutor returns the adapter for a session; it fails for an unknown name.
 //
 // Every directory an adapter is given that may hold a credential or the product's
-// own settings is below the runtime directory, which is a tmpfs: the box's disk
-// keeps sessions and transcripts, never a secret.
+// own settings is below the runtime directory, which is a tmpfs; its HOME, for
+// caches and runtimes, is on the box disk (see executorDirs).
 func buildExecutor(name string, cfg DaemonConfig) (Executor, error) {
 	switch name {
 	case "prime":
@@ -125,21 +150,21 @@ func buildExecutor(name string, cfg DaemonConfig) (Executor, error) {
 			bin:       cfg.PrimeAgent,
 			configDir: cfg.primeConfigDir(),
 			envFile:   filepath.Join(cfg.SecretsDir, "prime", "env"),
-			homeDir:   filepath.Join(cfg.executorsDir(), "prime-home"),
+			dirs:      cfg.dirsOf("prime"),
 			secrets:   filepath.Join(cfg.SecretsDir, "prime"),
 		}, nil
 	case "opencode":
 		return &opencodeExecutor{
 			bin:     cfg.OpenCode,
 			envFile: filepath.Join(cfg.SecretsDir, "opencode", "env"),
-			homeDir: filepath.Join(cfg.executorsDir(), "opencode-home"),
+			dirs:    cfg.dirsOf("opencode"),
 			secrets: filepath.Join(cfg.SecretsDir, "opencode"),
 		}, nil
 	case "claude":
 		return &claudeExecutor{
 			bin:     cfg.ClaudeACP,
 			envFile: filepath.Join(cfg.SecretsDir, "claude", "env"),
-			homeDir: filepath.Join(cfg.executorsDir(), "claude-home"),
+			dirs:    cfg.dirsOf("claude"),
 			secrets: filepath.Join(cfg.SecretsDir, "claude"),
 		}, nil
 	}
@@ -149,10 +174,13 @@ func buildExecutor(name string, cfg DaemonConfig) (Executor, error) {
 // executorEnv builds the environment of one executor process: inherited
 // environment, the adapter's config directory and options, then the secret env
 // file (which wins).
-func executorEnv(envFile, homeDir string, extra map[string]string) ([]string, error) {
+func executorEnv(envFile string, dirs executorDirs, extra map[string]string) ([]string, error) {
 	env := os.Environ()
-	if homeDir != "" && dirExists(homeDir) {
-		env = appendFiltered(env, "HOME", "HOME="+homeDir)
+	if dirs.home != "" && dirExists(dirs.home) {
+		env = appendFiltered(env, "HOME", "HOME="+dirs.home)
+	}
+	if dirs.config != "" && dirExists(dirs.config) {
+		env = appendFiltered(env, "XDG_CONFIG_HOME", "XDG_CONFIG_HOME="+dirs.config)
 	}
 	for k, v := range extra {
 		if v == "" {
@@ -197,7 +225,7 @@ type primeExecutor struct {
 	bin       string
 	configDir string // PRIME_AGENT_CODING_AGENT_DIR ("" = leave the default)
 	envFile   string
-	homeDir   string
+	dirs      executorDirs
 	secrets   string
 }
 
@@ -215,7 +243,7 @@ func (p *primeExecutor) Probe(ctx context.Context) ExecutorInfo {
 		info.Reason = fmt.Sprintf("prime-agent not found (%q); the guest image installs it", p.bin)
 		return info
 	}
-	v, err := probeVersion(ctx, path, probeEnv(p.homeDir), "--version")
+	v, err := probeVersion(ctx, path, probeEnv(p.dirs), "--version")
 	if err != nil {
 		info.Reason = "prime-agent --version failed: " + err.Error()
 		return info
@@ -242,7 +270,7 @@ func (p *primeExecutor) Argv(spec ExecSpec) ([]string, []string, error) {
 	if spec.ResumeRootID != "" {
 		argv = append(argv, "-r", spec.ResumeRootID)
 	}
-	env, err := executorEnv(p.envFile, p.homeDir, map[string]string{
+	env, err := executorEnv(p.envFile, p.dirs, map[string]string{
 		"PRIME_AGENT_CODING_AGENT_DIR": p.configDir,
 	})
 	if err != nil {
@@ -280,7 +308,7 @@ func jsonlIDs(dir string) []string {
 type opencodeExecutor struct {
 	bin     string
 	envFile string
-	homeDir string
+	dirs    executorDirs
 	secrets string
 }
 
@@ -299,7 +327,7 @@ func (o *opencodeExecutor) Probe(ctx context.Context) ExecutorInfo {
 		info.Reason = fmt.Sprintf("opencode not found (%q); the guest image installs it from npm", o.bin)
 		return info
 	}
-	if v, err := probeVersion(ctx, path, probeEnv(o.homeDir), "--version"); err == nil {
+	if v, err := probeVersion(ctx, path, probeEnv(o.dirs), "--version"); err == nil {
 		info.Version = v
 	}
 	info.Available = true
@@ -312,7 +340,7 @@ func (o *opencodeExecutor) Probe(ctx context.Context) ExecutorInfo {
 }
 
 func (o *opencodeExecutor) Argv(spec ExecSpec) ([]string, []string, error) {
-	env, err := executorEnv(o.envFile, o.homeDir, map[string]string{
+	env, err := executorEnv(o.envFile, o.dirs, map[string]string{
 		"BOX_MODEL": spec.Model,
 	})
 	if err != nil {
@@ -330,7 +358,7 @@ func (o *opencodeExecutor) TranscriptIDs(string) []string { return nil }
 type claudeExecutor struct {
 	bin     string
 	envFile string
-	homeDir string
+	dirs    executorDirs
 	secrets string
 }
 
@@ -346,7 +374,7 @@ func (c *claudeExecutor) Probe(ctx context.Context) ExecutorInfo {
 		info.Reason = fmt.Sprintf("claude-code-acp not found (%q); install @zed-industries/claude-code-acp from the npm registry, or let boxd run the executors the image ships", c.bin)
 		return info
 	}
-	if v, err := probeVersion(ctx, path, probeEnv(c.homeDir), "--version"); err == nil {
+	if v, err := probeVersion(ctx, path, probeEnv(c.dirs), "--version"); err == nil {
 		info.Version = v
 	}
 	info.Available = true
@@ -359,7 +387,7 @@ func (c *claudeExecutor) Probe(ctx context.Context) ExecutorInfo {
 }
 
 func (c *claudeExecutor) Argv(spec ExecSpec) ([]string, []string, error) {
-	env, err := executorEnv(c.envFile, c.homeDir, map[string]string{
+	env, err := executorEnv(c.envFile, c.dirs, map[string]string{
 		"BOX_MODEL": spec.Model,
 	})
 	if err != nil {
@@ -374,23 +402,25 @@ func (c *claudeExecutor) TranscriptIDs(string) []string { return nil }
 
 // prepareExecutorDirs copies the read-only secret directories into the runtime
 // directory (a tmpfs), so an agent can write its own settings without touching
-// the driver's copy in /run/box/secrets and without depending on the guest's
-// HOME. Nothing here may reach the box disk: an executor writes credentials into
-// the directory it is given, and a box disk outlives the session.
-func prepareExecutorDirs(secretsDir, runtimeDir string) error {
-	root := filepath.Join(runtimeDir, "executors")
+// the driver's copy in /run/box/secrets, and creates every executor's HOME (on
+// the disk) and XDG_CONFIG_HOME (on the tmpfs). No credential goes to the disk:
+// an executor gets it from the runtime copy or from its environment.
+func prepareExecutorDirs(cfg DaemonConfig) error {
+	root := cfg.executorsDir()
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return fmt.Errorf("create %s: %w", root, err)
 	}
 	for _, name := range []string{"prime", "opencode", "claude"} {
 		// The HOME of every executor exists even without credentials: an executor
-		// that finds no HOME of its own writes its configuration (and whatever it
-		// derives from the credential) into the box user's home, which is on the
-		// box disk.
-		if err := os.MkdirAll(filepath.Join(root, name+"-home"), 0o700); err != nil {
-			return fmt.Errorf("create the home of the %s executor: %w", name, err)
+		// that finds no HOME of its own writes into the home of the user boxd
+		// runs as.
+		dirs := cfg.dirsOf(name)
+		for _, dir := range []string{dirs.home, dirs.config} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return fmt.Errorf("create %s for the %s executor: %w", dir, name, err)
+			}
 		}
-		src := filepath.Join(secretsDir, name)
+		src := filepath.Join(cfg.SecretsDir, name)
 		if !dirExists(src) {
 			continue
 		}
@@ -399,28 +429,26 @@ func prepareExecutorDirs(secretsDir, runtimeDir string) error {
 			return fmt.Errorf("copy %s: %w", src, err)
 		}
 	}
-	return prepareOpenCodeConfig(secretsDir, runtimeDir)
+	return prepareOpenCodeConfig(cfg)
 }
 
 // prepareOpenCodeConfig puts the box's opencode.json where opencode looks for
-// it: $HOME/.config/opencode/opencode.json, with HOME set to the executor's own
-// directory (on the tmpfs) for every session. The env file is not copied there: it holds the
-// credential and boxd reads it as environment variables.
+// it: $XDG_CONFIG_HOME/opencode/opencode.json, with XDG_CONFIG_HOME set to the
+// executor's own directory on the tmpfs for every session. The env file is not
+// copied there: it holds the credential and boxd reads it as environment
+// variables.
 //
 // The image's own /etc/opencode/opencode.json is the system configuration and
 // outranks this file, so the box cannot be talked out of it; it only says what
 // applies to everyone.
-func prepareOpenCodeConfig(secretsDir, runtimeDir string) error {
-	src := filepath.Join(secretsDir, "opencode")
+func prepareOpenCodeConfig(cfg DaemonConfig) error {
+	src := filepath.Join(cfg.SecretsDir, "opencode")
 	if !dirExists(src) {
 		return nil
 	}
-	home := filepath.Join(runtimeDir, "executors", "opencode-home")
-	dst := filepath.Join(home, ".config", "opencode")
-	for _, dir := range []string{home, dst} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
+	dst := filepath.Join(cfg.dirsOf("opencode").config, "opencode")
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		return err
 	}
 	ents, err := os.ReadDir(src)
 	if err != nil {

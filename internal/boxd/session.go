@@ -65,7 +65,8 @@ func (c DaemonConfig) primeConfigDir() string {
 }
 
 // executorsDir is where boxd keeps the mutable copy of every executor's secrets
-// and the HOME of the executors whose product writes into $HOME.
+// and each executor's XDG_CONFIG_HOME, on the tmpfs. HOMEs are on the disk
+// (executorDirs).
 func (c DaemonConfig) executorsDir() string { return filepath.Join(c.RuntimeDir, "executors") }
 
 // Defaults fills in every unset field.
@@ -116,7 +117,7 @@ type Manager struct {
 // NewManager loads the persisted sessions and prepares the state directory.
 func NewManager(cfg DaemonConfig) (*Manager, error) {
 	cfg = cfg.withDefaults()
-	if err := prepareExecutorDirs(cfg.SecretsDir, cfg.RuntimeDir); err != nil {
+	if err := prepareExecutorDirs(cfg); err != nil {
 		cfg.logf("boxd: executor secrets: %v", err)
 	}
 	store, err := NewStore(cfg.StateDir)
@@ -367,7 +368,7 @@ func (m *Manager) NewSession(executor, model, cwd, title string) (Session, error
 	// The driver copies the task files (and with them /run/box/secrets) after
 	// boxd has started, so the executor directories are checked again here: a
 	// session is the first moment boxd can see them.
-	if err := prepareExecutorDirs(m.cfg.SecretsDir, m.cfg.RuntimeDir); err != nil {
+	if err := prepareExecutorDirs(m.cfg); err != nil {
 		m.cfg.logf("boxd: executor secrets: %v", err)
 	}
 	if _, err := buildExecutor(executor, m.cfg); err != nil {
@@ -442,7 +443,7 @@ func (m *Manager) List() []Session {
 // configuration; a session with a turn running is left alone and its executor
 // restarts after the turn, so a reload never kills work in flight.
 func (m *Manager) Reload() (ReloadResult, error) {
-	if err := prepareExecutorDirs(m.cfg.SecretsDir, m.cfg.RuntimeDir); err != nil {
+	if err := prepareExecutorDirs(m.cfg); err != nil {
 		return ReloadResult{}, Errorf(CodeInternal, "reload the executor credentials: %v", err)
 	}
 	res := ReloadResult{Configured: []string{}}

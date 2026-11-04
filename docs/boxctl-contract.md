@@ -39,9 +39,10 @@ which is how the tests run it. If boxd is down, every command answers
 | `/usr/local/bin/boxctl` | the same binary, by `argv[0]` or the `boxctl` subcommand |
 | `/var/lib/boxd/` | durable state on the box disk: sessions and their transcripts; survives a restart of the VM and a reallocation |
 | `/var/lib/boxd/sessions/<id>/events.jsonl` | one session's event feed |
+| `/var/lib/boxd/homes/<executor>/` | the executor's `HOME`, on the box disk: caches, downloaded runtimes, virtual environments, logs. Programs run from there (the guest's `/run` is a small tmpfs mounted `noexec`) and it survives a reboot. No credential goes there |
 | `/etc/box/local/` | files the driver copied from the task's `local/` directory (not secrets) |
 | `/run/box/secrets/` | the task's `secrets/` directory, on the guest's tmpfs, root-only, mode 0700: one directory per executor, `/run/box/secrets/<executor>/` |
-| `/run/boxd/` | everything boxd derives for this boot (executor homes and configuration), also a tmpfs |
+| `/run/boxd/` | everything boxd derives for this boot, also a tmpfs: the executors' mutable copy of their secrets (`executors/<executor>/`) and their `XDG_CONFIG_HOME` (`executors/<executor>-config/`) |
 
 The two tmpfs paths are the reason a box's credentials never reach the box disk:
 the driver writes them after boot, boxd reads them, and a reboot removes them.

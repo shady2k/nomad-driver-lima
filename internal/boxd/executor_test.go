@@ -22,7 +22,7 @@ func TestOpenCodeACPHandshake(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.OpenCode = bin
 	// An empty HOME keeps the host's opencode profile out of the test.
-	home := filepath.Join(cfg.StateDir, "executors", "opencode-home")
+	home := filepath.Join(cfg.StateDir, "homes", "opencode")
 	if err := mkdirAll(home); err != nil {
 		t.Fatal(err)
 	}
