@@ -167,6 +167,13 @@ starts, so no key lands on a disk.
   errors), low memory and disk, and what each executor printed; `box status
   <id>` has the driver's task events, which say when the kernel OOM-killed
   something in the box's cgroup. A box out of room gets more with `box resize`.
+- **A tool in a session fails strangely or waits** (a lock, a timeout, "another
+  process is setting up..."): look before you retry. `box top <id>` shows who
+  is running (an installer from an earlier session may still hold the lock),
+  and `box logs <id>` shows what that process printed - an executor's own logs
+  appear as `prime log ...` lines, a failed download names its URL. Retrying
+  blind repeats the same wait; a closed session's background setup may still
+  be running.
 - **Inside the box everything is yours to fix.** Install what is missing, fix
   apt, rebuild a cache: `box run <id> -- sudo ...`. Report to the operator only
   what you cannot reach from inside: the VM, its credentials, the node.
