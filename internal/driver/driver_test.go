@@ -12,6 +12,7 @@ import (
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/plugins/base"
 	"github.com/hashicorp/nomad/plugins/drivers"
+	"github.com/hashicorp/nomad/plugins/drivers/fsisolation"
 	"github.com/hashicorp/nomad/plugins/shared/hclspec"
 	"github.com/stretchr/testify/require"
 
@@ -366,6 +367,9 @@ func TestCapabilitiesAndSchemas(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, drivers.MountConfigSupportAll, caps.MountConfigs)
 	require.True(t, caps.Exec)
+	// An exec runs in the guest: Nomad must ask for alloc-exec, not for
+	// alloc-node-exec, which it asks for when a driver has no isolation.
+	require.Equal(t, fsisolation.Image, caps.FSIsolation)
 	_, err = d.TaskConfigSchema()
 	require.NoError(t, err)
 	_, err = d.ConfigSchema()

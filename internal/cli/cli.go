@@ -124,6 +124,18 @@ func (a *App) vaultRoleFor(current string) string {
 	return a.VaultRole()
 }
 
+// noteNoVaultRole warns when the box reads a secret from Vault without a role:
+// that works only when the Vault side has a default role, and otherwise fails
+// the task with "missing role", which the command only sees in the task events.
+func (a *App) noteNoVaultRole(spec BoxSpec) {
+	if spec.VaultRole != "" || !hasExecutorTemplate(spec.ExecutorItems) || a.ErrOut == nil {
+		return
+	}
+	fmt.Fprintln(a.ErrOut, "note: the executor credentials are read from Vault and no role is set "+
+		"(--vault-role or BOX_VAULT_ROLE): this needs a default role on the Vault JWT backend, "+
+		"or the box fails with \"missing role\"")
+}
+
 func (a *App) now() time.Time {
 	if a.Now != nil {
 		return a.Now()

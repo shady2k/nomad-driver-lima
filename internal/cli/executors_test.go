@@ -99,6 +99,23 @@ func TestCreateRendersATemplateItemWithAVaultBlock(t *testing.T) {
 	require.True(t, *task.Vault.DisableFile,
 		"Nomad must not write a token into secrets/: the driver copies that directory into the guest")
 	require.False(t, *task.Vault.Env, "the task process is the VM, not an executor")
+	require.NotContains(t, ta.errOut.String(), "no role is set")
+}
+
+func TestCreateWithoutAVaultRoleSaysWhatItNeeds(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
+	ta.cluster.setExecutors(map[string]string{"prime/auth.json.tmpl": vaultAuthTemplate})
+
+	require.Equal(t, ExitOK, ta.run(t, "create", "dev1", "--image", "1.0.0"), ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "no role is set (--vault-role or BOX_VAULT_ROLE)")
+
+	// A box that reads nothing from Vault needs no role and hears nothing.
+	ta = newTestApp(t, indexJSON)
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
+	ta.cluster.setExecutors(map[string]string{"prime/settings.json": "{}"})
+	require.Equal(t, ExitOK, ta.run(t, "create", "dev1", "--image", "1.0.0"), ta.errOut.String())
+	require.NotContains(t, ta.errOut.String(), "no role is set")
 }
 
 func TestCreateTakesTheVaultRoleFromTheEnvironment(t *testing.T) {

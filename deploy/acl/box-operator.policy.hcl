@@ -18,7 +18,9 @@
 #                      allocations `box ls` and `box status` read
 #   submit-job         box create/start/stop/rm/resize register and deregister
 #                      the box job
-#   alloc-exec         box run, ssh, cp and every guest command (boxctl)
+#   alloc-exec         box run, ssh, cp and every guest command (boxctl); the
+#                      driver declares image isolation, so Nomad does not ask
+#                      for alloc-node-exec (which would reach raw_exec tasks)
 #   read-logs          box logs
 #   host-volume-write  box create makes the disk box-<id>, box rm deletes it,
 #                      box resize raises it; the capability implies

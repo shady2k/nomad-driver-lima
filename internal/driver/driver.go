@@ -60,10 +60,19 @@ var (
 
 	// driverCapabilities tells Nomad what this driver can do. MountConfigs must
 	// be supported: the box disk arrives as a mount configuration.
+	//
+	// FSIsolation is Image: the task runs in its own VM with its own root
+	// filesystem, and `nomad alloc exec` runs the command in the guest, never on
+	// the node. With None Nomad treats an exec as a command on the node and asks
+	// for alloc-node-exec, which would let the coordinator's token exec into any
+	// raw_exec task of the namespace; Image asks for alloc-exec. It also keeps the
+	// node's environment out of the task environment and gives the task the
+	// in-guest-style NOMAD_*_DIR paths; the driver reads neither, it takes the
+	// task directory from TaskDir() and the disk from the mounts.
 	driverCapabilities = &drivers.Capabilities{
 		SendSignals: false,
 		Exec:        true,
-		FSIsolation: fsisolation.None,
+		FSIsolation: fsisolation.Image,
 		NetIsolationModes: []drivers.NetIsolationMode{
 			drivers.NetIsolationModeHost,
 		},

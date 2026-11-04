@@ -146,6 +146,7 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	}
 	spec.ExecutorItems = a.executorItems(ctx)
 	spec.VaultRole = strings.TrimSpace(*vaultRole)
+	a.noteNoVaultRole(spec)
 	job, err := RenderJob(spec)
 	if err != nil {
 		return err

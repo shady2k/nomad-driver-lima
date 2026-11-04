@@ -82,7 +82,9 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   end to end. A box created after `acl.yml` needs its workload policy attached
   once (`deploy/acl/apply.sh workloads <id>`); until then its executors report
   "not configured". The first real run found the operator policy missing
-  `host_volume "box-*"` (fixed in v0.1.5).
+  `host_volume "box-*"`, and the driver declaring no filesystem isolation, which
+  made Nomad ask for `alloc-node-exec` on every guest command (both fixed in
+  v0.1.5).
 
 ## Images
 

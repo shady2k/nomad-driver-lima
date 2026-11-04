@@ -78,6 +78,7 @@ func (a *App) cmdStart(ctx context.Context, args []string) error {
 	// credentials that were added since the box was created.
 	spec.ExecutorItems = a.executorItems(ctx)
 	spec.VaultRole = a.vaultRoleFor(spec.VaultRole)
+	a.noteNoVaultRole(spec)
 	engineered, err := RenderJob(spec)
 	if err != nil {
 		return err
@@ -237,6 +238,7 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 
 	spec.ExecutorItems = a.executorItems(ctx)
 	spec.VaultRole = a.vaultRoleFor(spec.VaultRole)
+	a.noteNoVaultRole(spec)
 	engineered, err := RenderJob(spec)
 	if err != nil {
 		return err

@@ -44,7 +44,7 @@ What it grants, and the command that needs it:
 | `list-jobs` | `box ls` |
 | `read-job` | `box status`, every wait of `create`/`start`/`resize`, the allocation lists |
 | `submit-job` | `box create`, `start`, `stop`, `rm`, `resize` |
-| `alloc-exec` | `box run`, `ssh`, `cp` and every guest command (`boxctl`) |
+| `alloc-exec` | `box run`, `ssh`, `cp` and every guest command (`boxctl`); enough since v0.1.5, whose driver declares image isolation (the command runs in the guest). Up to v0.1.4 the driver declared none, and Nomad asked for `alloc-node-exec` instead |
 | `read-logs` | `box logs` |
 | `host-volume-write` | `box create` makes the disk `box-<id>`, `box rm` deletes it, `box resize` raises it |
 | `host_volume "box-*"` `mount-readwrite` | `box create`, `start`, `resize`: a job that mounts its disk `box-<id>` is refused without it, whatever the namespace grants |
