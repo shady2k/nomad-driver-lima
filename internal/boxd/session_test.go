@@ -86,6 +86,25 @@ func TestSendRejectsBusyAndEmpty(t *testing.T) {
 	if _, err := m.Send(s.ID, "again"); err == nil || CodeOf(err) != CodeBusy {
 		t.Fatalf("second send error = %v, want busy", err)
 	}
+	// Once the executor is up, the session says it runs the turn, not that it
+	// is still starting.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, err := m.Get(s.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Pid != 0 {
+			if got.State != StateRunning {
+				t.Fatalf("state mid-turn with executor pid %d = %q, want running", got.Pid, got.State)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("executor did not start; state %q", got.State)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	done := waitTurn(t, m, s.ID, 1)
 	if done.State != TurnDone {
 		t.Fatalf("slow turn state = %q (%s)", done.State, done.Error)

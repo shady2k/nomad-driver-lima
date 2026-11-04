@@ -1186,6 +1186,13 @@ func (s *session) ensureExecutor() (*proc, bool, error) {
 	s.proc = p
 	s.meta.Pid = p.pid
 	s.meta.ExecutorSession = p.rootID
+	// "starting" lasts only as long as the start: a turn that asked for the
+	// executor is running now, and a session without one waits.
+	if s.busy {
+		s.meta.State = StateRunning
+	} else {
+		s.meta.State = StateIdle
+	}
 	s.mu.Unlock()
 	s.m.persist(s)
 	go s.watchExit(p)
