@@ -155,7 +155,7 @@ nomad_box_driver_allowlist: '{{ box_driver_allowlist | default("box") }}'
 nomad_box_limactl: '{{ box_limactl | default("/usr/local/bin/limactl") }}'
 nomad_box_lima_home: '{{ box_lima_home | default("/var/lib/box/lima") }}'
 nomad_box_image_cache_dir: '{{ box_image_cache_dir | default("/var/lib/box/images") }}'
-nomad_box_memory_overhead_mib: '{{ box_memory_overhead_mib | default(150) }}'
+nomad_box_memory_overhead_mib: '{{ box_memory_overhead_mib | default(512) }}'
 # The memory cap of a box: "enforce" fails a box whose cgroup scope cannot be made,
 # "off" runs it uncapped - the only possible value on macOS, which has no cgroup
 # v2. The driver works this default out by itself (aba99dc), but the v0.1.0

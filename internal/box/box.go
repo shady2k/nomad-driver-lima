@@ -25,9 +25,13 @@ import (
 
 const (
 	// DefaultMemoryOverheadMiB is the host memory the qemu process and the lima
-	// hostagent need on top of the guest RAM (spike S3.d: qemu ~ guest RAM +
-	// 60 MB, hostagent ~ 60 MB).
-	DefaultMemoryOverheadMiB = 150
+	// hostagent need on top of the guest RAM. An idle box needs ~120 MB (spike
+	// S3.d), but a guest that writes hard fills all of its RAM with page cache,
+	// qemu's I/O threads and buffers come on top, and the page cache of the
+	// qcow2 on the host is charged to the same cgroup: at 150 MiB such a box
+	// reached memory.max within 20 minutes, its qemu spent five cores
+	// reclaiming, and the guest got I/O errors and stopped.
+	DefaultMemoryOverheadMiB = 512
 
 	// gracefulStopTimeout bounds a shutdown the driver starts by itself (the
 	// graceful limit Nomad asks for comes from StopTask).

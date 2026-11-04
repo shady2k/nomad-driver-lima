@@ -85,7 +85,7 @@ func TestConfigValidate(t *testing.T) {
 	require.Equal(t, "limactl", c.LimactlPath)
 	require.NotEmpty(t, c.LimaHome)
 	require.Equal(t, box.DefaultVMType(), c.VMType)
-	require.Equal(t, 150, c.MemoryOverheadMiB)
+	require.Equal(t, 512, c.MemoryOverheadMiB)
 
 	require.Equal(t, box.DefaultMemoryLimit(), c.MemoryLimit)
 

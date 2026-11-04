@@ -32,8 +32,8 @@ const (
 	// boxFilesDir is where the driver copies the task files in the guest.
 	boxFilesDir = "/etc/box"
 	// boxMemoryOverheadMiB is the memory the VM needs on top of the guest RAM.
-	// It matches the driver default (memory_overhead_mib = 150).
-	BoxMemoryOverheadMiB = 150
+	// It matches the driver default (memory_overhead_mib = 512).
+	BoxMemoryOverheadMiB = 512
 	// boxMetaMarker is the meta key that marks a job as a box.
 	boxMetaMarker = "box"
 	// boxStopTimeout is how long the driver may take to stop a VM on its own.

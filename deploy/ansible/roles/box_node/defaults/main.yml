@@ -117,8 +117,9 @@ box_socket_path_check: true
 box_image_cache_dir: /var/lib/box/images
 
 # Added to the guest memory for the Linux memory cap (the qemu process holds more
-# than the guest sees).
-box_memory_overhead_mib: 150
+# than the guest sees). 512: a guest that writes hard fills its RAM with page
+# cache, and qemu with 150 MiB on top reached the cap and stalled the box.
+box_memory_overhead_mib: 512
 
 # qemu on Linux, vz on macOS; empty means the driver's default for the OS.
 box_vm_type: ''
