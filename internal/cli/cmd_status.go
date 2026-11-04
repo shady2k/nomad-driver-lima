@@ -187,10 +187,10 @@ func (a *App) printStatus(out *statusOutput) {
 	if out.Box.Note != "" {
 		a.note("  note    %s", out.Box.Note)
 	}
-	a.note("  spec    %s, image %s (%s), task reserves %d MiB / %d MHz",
+	a.note("  spec    %s, task reserves %d MiB / %d MHz",
 		describeSpec(BoxSpec{CPUs: out.Spec.CPUs, MemoryMiB: out.Spec.MemoryMiB, DiskGiB: out.Spec.DiskGiB,
 			ImageVersion: out.Spec.Image, Arch: out.Spec.Arch}),
-		out.Spec.Image, out.Spec.Arch, out.Spec.TaskMemMiB, out.Spec.TaskCPUMHz)
+		out.Spec.TaskMemMiB, out.Spec.TaskCPUMHz)
 	if out.Volume != nil {
 		a.note("  disk    volume %s (%s, %s) at %s", out.Volume.Name, dash(out.Volume.PluginID),
 			humanBytes(out.Volume.CapacityBytes), dash(out.Volume.HostPath))

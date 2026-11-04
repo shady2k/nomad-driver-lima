@@ -62,6 +62,9 @@ func (a *App) cmdImages(ctx context.Context, args []string) error {
 	a.note("%s from %s", describeCount(len(images), "image"), url)
 	a.note("create a box with: box create <id> --image %s --arch %s --cpus %d --memory-mib %d --disk-gib %d",
 		images[0].Version, images[0].Arch, defaultCPUs, defaultMemoryMiB, defaultDiskGiB)
+	a.note("the disk holds the image, the toolchains and the checkout: %d GiB fits a small repository, a real project wants 20-40 GiB;",
+		defaultDiskGiB)
+	a.note("the host spends only what the box writes, and box resize --disk-gib grows the disk later (it never shrinks)")
 	return nil
 }
 

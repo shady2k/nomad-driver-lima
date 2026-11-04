@@ -240,11 +240,11 @@ func (a *App) cmdExecutorsShow(ctx context.Context, args []string) error {
 		case "credential":
 			a.note("  %-9s provider %s (%s)", key.File, key.Name, orNone(key.Fields))
 		case "provider":
-			models := "none listed"
+			fallback := "none"
 			if len(key.Models) > 0 {
-				models = strings.Join(prefixed(key.Name, key.Models), ", ")
+				fallback = strings.Join(prefixed(key.Name, key.Models), ", ")
 			}
-			a.note("  %-9s provider %s, staged models: %s", key.File, key.Name, models)
+			a.note("  %-9s provider %s: models come from the provider, fallback list: %s", key.File, key.Name, fallback)
 		case "template":
 			a.note("  %-9s template: Nomad reads the secret at render time", key.File)
 		default:
@@ -252,7 +252,8 @@ func (a *App) cmdExecutorsShow(ctx context.Context, args []string) error {
 		}
 	}
 	if hasProvider(out.Keys) {
-		a.note("  a box asks its provider for the models its key may use when a session starts; the staged list is what it falls back to")
+		a.note("  a box asks each provider which models its key may use when a session starts, so it may offer more than the fallback list;")
+		a.note("  the full list of a running box is in its log (box logs <id>: \"offers N model(s)\")")
 	}
 	for _, key := range out.Missing {
 		a.note("  missing  %s (boxd needs it to start that executor)", key)

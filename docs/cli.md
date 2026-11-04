@@ -249,7 +249,7 @@ File names, sizes and executors, never a value. A template item is shown with
 time`, so what the variable holds is visible as a path. A required file counts as
 present in either form: `prime/auth.json.tmpl` is the `auth.json` of `prime`.
 A provider definition is shown with the models staged in it, as `--model` takes
-them (`prime/models.json provider myprovider, staged models: myprovider/model-a`);
+them (`prime/models.json provider myprovider: models come from the provider, fallback list: myprovider/model-a`);
 `--json` has them as `models` of that key. The list a box offers is the one its
 provider gives its key when a session starts (see `docs/guest-image.md`, "Model
 catalog"); the staged list is the fallback, and its sizes are used for a model
