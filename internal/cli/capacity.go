@@ -536,6 +536,9 @@ func (n *NodeCapacity) NodeProblem(req PlacementRequest) string {
 	if need := int64(req.DiskGiB) * 1024; need > 0 && n.Disk.Free < need {
 		return fmt.Sprintf("node %s has %d MiB of disk free, the box disk needs %d MiB", n.Name, n.Disk.Free, need)
 	}
+	if !req.Large {
+		return n.Oversized(req.CPUs, req.MemoryMiB, req.DiskGiB)
+	}
 	return ""
 }
 
@@ -556,6 +559,35 @@ type PlacementRequest struct {
 	DiskGiB           int
 	// Node is an explicit node name or id (--node).
 	Node string
+	// Large lets the box take more than LargeShare of the node (--large).
+	Large bool
+}
+
+// LargeShare is the part of a node one box may take without --large: a node
+// is shared by every agent's boxes, and a box that starts at the defaults and
+// grows with `box resize` when it has to leaves the rest of the node to them.
+const LargeShare = 4
+
+// Oversized says, in plain words, how a box of this size would take more than
+// a LargeShare of the node's CPU, memory or disk, or "" when it does not.
+func (n *NodeCapacity) Oversized(cpus, memoryMiB, diskGiB int) string {
+	var over []string
+	if limit := n.CPU.Total / LargeShare; limit > 0 && int64(cpus)*1000 > limit {
+		over = append(over, fmt.Sprintf("%d vCPU (%d MHz of %d MHz)", cpus, int64(cpus)*1000, n.CPU.Total))
+	}
+	if limit := n.Memory.Total / LargeShare; limit > 0 && int64(memoryMiB) > limit {
+		over = append(over, fmt.Sprintf("%d MiB of memory (of %d MiB)", memoryMiB, n.Memory.Total))
+	}
+	if limit := n.Disk.Total / LargeShare; limit > 0 && int64(diskGiB)*1024 > limit {
+		over = append(over, fmt.Sprintf("a %d GiB disk (of %d GiB)", diskGiB, n.Disk.Total/1024))
+	}
+	if len(over) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("on node %s the box would take more than a quarter of the node: %s; "+
+		"start at the defaults (%d vCPU, %d MiB, %d GiB) and grow it with `box resize` when the work needs it, "+
+		"or pass --large for a build or test run that does",
+		n.Name, strings.Join(over, ", "), defaultCPUs, defaultMemoryMiB, defaultDiskGiB)
 }
 
 // ChooseNode picks the node a new box goes to.

@@ -38,6 +38,7 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	memoryMiB := fs.Int("memory-mib", defaultMemoryMiB, "guest RAM in MiB")
 	diskGiB := fs.Int("disk-gib", defaultDiskGiB, "box disk size in GiB (on a dynamic host volume)")
 	nodeName := fs.String("node", "", "pin the box to this node")
+	large := fs.Bool("large", false, "allow more than a quarter of a node's CPU, memory or disk")
 	vaultRole := fs.String("vault-role", a.VaultRole(), "the Vault role the box reads its secrets with "+
 		"(default: $BOX_VAULT_ROLE, else the cluster's default role)")
 	timeout := fs.Duration("timeout", defaultWaitTimeout, "how long to wait for the box to run")
@@ -87,7 +88,7 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	}
 
 	wantArch := NormalizeArch(*arch)
-	requested := PlacementRequest{Arch: wantArch, CPUs: *cpus, MemoryMiB: *memoryMiB, DiskGiB: *diskGiB, Node: *nodeName}
+	requested := PlacementRequest{Arch: wantArch, CPUs: *cpus, MemoryMiB: *memoryMiB, DiskGiB: *diskGiB, Node: *nodeName, Large: *large}
 
 	// Pick the architecture and the node together: the node decides which
 	// architecture is possible, the index decides which one has an image.

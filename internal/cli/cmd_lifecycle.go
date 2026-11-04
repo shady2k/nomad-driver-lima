@@ -186,6 +186,7 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 	diskGiB := fs.Int("disk-gib", 0, "box disk size in GiB (it can only grow)")
 	timeout := fs.Duration("timeout", defaultWaitTimeout, "how long to wait for the box to come back")
 	wait := fs.Bool("wait", true, "wait until the box is running again")
+	large := fs.Bool("large", false, "allow more than a quarter of the node's CPU, memory or disk")
 	if err := parseFlags(fs, args, 1); err != nil {
 		return err
 	}
@@ -234,6 +235,11 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 	if len(out.Changes) == 0 {
 		out.Warn = "nothing to change: the box already has these values"
 		return a.printLifecycle(&out)
+	}
+	if !*large {
+		if err := a.checkShare(ctx, spec, box.NodeID); err != nil {
+			return err
+		}
 	}
 
 	spec.ExecutorItems = a.executorItems(ctx)
@@ -437,4 +443,26 @@ func (a *App) waitForNoLiveAllocs(ctx context.Context, jobID string, timeout tim
 			return wrapf(err, "stopped waiting for %s to stop", jobID)
 		}
 	}
+}
+
+// checkShare refuses a resize that would make the box take more than a
+// LargeShare of its node. A node Nomad cannot describe is not a reason to
+// refuse: the scheduler still has the last word.
+func (a *App) checkShare(ctx context.Context, spec BoxSpec, nodeID string) error {
+	if nodeID == "" {
+		nodeID = spec.NodeID
+	}
+	nodes, err := a.nodeCapacities(ctx)
+	if err != nil {
+		return nil
+	}
+	for _, n := range nodes {
+		if nodeID == "" || n.NodeID != nodeID {
+			continue
+		}
+		if problem := n.Oversized(spec.CPUs, spec.MemoryMiB, spec.DiskGiB); problem != "" {
+			return usagef("box resize %s: %s", spec.ID, problem)
+		}
+	}
+	return nil
 }

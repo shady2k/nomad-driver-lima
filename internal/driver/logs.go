@@ -1,12 +1,14 @@
 package driver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/nomad/plugins/drivers"
@@ -38,13 +40,20 @@ func (d *Driver) startGuestLogs(parent context.Context, h *taskHandle) {
 		if stdout == nil && stderr == nil {
 			return
 		}
-		if stderr != nil {
+		// The guest's journal and the driver's own lines share stdout, the
+		// stream `nomad alloc logs` and the UI show first; a lineWriter keeps
+		// one from landing in the middle of the other's line.
+		out := io.Writer(io.Discard)
+		if stdout != nil {
+			lw := &lineWriter{w: stdout}
+			defer lw.flush()
+			out = lw
 			h.mu.Lock()
-			h.logErr = stderr
+			h.logOut = lw
 			h.mu.Unlock()
 			defer func() {
 				h.mu.Lock()
-				h.logErr = nil
+				h.logOut = nil
 				h.mu.Unlock()
 			}()
 		}
@@ -53,7 +62,7 @@ func (d *Driver) startGuestLogs(parent context.Context, h *taskHandle) {
 				return
 			}
 			cmd := d.boxm.Lima().ShellCmd(ctx, h.boxID, h.cfg.GuestLogCommand)
-			cmd.Stdout = writerOrDiscard(stdout)
+			cmd.Stdout = out
 			cmd.Stderr = writerOrDiscard(stderr)
 			err := cmd.Run()
 			if ctx.Err() != nil {
@@ -149,12 +158,12 @@ func writerOrDiscard(w io.WriteCloser) io.Writer {
 const logTimeLayout = "2006-01-02 15:04:05 UTC"
 
 // noteExec writes one line about a command run in the guest to the task's
-// stderr, so `nomad alloc logs -stderr` and the UI show what was done in the
-// box besides its sessions. The command is cut short: the line says what ran,
-// not what it carried.
+// stdout, next to boxd's journal, so `nomad alloc logs` and the UI show what
+// was done in the box besides its sessions. The command is cut short: the
+// line says what ran, not what it carried.
 func (h *taskHandle) noteExec(format string, args ...any) {
 	h.mu.RLock()
-	w := h.logErr
+	w := h.logOut
 	h.mu.RUnlock()
 	if w == nil {
 		return
@@ -189,5 +198,38 @@ func (h *taskHandle) noteExecProgress(label string, started time.Time, done <-ch
 		case <-ticker.C:
 			h.noteExec("still running after %s: %s", time.Since(started).Round(time.Second), label)
 		}
+	}
+}
+
+// lineWriter writes whole lines to w: a write that ends mid-line keeps the
+// rest until its newline comes, and whole lines from different writers never
+// interleave.
+type lineWriter struct {
+	mu      sync.Mutex
+	w       io.Writer
+	partial []byte
+}
+
+func (l *lineWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.partial = append(l.partial, p...)
+	if i := bytes.LastIndexByte(l.partial, '\n'); i >= 0 {
+		if _, err := l.w.Write(l.partial[:i+1]); err != nil {
+			l.partial = l.partial[i+1:]
+			return len(p), err
+		}
+		l.partial = append(l.partial[:0], l.partial[i+1:]...)
+	}
+	return len(p), nil
+}
+
+// flush writes what is left of an unfinished line.
+func (l *lineWriter) flush() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.partial) > 0 {
+		_, _ = l.w.Write(append(l.partial, '\n'))
+		l.partial = nil
 	}
 }

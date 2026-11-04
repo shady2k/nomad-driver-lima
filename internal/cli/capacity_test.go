@@ -144,7 +144,7 @@ func TestChooseNodePicksMostFreeMemory(t *testing.T) {
 		CPU: ResourceUsage{Total: 8000, Free: 7000}, Disk: ResourceUsage{Total: 200000, Free: 190000},
 		VolumePlugins: []VolumePluginInfo{{ID: boxVolumePluginID}}}
 
-	chosen, problems, err := ChooseNode([]*NodeCapacity{small, large}, PlacementRequest{Arch: "amd64", CPUs: 2, MemoryMiB: 1024, DiskGiB: 8})
+	chosen, problems, err := ChooseNode([]*NodeCapacity{small, large}, PlacementRequest{Arch: "amd64", CPUs: 2, MemoryMiB: 1024, DiskGiB: 8, Large: true})
 	require.NoError(t, err)
 	require.Empty(t, problems)
 	require.Equal(t, "large", chosen.Name)

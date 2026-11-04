@@ -59,6 +59,25 @@ type modelList struct {
 	// setCatalog replaces the models with an addon's catalog, which is in
 	// prime's shape (see catalogModels).
 	setCatalog func(def map[string]any, models []map[string]any, staged map[string]any)
+	// setHeaders adds the headers an addon's catalog asks every request to
+	// the provider to carry.
+	setHeaders func(def map[string]any, headers map[string]string)
+}
+
+// mergeHeaders sets headers into the object at def[key...], creating it.
+func mergeHeaders(def map[string]any, headers map[string]string, path ...string) {
+	obj := def
+	for _, key := range path {
+		next, ok := obj[key].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			obj[key] = next
+		}
+		obj = next
+	}
+	for k, v := range headers {
+		obj[k] = v
+	}
 }
 
 // primeModelList: prime keeps "baseUrl" and "models": [{"id", "name", ...}].
@@ -99,6 +118,7 @@ var primeModelList = modelList{
 		}
 		def["models"] = list
 	},
+	setHeaders: func(def map[string]any, headers map[string]string) { mergeHeaders(def, headers, "headers") },
 }
 
 // opencodeModelList: opencode keeps "settings.baseURL" (or "options.baseURL")
@@ -173,6 +193,7 @@ var opencodeModelList = modelList{
 		}
 		def["models"] = out
 	},
+	setHeaders: func(def map[string]any, headers map[string]string) { mergeHeaders(def, headers, "options", "headers") },
 }
 
 // rewriteModels asks every provider of one configuration file for its models
@@ -196,12 +217,19 @@ func rewriteModels(cfg DaemonConfig, executor, path string, keys map[string]stri
 			continue
 		}
 		staged := shape.get(def)
-		if addon, models, err := catalogModels(cfg, name, base, key); addon != "" {
+		if addon, answer, err := catalogModels(cfg, name, base, key); addon != "" {
 			if err == nil {
-				shape.setCatalog(def, models, staged)
+				shape.setCatalog(def, answer.Models, staged)
+				if len(answer.Headers) > 0 {
+					shape.setHeaders(def, answer.Headers)
+				}
 				changed = true
 				cfg.logf("%s: provider %s offers %d model(s) to this key, sized by the %s addon: %s",
-					executor, name, len(models), addon, strings.Join(modelIDsOf(models), ", "))
+					executor, name, len(answer.Models), addon, strings.Join(modelIDsOf(answer.Models), ", "))
+				if len(answer.Headers) > 0 {
+					cfg.logf("%s: provider %s requests carry the header(s) the %s addon asks for: %s",
+						executor, name, addon, strings.Join(sortedStrings(answer.Headers), ", "))
+				}
 				continue
 			}
 			cfg.logf("%s: the %s addon could not list provider %s's models, asking the provider: %v", executor, addon, name, err)
@@ -394,10 +422,15 @@ func containsString(list []string, s string) bool {
 //	"box": {"catalog": {"providers": ["myprovider"], "command": ["node", "box-catalog.mjs"]}}
 //
 // boxd runs the command in the addon's directory with one JSON object on
-// stdin, {"provider", "baseUrl", "apiKey"} (the key never goes into argv or
-// the environment), and reads {"models": [...]} from stdout: prime's model
+// stdin, {"provider", "baseUrl", "apiKey", "box"} (the key never goes into argv
+// or the environment; box is the guest's hostname), and reads
+// {"models": [...], "headers": {...}} from stdout. models are prime's model
 // entries, each with an id and, where the addon knows them, contextWindow,
-// maxTokens, reasoning and the rest. The answer is the list, sizes included.
+// maxTokens, reasoning and the rest: the answer is the list, sizes included.
+// headers, optional, are sent with every request to the provider: what an
+// extension would add per request, which prime-agent 0.10.2 does not run (its
+// packages carry skills, prompts and themes only). Header names only reach
+// the journal, never their values.
 
 // catalogTimeout bounds one catalog command, which usually asks the provider.
 const catalogTimeout = 20 * time.Second
@@ -414,17 +447,24 @@ type addonCatalog struct {
 	} `json:"box"`
 }
 
+// catalogAnswer is what a catalog command prints.
+type catalogAnswer struct {
+	Models  []map[string]any  `json:"models"`
+	Headers map[string]string `json:"headers"`
+}
+
 // catalogModels runs the catalog command of the addon that declares provider,
 // if any. addon is "" when no addon declares it.
-func catalogModels(cfg DaemonConfig, provider, base, key string) (addon string, models []map[string]any, err error) {
+func catalogModels(cfg DaemonConfig, provider, base, key string) (addon string, answer catalogAnswer, err error) {
 	dir, command := findCatalog(cfg.addonsDir(), provider)
 	if dir == "" {
-		return "", nil, nil
+		return "", answer, nil
 	}
 	addon = filepath.Base(dir)
-	in, err := json.Marshal(map[string]string{"provider": provider, "baseUrl": base, "apiKey": key})
+	host, _ := os.Hostname()
+	in, err := json.Marshal(map[string]string{"provider": provider, "baseUrl": base, "apiKey": key, "box": host})
 	if err != nil {
-		return addon, nil, err
+		return addon, answer, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), catalogTimeout)
 	defer cancel()
@@ -435,23 +475,40 @@ func catalogModels(cfg DaemonConfig, provider, base, key string) (addon string, 
 	out.limit, errOut.limit = catalogLimit, 4096
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	if err := cmd.Run(); err != nil {
-		return addon, nil, fmt.Errorf("%v: %s", err, oneLine(errOut.String(), 200))
+		return addon, catalogAnswer{}, fmt.Errorf("%v: %s", err, oneLine(errOut.String(), 200))
 	}
-	var answer struct {
-		Models []map[string]any `json:"models"`
+	var raw catalogAnswer
+	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+		return addon, catalogAnswer{}, fmt.Errorf("the answer is not {\"models\": [...]}: %w", err)
 	}
-	if err := json.Unmarshal(out.Bytes(), &answer); err != nil {
-		return addon, nil, fmt.Errorf("the answer is not {\"models\": [...]}: %w", err)
-	}
-	for _, m := range answer.Models {
+	for _, m := range raw.Models {
 		if id, ok := m["id"].(string); ok && strings.TrimSpace(id) != "" {
-			models = append(models, m)
+			answer.Models = append(answer.Models, m)
 		}
 	}
-	if len(models) == 0 {
-		return addon, nil, fmt.Errorf("the answer names no model")
+	if len(answer.Models) == 0 {
+		return addon, catalogAnswer{}, fmt.Errorf("the answer names no model")
 	}
-	return addon, models, nil
+	for k, v := range raw.Headers {
+		if strings.TrimSpace(k) == "" || strings.ContainsAny(k+v, "\r\n") {
+			return addon, catalogAnswer{}, fmt.Errorf("the answer has an invalid header %q", k)
+		}
+		if answer.Headers == nil {
+			answer.Headers = map[string]string{}
+		}
+		answer.Headers[k] = v
+	}
+	return addon, answer, nil
+}
+
+// sortedStrings returns the keys of m, sorted.
+func sortedStrings(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // findCatalog finds the addon that declares a catalog for provider.

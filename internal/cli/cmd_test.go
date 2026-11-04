@@ -260,7 +260,7 @@ func TestCreateWaitFailureKeepsTheDiskWhenTheJobCannotBeStopped(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	ta.cluster.stopErr = errors.New("server refused the delete")
 
-	rc := ta.run(t, "create", "dev1", "--image", "1.0.0", "--cpus", "8", "--memory-mib", "8192", "--disk-gib", "1", "--timeout", "30s")
+	rc := ta.run(t, "create", "dev1", "--image", "1.0.0", "--cpus", "8", "--memory-mib", "8192", "--disk-gib", "1", "--timeout", "30s", "--large")
 	require.Equal(t, ExitTimeout, rc, "the timeout is still a timeout")
 	require.Contains(t, ta.errOut.String(), "could not delete the job box-dev1")
 	require.Contains(t, ta.errOut.String(), "disk box-dev1 was kept")
@@ -276,7 +276,7 @@ func TestCreatePlacementFailureIsPlainWords(t *testing.T) {
 			"box": {NodesEvaluated: 3, DimensionExhausted: map[string]int{"memory": 3}},
 		}
 	}
-	rc := ta.run(t, "create", "dev1", "--image", "1.0.0", "--cpus", "8", "--memory-mib", "8192", "--disk-gib", "4")
+	rc := ta.run(t, "create", "dev1", "--image", "1.0.0", "--cpus", "8", "--memory-mib", "8192", "--disk-gib", "4", "--large")
 	require.Equal(t, ExitError, rc)
 	require.Contains(t, ta.errOut.String(), "could not place the box")
 	require.Contains(t, ta.errOut.String(), "ran out of memory")
@@ -430,7 +430,7 @@ func TestResizeCPUsAndMemory(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	ta.addBox(t, "dev1")
 	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
-	require.Equal(t, ExitOK, ta.run(t, "resize", "dev1", "--cpus", "4", "--memory-mib", "2048"), ta.errOut.String())
+	require.Equal(t, ExitOK, ta.run(t, "resize", "dev1", "--cpus", "4", "--memory-mib", "2048", "--large"), ta.errOut.String())
 	require.Contains(t, ta.errOut.String(), "cpus 2 -> 4")
 	job := ta.cluster.jobs["box-dev1"]
 	task := job.TaskGroups[0].Tasks[0]
@@ -739,4 +739,28 @@ func TestGlobalFlagsStillWorkBeforeTheCommand(t *testing.T) {
 	require.Equal(t, ExitOK, rc, ta.errOut.String())
 	require.True(t, ta.JSON)
 	require.Equal(t, []string{"uname", "-a"}, ta.guest.calls[0])
+}
+
+// TestCreateRefusesMoreThanAQuarterOfANode: a box that would take a large part
+// of a shared node needs --large, and the refusal says how to start smaller.
+func TestCreateRefusesMoreThanAQuarterOfANode(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	rc := ta.run(t, "create", "dev1", "--image", "1.0.0", "--cpus", "8", "--memory-mib", "8192", "--disk-gib", "4")
+	require.Equal(t, ExitError, rc)
+	msg := ta.errOut.String()
+	require.Contains(t, msg, "more than a quarter of the node")
+	require.Contains(t, msg, "box resize")
+	require.Contains(t, msg, "--large")
+	require.Empty(t, ta.cluster.jobs, "nothing was registered")
+	require.Empty(t, ta.cluster.volumes, "no disk was created")
+}
+
+// TestResizeRefusesMoreThanAQuarterOfTheNode: the same share holds when a box
+// grows.
+func TestResizeRefusesMoreThanAQuarterOfTheNode(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.addBox(t, "dev1")
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
+	require.Equal(t, ExitUsage, ta.run(t, "resize", "dev1", "--cpus", "8"))
+	require.Contains(t, ta.errOut.String(), "more than a quarter of the node")
 }

@@ -60,7 +60,8 @@ event to that journal as one line for a person, and to the session's
 ```
 
 A running turn that has been silent for two minutes writes a `still working`
-line with its last event. The driver adds its own lines to the task's stderr:
+line with its last event. The driver adds its own lines to the task's stdout, between whole lines of the
+journal, so the one log shows both:
 every command run in the box through `alloc exec` (`box run`, `box cp`, the
 CLI's `boxctl` calls), when it started, every two minutes while it runs, and
 its exit code, with the command cut to 200 characters.

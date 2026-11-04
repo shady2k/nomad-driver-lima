@@ -819,6 +819,13 @@ func (d *Driver) TaskStats(ctx context.Context, taskID string, interval time.Dur
 	if h == nil {
 		return nil, fmt.Errorf("task %q is not running", taskID)
 	}
+	h.mu.Lock()
+	first := !h.statsAsked
+	h.statsAsked = true
+	h.mu.Unlock()
+	if first && h.tc != nil && h.tc.AllocID != "" {
+		d.emit(h.tc, "stats", fmt.Sprintf("Nomad asks for the resource usage of box %s every %s", h.boxID, interval))
+	}
 	ch := make(chan *drivers.TaskResourceUsage, 1)
 	statsCtx, cancel := context.WithCancel(ctx)
 	go func() {

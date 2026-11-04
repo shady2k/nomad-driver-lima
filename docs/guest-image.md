@@ -195,12 +195,16 @@ opencode's `opencode.json`), from the first of these that answers:
    ```
 
    boxd runs the command in the addon's directory, with
-   `{"provider", "baseUrl", "apiKey"}` as one JSON object on stdin (the key is
-   never in argv or the environment), and reads `{"models": [...]}` from stdout:
+   `{"provider", "baseUrl", "apiKey", "box"}` as one JSON object on stdin (the
+   key is never in argv or the environment; `box` is the guest's hostname), and
+   reads `{"models": [...], "headers": {...}}` from stdout. `models` are
    prime's model entries, each with an `id` and what the addon knows of it,
    `contextWindow`, `maxTokens`, `reasoning`, `compat`. That answer is the list,
    sizes included; opencode gets the sizes as `limit.context` and
-   `limit.output`. The command has 20 seconds.
+   `limit.output`. `headers`, optional, go with every request to the provider
+   (prime's `headers`, opencode's `options.headers`): what a Pi extension would
+   add per request, since prime-agent 0.10.2 runs no extension code. The
+   journal names the headers, never their values. The command has 20 seconds.
 2. **The provider's own list**, `GET <baseUrl>/models` with the key. An
    OpenAI-compatible provider names the models but not their size, so a model
    keeps the size the staged definition gives it, and one the definition does

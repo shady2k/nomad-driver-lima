@@ -50,9 +50,12 @@ running). A non-zero exit is always a sentence you can act on.
   `--arch amd64` or `--arch arm64`. `box capacity` lists both, never add their
   free resources together.
 - **Take the newest image** from `box images`; an older one lacks fixes.
-- **The defaults (2 vCPU, 2048 MiB, 8 GiB) fit an agent session.** Ask for more
-  only for a real build or test run, and leave room for the other agents on
-  the node.
+- **Start at the defaults (2 vCPU, 2048 MiB, 8 GiB) and grow when the work
+  shows it needs more.** They fit an agent session. The node is shared with
+  every other agent: `box resize` adds CPU or memory (a restart, the disk is
+  kept) and grows the disk, so there is no reason to ask for more up front.
+  A box larger than a quarter of a node is refused without `--large`; pass it
+  only for a build or test run that you know needs it, and say why.
 - **The model is one the box's key may use**, as `<provider>/<model>`. The box
   asks its provider when a session starts, and `box session new` refuses any
   other model with the list there is; `box executors show` shows the staged list.

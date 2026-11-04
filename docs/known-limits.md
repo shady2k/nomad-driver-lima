@@ -143,6 +143,17 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   OpenAI-compatible `/models` does not say how large a model's context is: an
   addon catalog (`docs/guest-image.md`) or the staged definition has to, and a
   model neither sizes runs with the executor's default.
+- **prime runs no extension code, so per-request headers are static.**
+  prime-agent 0.10.2 packages carry skills, prompts and themes; an extension's
+  code that adds a header per request never runs. An addon catalog's `headers`
+  go into the provider definition instead, one value for every session of the
+  box: a gateway that routes by a session header (`x-opencode-session`) sees
+  one session per box, not per `box session`.
+- **Nomad's graphs of a box are still empty on the cluster.** The driver
+  samples the VM processes and the tests see the samples, but the cluster's
+  allocation stats have none and no error says why. The task events say when
+  Nomad first asked for a box's resource usage and when the first sample went
+  out, which is where the next look starts.
 - **A box whose executors hold a template item needs Vault on the node.** The task
   carries a `vault` block and a template that reads it, so a client without a
   `vault` block fails the allocation instead of starting the box. A variable with

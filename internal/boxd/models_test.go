@@ -187,3 +187,44 @@ func TestDiscoverModelsFallsBackWhenTheCatalogFails(t *testing.T) {
 		t.Fatalf("models = %v", models)
 	}
 }
+
+// TestDiscoverModelsSetsTheAddonHeaders: headers a catalog asks for go into
+// the provider definition, which is how prime sends them with every request,
+// and the journal names them without their values.
+func TestDiscoverModelsSetsTheAddonHeaders(t *testing.T) {
+	cfg := testConfig(t)
+	var lines []string
+	cfg.Logf = func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) }
+	srv := gateway(t, "k-1", "plain")
+	stagePrime(t, cfg, srv.URL)
+	addon(t, cfg, `in=$(cat)
+case "$in" in *'"box":"'*) ;; *) echo "no box on stdin" >&2; exit 3;; esac
+echo '{"models":[{"id":"luna"}],"headers":{"x-opencode-session":"value-1"}}'
+`)
+	require(t, prepareExecutorDirs(cfg))
+	doc, err := readJSONObject(filepath.Join(cfg.executorsDir(), "prime", "models.json"))
+	require(t, err)
+	headers, _ := doc["providers"].(map[string]any)["gw"].(map[string]any)["headers"].(map[string]any)
+	if headers["x-opencode-session"] != "value-1" {
+		t.Fatalf("headers = %v", headers)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "x-opencode-session") || strings.Contains(joined, "value-1") {
+		t.Fatalf("journal = %s", joined)
+	}
+}
+
+// TestCatalogRefusesAHeaderThatSplitsTheRequest: a value with a newline would
+// smuggle a header, so the whole answer is refused.
+func TestCatalogRefusesAHeaderThatSplitsTheRequest(t *testing.T) {
+	cfg := testConfig(t)
+	srv := gateway(t, "k-1", "sized")
+	stagePrime(t, cfg, srv.URL)
+	addon(t, cfg, `cat >/dev/null; printf '{"models":[{"id":"luna"}],"headers":{"x-a":"v\\r\\nx-b: 1"}}'
+`)
+	require(t, prepareExecutorDirs(cfg))
+	models, _ := ExecutorModels(cfg, "prime")
+	if strings.Join(models, ",") != "gw/sized" {
+		t.Fatalf("models = %v", models)
+	}
+}

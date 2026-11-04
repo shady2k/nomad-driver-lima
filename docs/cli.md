@@ -54,12 +54,18 @@ waits until the box is running.
 | `--memory-mib N` | 2048 | guest RAM: an agent session with its tools needs it |
 | `--disk-gib N` | 8 | disk size (it can only grow later) |
 | `--node NAME` | – | pin the box to this node |
+| `--large` | false | allow more than a quarter of the node's CPU, memory or disk |
 | `--vault-role ROLE` | `BOX_VAULT_ROLE`, else the cluster's default role | the Vault role the box reads its secrets with, used when the executors hold a template item (see "Executor credentials") |
 | `--timeout D` | 10m | how long to wait for it to run |
 | `--wait` | true | wait until it is running |
 
 A box id is `[a-z0-9-]{1,40}`. A failed create removes the half-made box, so a
 failure leaves no disk behind.
+
+A node is shared by every agent's boxes, so one box takes at most a quarter of
+a node's CPU, memory or disk: a larger request names the node and what it asked
+for, and is refused unless `--large` is given. Start at the defaults and grow
+with `box resize`, which holds to the same quarter.
 
 ### `box ls`
 
@@ -85,6 +91,7 @@ refuses to ask from a non-interactive shell.
 
 Changes the size of a box. It is an **offline** change: the VM stops, is edited
 and starts again. Memory must be at least 256 MiB, and the disk can only grow.
+More than a quarter of the node needs `--large`, as with `box create`.
 
 ## Inside a box
 

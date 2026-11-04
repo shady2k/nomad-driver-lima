@@ -137,6 +137,18 @@ func (d *Driver) streamStats(ctx context.Context, h *taskHandle, interval time.D
 			case <-h.done:
 				return
 			}
+			h.mu.Lock()
+			first := !h.statsSent
+			h.statsSent = true
+			h.mu.Unlock()
+			if first && h.tc != nil && h.tc.AllocID != "" {
+				var rss uint64
+				if usage.ResourceUsage != nil && usage.ResourceUsage.MemoryStats != nil {
+					rss = usage.ResourceUsage.MemoryStats.RSS
+				}
+				d.emit(h.tc, "stats", fmt.Sprintf("Nomad has the first resource usage sample of box %s (VM processes %d MiB resident)",
+					h.boxID, rss>>20))
+			}
 		}
 	}
 }

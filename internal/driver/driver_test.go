@@ -625,7 +625,7 @@ func TestExecReturnsWhenStdinStaysOpen(t *testing.T) {
 	var notes syncBuffer
 	h := d.tasks.Get(tc.ID)
 	h.mu.Lock()
-	h.logErr = &notes
+	h.logOut = &notes
 	h.mu.Unlock()
 
 	stdin, keepOpen := io.Pipe()

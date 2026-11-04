@@ -50,10 +50,14 @@ type taskHandle struct {
 	doneOnce sync.Once
 
 	logCancel context.CancelFunc
-	// logErr is the task's stderr stream while the guest logs run; exec
+	// logOut is the task's stdout stream while the guest logs run; exec
 	// commands are noted there (see noteExec).
-	logErr    io.Writer
-	watchStop context.CancelFunc
+	logOut io.Writer
+	// statsAsked and statsSent make the stats events below happen once per
+	// task: when Nomad first asks for the box's resource usage, and when the
+	// first sample went out.
+	statsAsked, statsSent bool
+	watchStop             context.CancelFunc
 
 	stats *taskStats
 }
