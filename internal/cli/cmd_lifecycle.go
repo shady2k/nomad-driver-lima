@@ -84,7 +84,7 @@ func (a *App) cmdStart(ctx context.Context, args []string) error {
 	}
 	resp, err := a.Nomad.RegisterJob(ctx, engineered)
 	if err != nil {
-		return wrapf(err, "Nomad rejected the job %s", BoxJobName(id))
+		return wrapf(err, "Nomad rejected the job %s%s", BoxJobName(id), registerDenied(err, BoxVolumeName(id)))
 	}
 	evalID := ""
 	if resp != nil {
@@ -248,7 +248,7 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 	}
 	resp, err := a.Nomad.RegisterJob(ctx, engineered)
 	if err != nil {
-		return wrapf(err, "Nomad rejected the new size for box %s", id)
+		return wrapf(err, "Nomad rejected the new size for box %s%s", id, registerDenied(err, BoxVolumeName(id)))
 	}
 	evalID := ""
 	if resp != nil {

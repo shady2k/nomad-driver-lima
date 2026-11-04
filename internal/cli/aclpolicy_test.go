@@ -71,6 +71,13 @@ func TestBoxOperatorPolicyGrantsWhatTheCommandNeeds(t *testing.T) {
 	require.False(t, operator.AllowVariableOperation("default", "other/secret", acl.VariablesCapabilityRead, nil))
 	require.False(t, operator.AllowVariableOperation("agent-workers", boxExecutorsVariable, acl.VariablesCapabilityRead, nil))
 
+	// Registering the box job mounts its disk: Nomad checks the volume by name,
+	// apart from submit-job, and refuses the job without it.
+	require.True(t, operator.AllowHostVolumeOperation(BoxVolumeName("dev1"), acl.HostVolumeCapabilityMountReadWrite),
+		"box create registers a job that mounts %s", BoxVolumeName("dev1"))
+	require.False(t, operator.AllowHostVolumeOperation("other-disk", acl.HostVolumeCapabilityMountReadOnly),
+		"only the boxes' own disks")
+
 	// Nodes: read for box capacity, never write.
 	require.True(t, operator.AllowNodeRead(), "box capacity reads the nodes")
 	require.False(t, operator.AllowNodeWrite())

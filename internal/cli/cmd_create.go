@@ -182,7 +182,7 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		case !probe.Found:
 			// The job is definitively gone: the disk has no box left to serve.
 			a.discardVolume(ctx, created)
-			return wrapf(err, "Nomad rejected the box job %s", BoxJobName(id))
+			return wrapf(err, "Nomad rejected the box job %s%s", BoxJobName(id), registerDenied(err, BoxVolumeName(id)))
 		case !probe.IsBox:
 			return errorf("the job %s exists but is not a box (it has no meta.box = \"true\"), so the disk %s was kept: "+
 				"`nomad job status %s` shows what job that name belongs to", BoxJobName(id), created.ID, BoxJobName(id))

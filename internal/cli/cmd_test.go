@@ -180,6 +180,31 @@ func TestCreateRegisterFailureDeletesVolume(t *testing.T) {
 	require.Empty(t, ta.cluster.volumes, "a disk no box uses is deleted again")
 }
 
+func TestCreateRegisterDeniedNamesTheMissingRules(t *testing.T) {
+	// Nomad answers a refused registration with a bare "Permission denied";
+	// the command says which rules a box job needs.
+	ta := newTestApp(t, indexJSON)
+	ta.cluster.registerErr = deniedErr{}
+	rc := ta.run(t, "create", "dev1", "--image", "1.0.0", "--cpus", "1", "--memory-mib", "512", "--disk-gib", "1")
+	require.Equal(t, ExitError, rc)
+	require.Contains(t, ta.errOut.String(), "Permission denied")
+	require.Contains(t, ta.errOut.String(), `host_volume "box-dev1" with mount-readwrite`)
+	require.Contains(t, ta.errOut.String(), "submit-job")
+	require.Empty(t, ta.cluster.volumes)
+
+	// Any other refusal is reported as it is.
+	ta = newTestApp(t, indexJSON)
+	ta.cluster.registerErr = errors.New("job validation failed")
+	ta.run(t, "create", "dev1", "--image", "1.0.0", "--cpus", "1", "--memory-mib", "512", "--disk-gib", "1")
+	require.NotContains(t, ta.errOut.String(), "host_volume")
+}
+
+// deniedErr is how the Nomad API client reports a 403.
+type deniedErr struct{}
+
+func (deniedErr) Error() string   { return "Unexpected response code: 403 (Permission denied)" }
+func (deniedErr) StatusCode() int { return 403 }
+
 func TestCreateRegisterErrorKeepsTheVolumeWhenTheJobExists(t *testing.T) {
 	// The server took the job and the answer was lost on the way back: the
 	// disk must stay, because the box is running on it.

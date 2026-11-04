@@ -47,6 +47,7 @@ What it grants, and the command that needs it:
 | `alloc-exec` | `box run`, `ssh`, `cp` and every guest command (`boxctl`) |
 | `read-logs` | `box logs` |
 | `host-volume-write` | `box create` makes the disk `box-<id>`, `box rm` deletes it, `box resize` raises it |
+| `host_volume "box-*"` `mount-readwrite` | `box create`, `start`, `resize`: a job that mounts its disk `box-<id>` is refused without it, whatever the namespace grants |
 | `node` `read` | `box capacity` |
 | `variables` `read`/`write`/`destroy` on `nomad/jobs/box-executors` | `box executors set`, `show`, `delete` |
 

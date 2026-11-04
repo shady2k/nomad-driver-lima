@@ -163,6 +163,31 @@ func isNotFoundErr(err error) bool {
 	return strings.Contains(msg, "404") || strings.Contains(strings.ToLower(msg), "not found")
 }
 
+// isPermissionDeniedErr reports whether Nomad answered 403.
+func isPermissionDeniedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if s, ok := err.(interface{ StatusCode() int }); ok {
+		return s.StatusCode() == 403
+	}
+	return strings.Contains(err.Error(), "403")
+}
+
+// registerDenied adds to a refused job registration what the token lacks.
+// Nomad answers a bare "Permission denied" on purpose and never names the
+// missing rule, and submit-job is not the whole story: a job that mounts a host
+// volume also needs the volume's own rule, which a token can lack while it has
+// every namespace capability.
+func registerDenied(err error, volume string) string {
+	if !isPermissionDeniedErr(err) {
+		return ""
+	}
+	return fmt.Sprintf(" -- the Nomad token needs submit-job in the box namespace and "+
+		"host_volume %q with mount-readwrite (or a pattern such as \"box-*\"); "+
+		"deploy/acl/box-operator.policy.hcl grants both", volume)
+}
+
 // jobAllocations groups the cluster allocations by job.
 func (a *App) jobAllocations(ctx context.Context) (map[string][]*api.AllocationListStub, error) {
 	stubs, err := a.Nomad.Allocations(ctx)

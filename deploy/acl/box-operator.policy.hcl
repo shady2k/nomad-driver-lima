@@ -24,6 +24,9 @@
 #                      box resize raises it; the capability implies
 #                      host-volume-create, host-volume-register,
 #                      host-volume-delete and host-volume-read
+#   host_volume box-*  box create/start/resize register a job that mounts its
+#   mount-readwrite    disk box-<id>: Nomad checks this per volume, apart from
+#                      submit-job, and refuses the job without it
 #   node read          box capacity: node list, node info and a node's
 #                      allocations (the last one also needs read-job)
 #   variables write    box executors set/show/delete, on the one path
@@ -49,6 +52,10 @@ namespace "default" {
       capabilities = ["read", "write", "destroy"]
     }
   }
+}
+
+host_volume "box-*" {
+  capabilities = ["mount-readwrite"]
 }
 
 node {
