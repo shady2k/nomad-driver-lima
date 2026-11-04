@@ -1,6 +1,6 @@
 {
   "name": "box",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Run work in a box: a Linux VM on a Nomad cluster, driven by the box CLI. The skill teaches an agent the box workflow - create, session, wait, cp - without shelling in or polling.",
   "author": {
     "name": "shady2k"

@@ -29,3 +29,21 @@ func TestLineWriterKeepsLinesWhole(t *testing.T) {
 		t.Fatalf("lines = %q", got)
 	}
 }
+
+// TestQuietExecIsOnlyTheReadingBoxctlCalls: the CLI's polling stays out of the
+// task log; whatever changes something stays in it.
+func TestQuietExecIsOnlyTheReadingBoxctlCalls(t *testing.T) {
+	b := "/usr/local/bin/boxctl"
+	for _, c := range [][]string{{b, "info"}, {b, "wait", "s-1"}, {b, "events", "s-1"}, {b, "session", "ls"},
+		{b, "session", "get", "s-1"}, {b, "prepare", "wait", "--timeout", "30"}, {b, "prepare", "get"}} {
+		if !quietExec(c) {
+			t.Errorf("%v should stay out of the task log", c)
+		}
+	}
+	for _, c := range [][]string{{b, "session", "new"}, {b, "send", "s-1"}, {b, "cancel", "s-1"}, {b, "prepare", "start"},
+		{b, "prepare", "cancel"}, {b, "reload"}, {"git", "clone", "x"}, {"tar", "-xf", "-"}, {"boxctl", "info"}} {
+		if quietExec(c) {
+			t.Errorf("%v should be in the task log", c)
+		}
+	}
+}

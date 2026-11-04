@@ -30,6 +30,12 @@ func (d *Driver) ExecTaskStreaming(ctx context.Context, taskID string, execOptio
 		return nil, fmt.Errorf("exec needs a command")
 	}
 	cmd := d.boxm.Lima().ShellCmd(ctx, h.boxID, execOptions.Command)
+	if quietExec(execOptions.Command) {
+		if execOptions.Tty {
+			return d.execWithTTY(ctx, cmd, execOptions)
+		}
+		return d.execPipes(cmd, execOptions)
+	}
 	label := execLabel(execOptions.Command)
 	started := time.Now()
 	h.noteExec("started: %s", label)
@@ -45,6 +51,25 @@ func (d *Driver) ExecTaskStreaming(ctx context.Context, taskID string, execOptio
 	res, err := d.execPipes(cmd, execOptions)
 	h.noteExecEnd(label, started, res, err)
 	return res, err
+}
+
+// quietExec reports whether a command only reads boxd's state: the CLI's
+// boxctl calls that ask how a box, a session or a preparation is doing, which
+// it repeats while it waits. They change nothing, and what they report is in
+// boxd's own journal lines already, so the task log does not list them.
+func quietExec(command []string) bool {
+	if len(command) < 2 || command[0] != "/usr/local/bin/boxctl" {
+		return false
+	}
+	switch command[1] {
+	case "info", "events", "wait":
+		return true
+	case "session":
+		return len(command) > 2 && (command[2] == "ls" || command[2] == "get")
+	case "prepare":
+		return len(command) > 2 && (command[2] == "get" || command[2] == "wait")
+	}
+	return false
 }
 
 // noteExecEnd notes how a guest command ended.

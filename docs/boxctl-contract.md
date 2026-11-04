@@ -64,7 +64,10 @@ line with its last event. The driver adds its own lines to the task's stdout, be
 journal, so the one log shows both:
 every command run in the box through `alloc exec` (`box run`, `box cp`, the
 CLI's `boxctl` calls), when it started, every two minutes while it runs, and
-its exit code, with the command cut to 200 characters.
+its exit code, with the command cut to 200 characters. The CLI's boxctl calls
+that only read state (`info`, `session ls|get`, `wait`, `events`, `prepare
+get|wait`) are not listed: the CLI repeats them while it waits, and what they
+report is in boxd's own lines.
 
 ## Commands
 
