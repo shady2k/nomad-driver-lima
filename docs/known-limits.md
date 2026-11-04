@@ -143,6 +143,10 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   OpenAI-compatible `/models` does not say how large a model's context is: an
   addon catalog (`docs/guest-image.md`) or the staged definition has to, and a
   model neither sizes runs with the executor's default.
+- **The box's default user reads the credentials.** They are a 9p mount of the
+  host's files, which carry the runtime user's uid, and the guest's default user
+  has the same uid. That user has passwordless sudo, so a root-only copy would
+  not keep it out either; an agent in a box can read its own executor's key.
 - **`--repo` clones without credentials.** A box has no git credentials of the
   caller's, so `box prepare --repo` reaches public repositories and those the
   box's network may read anonymously. A private one goes in with `--from` (a

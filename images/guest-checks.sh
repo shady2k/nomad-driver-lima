@@ -290,9 +290,10 @@ fi
 
 # --- the credentials live on a tmpfs and nowhere else -------------------------
 printf '\n== the executor credentials\n'
-# What the Nomad driver does: a root-only directory below /run/box/secrets, one
-# per executor, written after boot. The layout is the task's secrets directory,
-# copied as it is (internal/box/box.go, CopyTaskFiles).
+# In a box /run/box/secrets is the driver's read-only mount of the task's
+# secrets directory on the host (internal/box/files.go). The image has no such
+# mount, so the check stands in for it with a root-only directory on the tmpfs,
+# the task's layout as it is, and checks what boxd does with it.
 SECRETS=/run/box/secrets
 RUNTIME=/run/boxd
 # The driver creates the secrets directory when the task starts, root and 0700;
@@ -304,8 +305,8 @@ for dir in "$SECRETS" "$RUNTIME"; do
 done
 
 TEST_TOKEN="box-check-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-# The two steps internal/box/box.go does when it copies a task's secrets in:
-# the directory root and 0700, then everything below it owner-only.
+# The secrets directory as the check stands it in: root and 0700, everything
+# below it owner-only.
 install -d -m 0700 -o root -g root "$SECRETS/prime"
 printf '# a credential of this check, written the way the driver delivers one\nBOX_CHECK_TOKEN=%s\n' \
   "$TEST_TOKEN" > "$SECRETS/prime/env"

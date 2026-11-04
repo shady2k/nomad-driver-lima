@@ -3,13 +3,16 @@ Description=boxd: box guest agent-session daemon
 Documentation=https://github.com/shady2k/nomad-driver-lima
 After=local-fs.target network.target
 Wants=local-fs.target
+# The task files and the executor credentials are read-only mounts of the
+# host (the box driver's files.go); boxd reads them as it starts.
+RequiresMountsFor=/run/box/secrets /etc/box/local
 
 [Service]
 Type=simple
 # Sessions and transcripts live on the box disk (/var/lib/boxd). Nothing secret
-# does: the executor credentials arrive on the guest's tmpfs (/run/box/secrets,
-# mode 0700 root, written by the Nomad driver) and everything boxd derives from
-# them lives in the runtime directory (/run/boxd), which a reboot removes. The
+# does: the executor credentials are /run/box/secrets, a read-only mount of the
+# box's files on the host's tmpfs, and everything boxd derives from them lives
+# in the runtime directory (/run/boxd), which a reboot removes. The
 # socket is recreated per boot too.
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 StateDirectory=boxd

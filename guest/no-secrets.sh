@@ -85,6 +85,12 @@ for dir in /run/box/secrets /run/boxd; do
     continue
   fi
   fstype=$(findmnt -no FSTYPE --target "$dir" 2>/dev/null || echo unknown)
+  # In a box /run/box/secrets is the driver's read-only 9p (or virtiofs)
+  # mount of the host's tmpfs: not the box disk either.
+  if [ "$dir" = /run/box/secrets ] && { [ "$fstype" = 9p ] || [ "$fstype" = virtiofs ]; }; then
+    ok "$dir is the read-only mount of the host's tmpfs ($fstype)"
+    continue
+  fi
   if [ "$fstype" != tmpfs ]; then
     bad "$dir is on $fstype, not tmpfs: a credential there would reach the disk"
     continue

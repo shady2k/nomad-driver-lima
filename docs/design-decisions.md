@@ -137,11 +137,12 @@ and versions named in "What was measured".
   resumes from the transcript on the next send. An agent's
   `session/request_permission` picks the first allow option, because a box has no
   human to ask.
-- **Credentials live on a tmpfs, never on the disk.** The driver writes the
-  task's `secrets/` directory to `/run/box/secrets` (root-only, mode 0700) and
-  boxd derives everything it needs below `/run/boxd`. Sessions and transcripts
-  stay on the disk; no secret does. The image build and the guest checks fail if
-  any executor credential location is non-empty.
+- **Credentials live on a tmpfs, never on the disk.** The task's `secrets/`
+  directory reaches the guest as `/run/box/secrets`, a read-only mount of the
+  box's files on the host's tmpfs, and boxd derives everything it needs below
+  `/run/boxd`. Sessions and transcripts stay on the disk; no secret does. The
+  image build and the guest checks fail if any executor credential location is
+  non-empty.
 - **An executor's HOME is on the disk, its credentials and configuration are
   not.** boxd gives each executor `HOME=/var/lib/boxd/homes/<executor>` and
   `XDG_CONFIG_HOME=/run/boxd/executors/<executor>-config`; the credentials stay in
@@ -153,14 +154,21 @@ and versions named in "What was measured".
   new download on every boot. The cost: what a harness writes into HOME by itself
   reaches the disk, so a harness that stores a credential in HOME (a login
   command, not the box's way of configuring it) would leave it there.
-- **Task files travel as a stream, never as a staged copy.** The driver reads
-  the task's files and writes them as a tar stream into the stdin of one
-  `limactl shell`; root in the guest unpacks it into a staging directory on the
-  tmpfs and moves it into place. Rejected: copying them first into a directory
-  the runtime user owns on the host and running `limactl copy`, which is what the
-  driver did up to v0.1.3 -- it wrote every credential to the host disk, and a
-  crash could leave it there. The driver removes that old directory when it
-  starts.
+- **Task files are a read-only mount, put in place before the VM boots.** The
+  driver puts the task's `local/` and `secrets/` files into
+  `/run/box-files/<box>` on the host's tmpfs (`files_root`), owned by the runtime
+  user, before it starts the VM; Lima mounts the two directories read-only at
+  `/etc/box/local` and `/run/box/secrets` (9p without a cache on qemu, virtiofs
+  on vz). The files are there from the guest's first second, after a reboot of
+  its own, and a re-render is visible at once (then `boxctl reload`). A stopped
+  box keeps none of them on the host. Rejected: copying them into the guest
+  after it booted, as a tar stream over `limactl shell` (up to v0.1.13): boxd
+  started before they arrived, a guest that rebooted by itself lost them until
+  the task restarted, and every fix of that was another mechanism. Also
+  rejected: the copy on the host disk the driver made up to v0.1.3. The cost:
+  9p shows the files as the runtime user's, whose uid is the guest's default
+  user's, so that user reads them directly; it has passwordless sudo anyway, so
+  root-only files in the guest were never a boundary from it.
 - **The key is read from Vault, never copied from a host.** An item named
   `prime/auth.json.tmpl` is Nomad template text holding a Vault path, not a key:
   `box create` embeds the text in the job and Nomad renders the file on the node

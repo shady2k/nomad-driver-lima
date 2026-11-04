@@ -7,11 +7,9 @@
 package box
 
 import (
-	"archive/tar"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,6 +70,10 @@ type Options struct {
 	// owner of everything this manager creates that Lima touches. Nil means the
 	// current user, which is an error when the driver runs as root.
 	Identity *identity.Identity
+	// FilesRoot holds every box's task files on the host, which the guest
+	// mounts read-only (files.go). It must be a tmpfs: the secrets are there.
+	// Default DefaultFilesRoot.
+	FilesRoot string
 }
 
 // Spec is everything the manager needs to create or adopt a box.
@@ -84,6 +86,10 @@ type Spec struct {
 	MemoryMiB   int
 	DiskGiB     int
 	VMType      string
+	// FilesDirInGuest and SecretsDirInGuest are where the guest mounts the
+	// task's local/ and secrets/ files (files.go); empty means the defaults.
+	FilesDirInGuest   string
+	SecretsDirInGuest string
 }
 
 // Validate checks the parts of the spec the driver cannot check from HCL.
@@ -146,6 +152,9 @@ func New(opts Options) (*Manager, error) {
 	}
 	if opts.SystemdRun == "" {
 		opts.SystemdRun = "systemd-run"
+	}
+	if opts.FilesRoot == "" {
+		opts.FilesRoot = DefaultFilesRoot()
 	}
 	if opts.Identity == nil {
 		id, err := identity.Resolve("")
@@ -403,7 +412,7 @@ func (b *Box) createInstance(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	content, err := renderLimaYAML(spec, imagePath)
+	content, err := renderLimaYAML(spec, imagePath, b.m.guestMounts(spec))
 	if err != nil {
 		return err
 	}
@@ -708,58 +717,11 @@ const (
 	boxSecretsDir = "secrets"
 )
 
-// DefaultSecretsDirInGuest is where the driver puts the task's secrets files: a
-// tmpfs of the guest, owned by root with mode 0700. boxd reads them there and
-// writes everything it derives from them into /run/boxd, also a tmpfs, so no
-// credential and no executor configuration reaches the box disk.
+// DefaultSecretsDirInGuest is where the guest sees the task's secrets files: a
+// read-only mount of the box's files on the host's tmpfs (files.go). boxd reads
+// them there and writes everything it derives from them into /run/boxd, a
+// tmpfs, so no credential and no executor configuration reaches the box disk.
 const DefaultSecretsDirInGuest = "/run/box/secrets"
-
-// tmpfsStagingRoot is the staging directory of a file copy: inside /run, so a
-// secret is never written to the disk even while it is being copied.
-const tmpfsStagingRoot = "/run/box"
-
-// CopyTaskFiles copies the files Nomad rendered into the task's local and
-// secrets directories into the guest: local files below localDirInGuest, secrets
-// below secretsDirInGuest. It returns the number of files.
-//
-// The secrets directory exists afterwards even when the box got no credentials,
-// because boxd reads it and its mode (0700, root) is what keeps the box user out
-// of it.
-func (b *Box) CopyTaskFiles(ctx context.Context, localDir, secretsDir, localDirInGuest, secretsDirInGuest string) (int, error) {
-	if localDirInGuest == "" {
-		localDirInGuest = "/etc/box"
-	}
-	if secretsDirInGuest == "" {
-		secretsDirInGuest = DefaultSecretsDirInGuest
-	}
-	localFiles, err := collectTaskFiles(localDir, boxLocalDir)
-	if err != nil {
-		return 0, fmt.Errorf("read task local directory %s: %w", localDir, err)
-	}
-	secretFiles, err := collectTaskFiles(secretsDir, boxSecretsDir)
-	if err != nil {
-		return 0, fmt.Errorf("read task secrets directory %s: %w", secretsDir, err)
-	}
-
-	count := 0
-	if len(localFiles) > 0 {
-		n, err := b.installTaskFiles(ctx, localFiles, filepath.Join(localDirInGuest, boxLocalDir), "0755")
-		if err != nil {
-			return count, err
-		}
-		count += n
-	}
-	n, err := b.installTaskFiles(ctx, secretFiles, secretsDirInGuest, "0700")
-	if err != nil {
-		return count, err
-	}
-	count += n
-	if count > 0 {
-		b.event("files", fmt.Sprintf("Copied %d task file(s) into the guest (%s, and the executor credentials in %s)",
-			count, filepath.Join(localDirInGuest, boxLocalDir), secretsDirInGuest))
-	}
-	return count, nil
-}
 
 // nomadSecretsMarker is the empty file Nomad puts into the tmpfs it mounts as a
 // task's secrets/ directory on Linux (allocdir's secretMarker). It is Nomad's,
@@ -801,90 +763,6 @@ func collectTaskFiles(root, prefix string) ([]taskFile, error) {
 		files[i].log = filepath.Join(prefix, files[i].rel)
 	}
 	return files, nil
-}
-
-// installTaskFiles puts the files into destDirInGuest. dirMode is the mode of the
-// destination tree (0755 for job files, 0700 for the secrets).
-//
-// The files travel as a tar stream on the stdin of one limactl shell: the driver
-// reads them from the task directory (it runs as the Nomad client, which can) and
-// writes them into the ssh connection, so no copy of a credential is ever written
-// on the host, not even for a moment, and a crash leaves none behind. In the guest
-// root unpacks the stream into a staging directory on the tmpfs and only then
-// copies it into place, so a broken stream never leaves half a tree in
-// destDirInGuest.
-func (b *Box) installTaskFiles(ctx context.Context, files []taskFile, destDirInGuest, dirMode string) (int, error) {
-	if !filepath.IsAbs(destDirInGuest) {
-		return 0, fmt.Errorf("the guest destination %q is not an absolute path", destDirInGuest)
-	}
-	if len(files) == 0 {
-		// The directory itself still has to exist with the right mode and owner.
-		script := fmt.Sprintf("set -eu; sudo -n install -d -m %s -o root -g root '%s'", dirMode, destDirInGuest)
-		if _, stderr, err := b.m.lima.Shell(ctx, b.spec.BoxID, []string{"bash", "-euo", "pipefail", "-c", script}); err != nil {
-			return 0, fmt.Errorf("create the guest directory %s: %w%s", destDirInGuest, err, suffix(stderr))
-		}
-		return 0, nil
-	}
-
-	pr, pw := io.Pipe()
-	go func() { pw.CloseWithError(writeTaskTar(pw, files)) }()
-	defer pr.Close()
-
-	// umask 077 and mktemp keep the staging directory root's alone; the trap
-	// removes it whatever happens after it exists.
-	script := fmt.Sprintf("set -eu; umask 077; install -d -m 0755 -o root -g root '%s'; "+
-		"d=$(mktemp -d '%s/stage-%s-XXXXXXXX'); trap 'rm -rf \"$d\"' EXIT; "+
-		"tar -x --no-same-owner --no-same-permissions -f - -C \"$d\"; "+
-		"install -d -m %s -o root -g root '%s'; cp -a \"$d/.\" '%s/'; "+
-		"chown -R root:root '%s'; chmod -R u+rwX,go-rwx '%s'",
-		tmpfsStagingRoot, tmpfsStagingRoot, b.spec.BoxID,
-		dirMode, destDirInGuest, destDirInGuest, destDirInGuest, destDirInGuest)
-	_, stderr, err := b.m.lima.ShellInput(ctx, b.spec.BoxID, []string{"sudo", "-n", "bash", "-euo", "pipefail", "-c", script}, pr)
-	if err != nil {
-		return 0, fmt.Errorf("copy the task files into %s: %w%s", destDirInGuest, err, suffix(stderr))
-	}
-	return len(files), nil
-}
-
-// writeTaskTar writes the files as a tar stream: root-owned, mode 0600 (the guest
-// sets the final modes), each read straight from the task directory.
-func writeTaskTar(w io.Writer, files []taskFile) error {
-	tw := tar.NewWriter(w)
-	for _, f := range files {
-		if err := writeTaskTarFile(tw, f); err != nil {
-			return err
-		}
-	}
-	return tw.Close()
-}
-
-func writeTaskTarFile(tw *tar.Writer, f taskFile) error {
-	in, err := os.Open(f.host)
-	if err != nil {
-		return fmt.Errorf("read task file %s: %w", f.log, err)
-	}
-	defer in.Close()
-	fi, err := in.Stat()
-	if err != nil {
-		return fmt.Errorf("read task file %s: %w", f.log, err)
-	}
-	hdr := &tar.Header{
-		Typeflag: tar.TypeReg,
-		Name:     filepath.ToSlash(f.rel),
-		Mode:     0o600,
-		Size:     fi.Size(),
-		ModTime:  fi.ModTime(),
-		Format:   tar.FormatPAX,
-	}
-	if err := tw.WriteHeader(hdr); err != nil {
-		return fmt.Errorf("send task file %s: %w", f.log, err)
-	}
-	// A file that grows while it is read fails the header's size; a re-render
-	// copies it again.
-	if _, err := io.Copy(tw, io.LimitReader(in, fi.Size())); err != nil {
-		return fmt.Errorf("send task file %s: %w", f.log, err)
-	}
-	return nil
 }
 
 // legacyStagingDir is where drivers up to v0.1.3 staged the task files, secrets

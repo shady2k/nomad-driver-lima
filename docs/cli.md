@@ -197,8 +197,8 @@ subdirectory per executor (`prime/`, `opencode/`), or is one executor's own
 directory with `--executor`. `--provider` keeps only that provider's credential
 and definition, because a box runs one provider. It prints the keys it stores,
 never a value. The files live in the Nomad variable `nomad/jobs/box-executors`
-and are rendered into each box's `secrets/` directory, which the driver writes
-to the guest's tmpfs at `/run/box/secrets/<executor>/`.
+and are rendered into each box's `secrets/` directory, which the guest mounts
+read-only at `/run/box/secrets/<executor>/`.
 
 **An item whose name ends in `.tmpl` is a template, not a file.** Its text is
 Nomad template text that reads the secret itself, for example
@@ -227,8 +227,8 @@ A required file is satisfied by either form: an `auth.json.tmpl` item is enough
 for `prime`, which asks for `settings.json` and `auth.json`.
 
 **Rotation needs no new box.** After `box executors set`, Nomad re-renders the
-box's templates within seconds; the driver notices the changed task files, copies
-them into the guest again and runs `boxctl reload`. boxd re-reads the credentials
+box's templates within seconds; the driver notices the changed task files, puts
+them where the guest mounts them and runs `boxctl reload`. boxd re-reads the credentials
 and stops the executor of every idle session, so the next turn runs with the new
 configuration; a session in the middle of a turn restarts its executor when the
 turn ends. The VM, the allocation and the transcripts are untouched. A box that

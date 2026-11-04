@@ -26,7 +26,7 @@ type DaemonConfig struct {
 	StateDir   string // durable state: sessions and transcripts (default /var/lib/boxd)
 	RuntimeDir string // executor configuration for this boot (default /run/boxd)
 	// SecretsDir is where the Nomad driver puts the executor credentials. The
-	// driver copies them onto the guest's tmpfs, never onto its disk.
+	// guest mounts them read-only from the host's tmpfs, never from a disk.
 	SecretsDir string    // (default /run/box/secrets)
 	LocalDir   string    // files the driver copies in (default /etc/box/local)
 	PrimeAgent string    // prime-agent binary (default: PATH)
@@ -543,7 +543,7 @@ func (m *Manager) List() []Session {
 //
 // This is how a running box gets new executor credentials without being
 // recreated: the operator updates the Nomad Variable, Nomad re-renders the
-// task's secrets, the box driver copies them onto the guest's tmpfs again and
+// task's secrets, the box driver puts them where the guest mounts them and
 // calls this. Idle executors are stopped so the next turn starts with the new
 // configuration; a session with a turn running is left alone and its executor
 // restarts after the turn, so a reload never kills work in flight.

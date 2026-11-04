@@ -74,8 +74,23 @@ type limaYAML struct {
 	CPUs               int           `yaml:"cpus"`
 	Memory             string        `yaml:"memory"`
 	Disk               string        `yaml:"disk"`
-	Mounts             []string      `yaml:"mounts"`
+	MountType          string        `yaml:"mountType,omitempty"`
+	Mounts             []limaMount   `yaml:"mounts"`
 	Containerd         limaContainer `yaml:"containerd"`
+}
+
+// limaMount is a read-only host directory in the guest. qemu shares it over
+// 9p without a cache, so a file the driver replaces is the new one in the guest
+// at once; vz shares it over virtiofs.
+type limaMount struct {
+	Location   string    `yaml:"location"`
+	MountPoint string    `yaml:"mountPoint"`
+	Writable   bool      `yaml:"writable"`
+	NineP      *limaNine `yaml:"9p,omitempty"`
+}
+
+type limaNine struct {
+	Cache string `yaml:"cache"`
 }
 
 type limaImage struct {
@@ -89,9 +104,10 @@ type limaContainer struct {
 }
 
 // renderLimaYAML builds the configuration for a box. The image location is an
-// absolute host path into the driver's image cache; the guest gets no host
-// mounts, so the box cannot reach the Nomad client's filesystem.
-func renderLimaYAML(spec Spec, imagePath string) ([]byte, error) {
+// absolute host path into the driver's image cache. The guest gets two host
+// mounts, both read-only: the box's own task files (files.go), and nothing else
+// of the Nomad client's filesystem.
+func renderLimaYAML(spec Spec, imagePath string, mounts []limaMount) ([]byte, error) {
 	if spec.CPUs <= 0 {
 		return nil, fmt.Errorf("cpus must be positive, got %d", spec.CPUs)
 	}
@@ -113,8 +129,21 @@ func renderLimaYAML(spec Spec, imagePath string) ([]byte, error) {
 		CPUs:               spec.CPUs,
 		Memory:             fmt.Sprintf("%dMiB", spec.MemoryMiB),
 		Disk:               fmt.Sprintf("%dGiB", spec.DiskGiB),
-		Mounts:             []string{},
+		Mounts:             []limaMount{},
 		Containerd:         limaContainer{System: false, User: false},
+	}
+	for _, mnt := range mounts {
+		mnt.Writable = false
+		if vmType == VMTypeQEMU {
+			mnt.NineP = &limaNine{Cache: "none"}
+		}
+		doc.Mounts = append(doc.Mounts, mnt)
+	}
+	if len(doc.Mounts) > 0 {
+		doc.MountType = "9p"
+		if vmType == VMTypeVZ {
+			doc.MountType = "virtiofs"
+		}
 	}
 	return yaml.Marshal(doc)
 }

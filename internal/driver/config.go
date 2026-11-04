@@ -43,6 +43,10 @@ type Config struct {
 	LimaHome string `codec:"lima_home"`
 	// ImageCacheDir holds downloaded cloud images keyed by sha256.
 	ImageCacheDir string `codec:"image_cache_dir"`
+	// FilesRoot holds every box's task files, which its guest mounts
+	// read-only. It must be a tmpfs: the executor credentials are there.
+	// Default /run/box-files on Linux.
+	FilesRoot string `codec:"files_root"`
 	// MemoryOverheadMiB is added to guest memory for the Linux cgroup cap.
 	MemoryOverheadMiB int `codec:"memory_overhead_mib"`
 	// MemoryLimit says whether the driver must be able to put the VM under a
@@ -78,6 +82,10 @@ var configSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 	),
 	"image_cache_dir": hclspec.NewDefault(
 		hclspec.NewAttr("image_cache_dir", "string", false),
+		hclspec.NewLiteral(`""`),
+	),
+	"files_root": hclspec.NewDefault(
+		hclspec.NewAttr("files_root", "string", false),
 		hclspec.NewLiteral(`""`),
 	),
 	"memory_overhead_mib": hclspec.NewDefault(

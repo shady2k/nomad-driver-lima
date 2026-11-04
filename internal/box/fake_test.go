@@ -26,6 +26,7 @@ func newTestManager(t *testing.T, f *fakelima.Fake) *Manager {
 		MemoryOverheadMiB: 150,
 		VMType:            VMTypeQEMU,
 		MemoryLimitOff:    true,
+		FilesRoot:         filepath.Join(t.TempDir(), "box-files"),
 	})
 	require.NoError(t, err)
 	return m

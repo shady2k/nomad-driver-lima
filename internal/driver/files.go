@@ -58,8 +58,8 @@ func taskFilesDigest(tc *drivers.TaskConfig) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// refreshTaskFiles re-copies the task files when Nomad re-rendered them, and
-// tells boxd so a running box picks up new executor credentials.
+// refreshTaskFiles puts the task files in place again when Nomad re-rendered
+// them, and tells boxd so a running box picks up new executor credentials.
 //
 // The box is not restarted: this is what makes a credential rotation reach a
 // running box (see docs/design-decisions.md).
@@ -71,10 +71,9 @@ func (d *Driver) refreshTaskFiles(h *taskHandle, b *box.Box) {
 	if digest == "" || digest == h.filesDigest() {
 		return
 	}
-	cfg := h.cfg
-	n, err := b.CopyTaskFiles(d.ctx, h.tc.TaskDir().LocalDir, h.tc.TaskDir().SecretsDir, cfg.FilesDirInGuest, cfg.SecretsDirInGuest)
+	n, err := b.StageTaskFiles(h.tc.TaskDir().LocalDir, h.tc.TaskDir().SecretsDir)
 	if err != nil {
-		d.emit(h.tc, "files", fmt.Sprintf("Box %s: the task files changed, but they could not be copied into the guest: %v", h.boxID, err))
+		d.emit(h.tc, "files", fmt.Sprintf("Box %s: the task files changed, but they could not be put where the guest mounts them: %v", h.boxID, err))
 		return
 	}
 	h.setFilesDigest(digest)

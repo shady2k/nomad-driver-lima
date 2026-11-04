@@ -32,6 +32,7 @@ func newTestDriver(t *testing.T, f *fakelima.Fake) *Driver {
 	cfg := Config{
 		LimactlPath:       f.Bin,
 		LimaHome:          f.Home,
+		FilesRoot:         filepath.Join(t.TempDir(), "box-files"),
 		ImageCacheDir:     filepath.Join(f.Home, "_images"),
 		MemoryOverheadMiB: 150,
 		VMType:            "qemu",
@@ -572,19 +573,26 @@ func TestRefreshTaskFilesOnRerender(t *testing.T) {
 	b, err := d.boxFor(h, h.volumeDir, nil)
 	require.NoError(t, err)
 
-	// Nothing changed: no copy, no reload.
+	// The guest mounts the box's host copy of the task files.
+	staged := filepath.Join(d.boxm.FilesDir("box1"), "secrets", "prime", "auth.json")
+	got, err := os.ReadFile(staged)
+	require.NoError(t, err)
+	require.Contains(t, string(got), "one")
+
+	// Nothing changed: no reload.
 	f.ResetCalls(t)
 	d.refreshTaskFiles(h, b)
-	require.Empty(t, f.Copies(t), "an unchanged task directory is not copied again")
+	require.Empty(t, f.CallsWith(t, "shell box1 -- boxctl reload"), "an unchanged task directory is not put in place again")
 
 	// The Variable changed and Nomad re-rendered the template.
 	require.NoError(t, os.WriteFile(authPath, []byte(`{"gateway":{"access":"two"}}`), 0o600))
 	f.ResetCalls(t)
 	d.refreshTaskFiles(h, b)
 
-	copies := f.Copies(t)
-	require.Len(t, copies, 1, "the new secret must reach the guest again: %v", copies)
-	require.Contains(t, copies[0], "prime/auth.json")
+	got, err = os.ReadFile(staged)
+	require.NoError(t, err)
+	require.Contains(t, string(got), "two", "the new secret must reach the mounted directory")
+	require.Empty(t, f.Copies(t), "nothing is copied into the guest any more")
 	reloads := f.CallsWith(t, "shell box1 -- boxctl reload")
 	require.Len(t, reloads, 1, "boxd must be told to reload: %v", f.Calls(t))
 }

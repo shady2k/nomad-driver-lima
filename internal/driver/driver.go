@@ -158,6 +158,7 @@ func (d *Driver) SetConfig(cfg *base.Config) error {
 		Limactl:           c.LimactlPath,
 		LimaHome:          c.LimaHome,
 		ImageCacheDir:     c.ImageCacheDir,
+		FilesRoot:         c.FilesRoot,
 		MemoryOverheadMiB: c.MemoryOverheadMiB,
 		VMType:            c.VMType,
 		MemoryLimitOff:    c.MemoryLimit == box.MemoryLimitOff,
@@ -483,6 +484,15 @@ func (d *Driver) StartTask(tc *drivers.TaskConfig) (*drivers.TaskHandle, *driver
 	if err != nil {
 		return nil, nil, err
 	}
+	// The task files are on the host before the VM boots: the guest mounts
+	// them read-only, so they are there from its first second and after any
+	// reboot of its own.
+	n, err := b.StageTaskFiles(tc.TaskDir().LocalDir, tc.TaskDir().SecretsDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("put the task files of box %s where the guest mounts them: %w", cfg.BoxID, err)
+	}
+	rep("files", fmt.Sprintf("%d task file(s) are mounted read-only into the guest: %s/local, and the executor credentials in %s",
+		n, cfg.FilesDirInGuest, cfg.SecretsDirInGuest))
 
 	st, err := b.Ensure(d.ctx)
 	if err != nil {
@@ -496,19 +506,8 @@ func (d *Driver) StartTask(tc *drivers.TaskConfig) (*drivers.TaskHandle, *driver
 	})
 	h.markRunning(time.Now())
 
-	if _, err := b.CopyTaskFiles(d.ctx, tc.TaskDir().LocalDir, tc.TaskDir().SecretsDir, cfg.FilesDirInGuest, cfg.SecretsDirInGuest); err != nil {
-		rep("files", fmt.Sprintf("Could not install the task files in the guest: %v", err))
-		// The VM is up but its task can never run: take it away, so a retry
-		// starts cleanly instead of adopting an instance whose disk symlink may
-		// point at a volume that was deleted in the meantime.
-		if discardErr := b.Discard(d.ctx); discardErr != nil {
-			rep("files", fmt.Sprintf("Could not remove the failed box %s: %v", cfg.BoxID, discardErr))
-		}
-		return nil, nil, err
-	}
-
-	// The guest now has these files; a later re-render (a rotated credential)
-	// changes this digest and the watcher copies them again.
+	// The guest sees these files; a later re-render (a rotated credential)
+	// changes this digest and the watcher puts them in place again.
 	h.setFilesDigest(taskFilesDigest(tc))
 
 	d.startGuestLogs(d.ctx, h)
@@ -577,6 +576,9 @@ func (d *Driver) boxFor(h *taskHandle, volumeDir string, rep box.Reporter) (*box
 		CPUs:        h.cfg.CPUs,
 		MemoryMiB:   h.cfg.MemoryMiB,
 		DiskGiB:     h.cfg.DiskGiB,
+		// The guest paths the task files are mounted at.
+		FilesDirInGuest:   h.cfg.FilesDirInGuest,
+		SecretsDirInGuest: h.cfg.SecretsDirInGuest,
 	}
 	return d.boxm.Box(spec, rep)
 }
@@ -799,6 +801,10 @@ func (d *Driver) DestroyTask(taskID string, force bool) error {
 			}
 			d.logger.Warn("box is still running after a forced destroy", "task", taskID, "error", err)
 		}
+	}
+	// A box that is not running keeps no credential on the host.
+	if err := b.RemoveTaskFiles(); err != nil {
+		d.logger.Warn("cannot remove the box's task files", "task", taskID, "error", err)
 	}
 	h.finish(&drivers.ExitResult{})
 	return nil
