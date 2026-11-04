@@ -27,7 +27,7 @@ creating a new one.
 | --- | --- |
 | `cmd/box-driver` (`internal/driver`) | the Nomad task driver named `box`: it turns one task into one Lima VM |
 | `cmd/box-volume` (`internal/volume`) | the Nomad dynamic host volume plugin `box-volume`: it creates and deletes a box's disk directory, and deletes the VM that owns it |
-| `cmd/box` (`internal/cli`) | the CLI: create, start, stop, rm, resize, run, ssh, cp, logs, status, capacity, sessions, executors, images |
+| `cmd/box` (`internal/cli`) | the CLI: create, start, stop, rm, resize, upgrade, run, ssh, cp, logs, status, capacity, sessions, executors, images, platform bundles |
 | `cmd/boxd` (`internal/boxd`) | `boxd` and `boxctl` in one binary: the guest daemon that runs agent sessions, and the client the CLI execs |
 | `internal/box` | one Lima instance: the disk on a volume, the image cache, resize, the cgroup memory cap |
 | `internal/limactl` | a thin wrapper over `limactl` (list, create, start, stop, edit, shell, copy) |
@@ -94,6 +94,14 @@ and the VM is adopted, never duplicated.
 stop, edit, start. The guest grows its partition and root filesystem by itself
 on the next boot, and the driver reports what the guest says (`df`), not what
 the yaml says. A disk can grow and never shrink.
+
+**A new platform bundle is a stop and a start too.** The bundle of `boxd` and the
+executors is a read-only mount of the instance's `lima.yaml` at `/opt/box`, one
+cache directory per sha256, so a task that names another one -- what `box
+upgrade` re-registers -- makes the driver stop the box, write the mount and
+start it again. The disk is untouched and every bundle stays in the cache.
+`docs/design-decisions.md` has why the platform is a mount and not part of the
+image.
 
 ## Processes and the memory cap
 

@@ -308,6 +308,7 @@ func (a *App) commands() map[string]command {
 		"start":     {usage: "start a stopped box, with the same disk: box start <id>", run: a.cmdStart},
 		"rm":        {usage: "delete a box and its disk: box rm <id> [--yes]", run: a.cmdRemove},
 		"resize":    {usage: "change cpus, memory or disk: box resize <id> [--cpus N] [--memory-mib N] [--disk-gib N]", run: a.cmdResize},
+		"upgrade":   {usage: "move a box to a newer platform bundle: box upgrade <id> [--platform VERSION]", run: a.cmdUpgrade},
 		"ssh":       {usage: "interactive shell in a box: box ssh <id>", run: a.cmdSSH},
 		"run":       {usage: "run a command in a box: box run <id> -- cmd...", run: a.cmdRun, noFlags: true},
 		"cp":        {usage: "copy files or directories in and out: box cp <src> <dst>", run: a.cmdCP, noFlags: true},

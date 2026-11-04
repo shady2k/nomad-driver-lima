@@ -94,6 +94,19 @@ and versions named in "What was measured".
   runtime user come from `/etc/box/volume.json`, written by the node role. A
   request with any parameter is refused with a plain error, so a coordinator
   cannot choose which binary runs on a node.
+- **The CPU cap is `cpu.max` in the same scope: the box's vCPUs plus one core.**
+  A Nomad CPU reservation is only a weight, so without a cap one box took about
+  five cores of an eight-core node with 2 vCPUs: the vCPUs are limited by their
+  count, but qemu's main loop and its disk threads are not. The extra core keeps
+  those threads from taking time from the guest. The driver reads `cpu.max` back
+  and says so in a task event when it is missing, because systemd accepts
+  `CPUQuota` on a user manager without the cpu controller and enforces nothing.
+- **A vCPU reserves one core of its node, less its part of the client's own
+  reservation** (`(total - reserved) / cores`). A fixed 1000 MHz meant half a core
+  on a 2 GHz node, so Nomad placed about twice the boxes the node can run. With
+  this figure a node offers as many vCPUs as it has cores: 8 cores take four boxes
+  of 2 vCPU, and the fifth is refused. The figure comes from the box's node, so it
+  is set at `box create` and again by `box resize` and `box upgrade`.
 - **The memory cap is a systemd user scope with `memory.max` and
   `memory.swap.max=0`.** The budget is guest RAM plus about 150 MB (qemu about
   guest RAM plus 60 MB, the hostagent about 60 MB). `memory.max` alone is soft:
@@ -286,6 +299,63 @@ and versions named in "What was measured".
   generates them on the first boot of every box. `guest/no-secrets.sh` is the
   check an operator runs on an image before capturing it and inside a booted box.
 
+## The platform bundle
+
+- **The fast-moving part of a box is mounted, not baked into the image.**
+  `boxd`, `boxctl` and the executors change far more often than the OS and the
+  toolchains, and a project image derived from a base image is nobody's to
+  rebuild: whoever owns it will not rebuild it for a `boxd` fix. So the platform
+  leaves the image and becomes a versioned bundle -- an archive with a
+  `manifest.json`, `bin/boxd`, `bin/boxctl` and the tool directories -- that the
+  node downloads by sha256 and mounts read-only at `/opt/box` before the guest
+  boots. Lima itself does this for its own guest agent: `lima-guestagent` arrives
+  through cidata on every boot instead of being baked into the image, which is
+  why a Lima upgrade does not need a new image either. The image keeps the OS,
+  the toolchains and a `boxd.service` that runs `/opt/box/bin/boxd` and requires
+  the mount (`RequiresMountsFor=/opt/box`).
+- **A bundle is a directory per digest, and a directory never changes.** The
+  cache is `<image_cache_dir>/platform/<sha256>/`, unpacked once, written as a
+  temporary directory and renamed into place with a marker file last, so a half
+  download or a half unpack is never mounted. The guest mounts that directory
+  with `cache: fscache` on qemu (the directory is immutable, so caching every
+  read costs nothing) while the task files keep `cache: none` (the driver
+  replaces files in them and the guest must see the new one at once). A new
+  bundle is a new directory: there is no cache to invalidate and no upgrade in
+  place. qemu mounts over 9p, which is Lima's own default there and what the task
+  files already use; vz gets virtiofs, which is all it has.
+- **A mount, not a data disk and not a copy.** An installed copy would need the
+  network in the guest and would drift from what the node pinned; a data disk
+  would be per box and would have to be filled at every start; a copy after boot
+  is what the task files did up to v0.1.13, and boxd then started before its own
+  files arrived. A mount exists from the guest's first second, after a reboot of
+  its own, and is read-only, so a box cannot change the platform it runs.
+- **An image says it expects a bundle, twice.** `"platform": "mount"` in the
+  image's `/etc/box/image.json` and the same field on its entry in the index.
+  The CLI adds the `platform` block to the job only for such an image, so an
+  older image keeps running its own `boxd` and its own `/opt/box` is not hidden
+  by a mount. Without the block the driver behaves exactly as it did before the
+  feature existed; the mount is one optional entry among the task files.
+- **A changed block is a changed instance configuration.** The block names the
+  bundle, so `box upgrade` is a re-registered job whose block names another one.
+  The driver compares the bundle the instance mounts (read out of its
+  `lima.yaml`) with the one the task asks for, stops the box if they differ,
+  writes the mount and starts it again -- the same stop-edit-start path a resize
+  takes, and for the same reason: Lima cannot change a running instance. The
+  file is edited as a document rather than re-rendered from the spec, because
+  Lima adds fields of its own when it creates an instance (the local ssh port,
+  the image digest, the host resolver) and losing one of them breaks a boot.
+  `limactl edit` cannot help here: it takes cpu, memory and disk only.
+- **The bundle is unpacked as an unprivileged user's data.** Every entry is
+  checked before it is written: a path that escapes the root, an absolute path,
+  an absolute symlink, a symlink pointing outside the bundle, a device or a fifo
+  is refused and the whole bundle is discarded. The guest reads that tree, and a
+  path outside it is a path into the node. The three symlink shapes the
+  contract asks for (`bin/boxctl -> boxd`, `bin/<tool> -> ../tools/...`) are
+  relative and stay inside.
+- **Rejected: shipping the bundle inside the image.** It would put the
+  fast-moving part back where a derived image cannot follow it, and every
+  executor update would again be an image build, a publish and a box recreate.
+
 ## Deploy
 
 - **One release directory per version and one symlink.** The Nomad client
@@ -320,3 +390,15 @@ The measurements behind these decisions come from one Linux host: lima 2.2.0,
 qemu 11.1.2, Nomad 2.0.7, systemd 262 with cgroup v2, `/dev/kvm`, and prime-agent
 0.9.8. Everything about macOS, arm64 and other versions is written from those
 results, not measured on them. `docs/known-limits.md` says what that leaves open.
+
+The platform mount was measured end to end on that host, without Nomad: the
+driver's own code (`box.Manager`) booted a real Lima VM from an Ubuntu 24.04
+minimal cloud image and a hand-made bundle (`manifest.json`, `bin/hello`,
+`bin/boxctl -> hello`), and `cat /opt/box/manifest.json` in the guest printed it.
+The guest showed `/opt/box` as `9p (ro,relatime,cache=0x8f)` -- read-only and
+fscache -- next to the task files' uncached 9p mounts, and `touch /opt/box/...`
+was refused with "Read-only file system". A second, different bundle with the
+same block changed made the driver stop the box, rewrite the mount in the
+instance's `lima.yaml` and start it again, and the guest then read the new
+`manifest.json`; the old bundle stayed in the cache. What was *not* measured:
+any box under Nomad, a real bundle with the real executors, arm64, and `vz`.

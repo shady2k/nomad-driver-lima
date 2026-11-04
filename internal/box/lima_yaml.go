@@ -80,14 +80,31 @@ type limaYAML struct {
 }
 
 // limaMount is a read-only host directory in the guest. qemu shares it over
-// 9p without a cache, so a file the driver replaces is the new one in the guest
-// at once; vz shares it over virtiofs.
+// 9p; vz shares it over virtiofs.
+//
+// The 9p cache is per mount: the task files are mounted without a cache, so a
+// file the driver replaces is the new one in the guest at once, while the
+// platform bundle is mounted with fscache, because its directory never changes
+// (a new bundle is a new directory).
 type limaMount struct {
 	Location   string    `yaml:"location"`
 	MountPoint string    `yaml:"mountPoint"`
 	Writable   bool      `yaml:"writable"`
 	NineP      *limaNine `yaml:"9p,omitempty"`
+	// Cache is the 9p cache mode of this mount on qemu: CacheNone (default) or
+	// CacheFscache. It is not a YAML field of its own; it fills NineP.
+	Cache string `yaml:"-"`
 }
+
+// 9p cache modes of a mount.
+const (
+	// CacheNone re-reads every file the guest opens, which is what a directory
+	// the driver replaces files in needs.
+	CacheNone = "none"
+	// CacheFscache caches the attributes and the content of a directory that
+	// never changes after it is mounted, which is a platform bundle.
+	CacheFscache = "fscache"
+)
 
 type limaNine struct {
 	Cache string `yaml:"cache"`
@@ -104,9 +121,10 @@ type limaContainer struct {
 }
 
 // renderLimaYAML builds the configuration for a box. The image location is an
-// absolute host path into the driver's image cache. The guest gets two host
-// mounts, both read-only: the box's own task files (files.go), and nothing else
-// of the Nomad client's filesystem.
+// absolute host path into the driver's image cache. The guest gets three host
+// mounts at most, all read-only: the box's own task files (files.go), the
+// platform bundle at /opt/box when the task names one (platform.go), and nothing
+// else of the Nomad client's filesystem.
 func renderLimaYAML(spec Spec, imagePath string, mounts []limaMount) ([]byte, error) {
 	if spec.CPUs <= 0 {
 		return nil, fmt.Errorf("cpus must be positive, got %d", spec.CPUs)
@@ -135,7 +153,11 @@ func renderLimaYAML(spec Spec, imagePath string, mounts []limaMount) ([]byte, er
 	for _, mnt := range mounts {
 		mnt.Writable = false
 		if vmType == VMTypeQEMU {
-			mnt.NineP = &limaNine{Cache: "none"}
+			cache := mnt.Cache
+			if cache == "" {
+				cache = CacheNone
+			}
+			mnt.NineP = &limaNine{Cache: cache}
 		}
 		doc.Mounts = append(doc.Mounts, mnt)
 	}

@@ -22,9 +22,12 @@ type statusOutput struct {
 }
 
 type statusSpec struct {
-	Image      string `json:"image,omitempty"`
-	ImageURL   string `json:"image_url,omitempty"`
-	SHA256     string `json:"sha256,omitempty"`
+	Image    string `json:"image,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
+	SHA256   string `json:"sha256,omitempty"`
+	// Platform is the version of the platform bundle the box mounts, empty for
+	// an image that runs the boxd it carries.
+	Platform   string `json:"platform,omitempty"`
 	Arch       string `json:"arch"`
 	CPUs       int    `json:"cpus"`
 	MemoryMiB  int    `json:"memory_mib"`
@@ -82,6 +85,7 @@ func (a *App) cmdStatus(ctx context.Context, args []string) error {
 			Image:      spec.ImageVersion,
 			ImageURL:   spec.ImageURL,
 			SHA256:     spec.ImageSHA256,
+			Platform:   spec.PlatformVersion,
 			Arch:       spec.Arch,
 			CPUs:       spec.CPUs,
 			MemoryMiB:  spec.MemoryMiB,
@@ -191,6 +195,9 @@ func (a *App) printStatus(out *statusOutput) {
 		describeSpec(BoxSpec{CPUs: out.Spec.CPUs, MemoryMiB: out.Spec.MemoryMiB, DiskGiB: out.Spec.DiskGiB,
 			ImageVersion: out.Spec.Image, Arch: out.Spec.Arch}),
 		out.Spec.TaskMemMiB, out.Spec.TaskCPUMHz)
+	if out.Spec.Platform != "" {
+		a.note("  platform %s (read-only mount at /opt/box)", out.Spec.Platform)
+	}
 	if out.Volume != nil {
 		a.note("  disk    volume %s (%s, %s) at %s", out.Volume.Name, dash(out.Volume.PluginID),
 			humanBytes(out.Volume.CapacityBytes), dash(out.Volume.HostPath))

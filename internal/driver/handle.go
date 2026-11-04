@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -145,6 +146,11 @@ func (h *taskHandle) taskStatus() *drivers.TaskStatus {
 		"disk_path":   h.diskPath,
 		"cgroup_mode": h.cgroupMode,
 	}
+	if h.cfg.Platform != nil {
+		// Which bundle the box mounts is part of what the task is; Nomad shows
+		// these attributes in `nomad alloc status`.
+		attrs["platform"] = platformName(h.cfg.Platform)
+	}
 	if h.instanceDir != "" {
 		attrs["instance_dir"] = h.instanceDir
 	}
@@ -253,4 +259,21 @@ func (s *taskStore) BoxIDs() map[string]string {
 		out[h.boxID] = id
 	}
 	return out
+}
+
+// platformName names a task's platform bundle: its version, or the start of its
+// digest when the block has none.
+func platformName(p *PlatformConfig) string {
+	if p == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(p.Version); v != "" {
+		return v
+	}
+	sum := strings.ToLower(strings.TrimSpace(p.SHA256))
+	sum = strings.TrimPrefix(sum, "sha256:")
+	if len(sum) > 12 {
+		sum = sum[:12]
+	}
+	return "sha256:" + sum
 }

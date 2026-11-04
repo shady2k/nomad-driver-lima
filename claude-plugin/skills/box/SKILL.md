@@ -52,6 +52,14 @@ running). A non-zero exit is always a sentence you can act on.
   `--arch amd64` or `--arch arm64`. `box capacity` lists both, never add their
   free resources together.
 - **Take the newest image** from `box images`; an older one lacks fixes.
+- **A box's `boxd` and executors come from a platform bundle, not from its
+  image.** For an image built for bundles the driver mounts the newest bundle
+  for the box's architecture read-only at `/opt/box` when the box starts;
+  `box create --platform <version>` picks another one and `box upgrade <id>
+  [--platform <version>]` moves a running box to a newer one (it re-registers
+  the job, so the box restarts and its disk is kept). A `boxd` or executor
+  update therefore needs no new image, and a project image derived from a base
+  image never has to be rebuilt for it.
 - **Start at the defaults (2 vCPU, 2048 MiB, 8 GiB) and grow when the work
   shows it needs more.** They fit an agent session. The node is shared with
   every other agent: `box resize` adds CPU or memory (a restart, the disk is

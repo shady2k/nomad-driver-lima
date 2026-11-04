@@ -278,6 +278,8 @@ type NodeCapacity struct {
 	// Uncounted is the running instances Nomad's accounting does not cover: their
 	// memory and vCPUs are taken off the free resources below.
 	Uncounted []BoxInstance `json:"uncounted_instances,omitempty"`
+	// CPUMHzPerVCPU is what one vCPU reserves on this node.
+	CPUMHzPerVCPU int64 `json:"cpu_mhz_per_vcpu"`
 	// UncountedMemoryMiB and UncountedCPUShares are what those VMs take.
 	UncountedMemoryMiB int64 `json:"uncounted_memory_mib"`
 	UncountedCPUShares int64 `json:"uncounted_cpu_shares"`
@@ -382,13 +384,14 @@ func BuildCapacity(node *api.Node, allocs []*api.Allocation) *NodeCapacity {
 	}
 	cap.Disks, cap.DiskUsedBytes, cap.DiskVirtualBytes = boxDisksFromAttributes(attrs)
 	cap.Instances = boxInstancesFromAttributes(attrs)
+	var uncountedVCPUs int64
 	for _, inst := range cap.Instances {
 		if !inst.RunningUncounted() {
 			continue
 		}
 		cap.Uncounted = append(cap.Uncounted, inst)
 		cap.UncountedMemoryMiB += inst.MemoryMiB
-		cap.UncountedCPUShares += int64(inst.CPUs) * boxCPUSharesPerVCPU
+		uncountedVCPUs += int64(inst.CPUs)
 	}
 
 	// CPU and memory totals and reservations come from the node resources.
@@ -445,6 +448,8 @@ func BuildCapacity(node *api.Node, allocs []*api.Allocation) *NodeCapacity {
 	}
 
 	cap.CPU = usage(cpuTotal, cpuReserved, cpuAllocated)
+	cap.CPUMHzPerVCPU = mhzPerVCPU(cpuTotal, cpuReserved, attrs["cpu.numcores"])
+	cap.UncountedCPUShares = uncountedVCPUs * cap.CPUMHzPerVCPU
 	cap.Memory = usage(memTotal, memReserved, memAllocated)
 	cap.Disk = usage(diskTotal, diskReserved, diskAllocated)
 
@@ -485,9 +490,29 @@ func usage(total, reserved, allocated int64) ResourceUsage {
 	return ResourceUsage{Total: total, Reserved: reserved, Allocated: allocated, Free: free}
 }
 
-// boxCPUSharesPerVCPU is the CPU reservation of one vCPU, the same convention the
-// box job uses (1000 MHz per vCPU).
+// boxCPUSharesPerVCPU is the CPU reservation of one vCPU on a node that does not
+// say how many cores it has.
 const boxCPUSharesPerVCPU = 1000
+
+// mhzPerVCPU is the reservation of one vCPU on a node: its core, less its part of
+// what the client keeps for itself. One vCPU can keep one core busy, and a node
+// offers exactly as many vCPUs as it has cores, none above and none lost to the
+// client's reservation.
+func mhzPerVCPU(total, reserved int64, numCores string) int64 {
+	cores, err := strconv.ParseInt(strings.TrimSpace(numCores), 10, 64)
+	if err != nil || cores <= 0 || total-reserved < cores {
+		return boxCPUSharesPerVCPU
+	}
+	return (total - reserved) / cores
+}
+
+// vcpuMHz is the reservation of one vCPU on this node.
+func (n *NodeCapacity) vcpuMHz() int64 {
+	if n.CPUMHzPerVCPU > 0 {
+		return n.CPUMHzPerVCPU
+	}
+	return boxCPUSharesPerVCPU
+}
 
 // clampSubtract removes amount from free, never going below zero.
 func clampSubtract(free, amount int64) int64 {
@@ -530,7 +555,7 @@ func (n *NodeCapacity) NodeProblem(req PlacementRequest) string {
 	if need := req.TaskMemoryMiB(); need > 0 && n.Memory.Free < int64(need) {
 		return fmt.Sprintf("node %s has %d MiB of memory free, the box needs %d MiB", n.Name, n.Memory.Free, need)
 	}
-	if need := int64(req.CPUs) * 1000; need > 0 && n.CPU.Free < need {
+	if need := int64(req.CPUs) * n.vcpuMHz(); need > 0 && n.CPU.Free < need {
 		return fmt.Sprintf("node %s has %d MHz of CPU free, the box needs %d MHz", n.Name, n.CPU.Free, need)
 	}
 	if need := int64(req.DiskGiB) * 1024; need > 0 && n.Disk.Free < need {
@@ -572,8 +597,8 @@ const LargeShare = 4
 // a LargeShare of the node's CPU, memory or disk, or "" when it does not.
 func (n *NodeCapacity) Oversized(cpus, memoryMiB, diskGiB int) string {
 	var over []string
-	if limit := n.CPU.Total / LargeShare; limit > 0 && int64(cpus)*1000 > limit {
-		over = append(over, fmt.Sprintf("%d vCPU (%d MHz of %d MHz)", cpus, int64(cpus)*1000, n.CPU.Total))
+	if need := int64(cpus) * n.vcpuMHz(); n.CPU.Total/LargeShare > 0 && need > n.CPU.Total/LargeShare {
+		over = append(over, fmt.Sprintf("%d vCPU (%d MHz of %d MHz)", cpus, need, n.CPU.Total))
 	}
 	if limit := n.Memory.Total / LargeShare; limit > 0 && int64(memoryMiB) > limit {
 		over = append(over, fmt.Sprintf("%d MiB of memory (of %d MiB)", memoryMiB, n.Memory.Total))

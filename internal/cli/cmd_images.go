@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"errors"
+	"sort"
+	"strings"
 )
 
 // imagesOutput is the JSON document of `box images`.
@@ -11,7 +13,10 @@ type imagesOutput struct {
 	Available bool             `json:"available"`
 	UpdatedAt string           `json:"updated_at,omitempty"`
 	Images    []*ImageArtifact `json:"images"`
-	Error     string           `json:"error,omitempty"`
+	// Platforms are the published platform bundles; empty when the index lists
+	// none yet.
+	Platforms []*PlatformArtifact `json:"platforms,omitempty"`
+	Error     string              `json:"error,omitempty"`
 }
 
 // cmdImages lists the published base images.
@@ -36,16 +41,20 @@ func (a *App) cmdImages(ctx context.Context, args []string) error {
 			}
 			a.note("no base images are published yet: the image index %s answers 404.", url)
 			a.note("publishing an image writes it; `box create --image <version>` needs it.")
+			a.printPlatforms(nil, url)
 			return nil
 		}
 		return err
 	}
 	images := index.Artifacts()
+	platforms := index.PlatformArtifacts()
 	if a.JSON {
-		return a.printJSON(imagesOutput{IndexURL: url, Available: true, UpdatedAt: index.UpdatedAt, Images: images})
+		return a.printJSON(imagesOutput{IndexURL: url, Available: true, UpdatedAt: index.UpdatedAt, Images: images,
+			Platforms: platforms})
 	}
 	if len(images) == 0 {
 		a.note("the image index %s lists no images yet.", url)
+		a.printPlatforms(platforms, url)
 		return nil
 	}
 	rows := make([][]string, 0, len(images))
@@ -65,7 +74,53 @@ func (a *App) cmdImages(ctx context.Context, args []string) error {
 	a.note("the disk holds the image, the toolchains and the checkout: %d GiB fits a small repository, a real project wants 20-40 GiB;",
 		defaultDiskGiB)
 	a.note("the host spends only what the box writes, and box resize --disk-gib grows the disk later (it never shrinks)")
+	a.printPlatforms(platforms, url)
 	return nil
+}
+
+// printPlatforms writes the published platform bundles, or one line that says
+// there are none yet.
+//
+// The bundle holds boxd, boxctl and the executors, and a node mounts it into
+// every box whose image takes one; an image that carries its own boxd needs no
+// bundle, so an index without platforms is a working index.
+func (a *App) printPlatforms(platforms []*PlatformArtifact, url string) {
+	if len(platforms) == 0 {
+		a.note("no platform bundles are published yet: every image runs the boxd it carries.")
+		return
+	}
+	rows := make([][]string, 0, len(platforms))
+	for _, bundle := range platforms {
+		rows = append(rows, []string{
+			bundle.Version,
+			bundle.Arch,
+			humanBytes(bundle.Size),
+			shortSHA(bundle.SHA256),
+			dash(bundle.Boxd),
+			dash(toolVersionsLine(bundle.Tools)),
+			dash(bundle.BuiltAt),
+		})
+	}
+	a.printTable([]string{"VERSION", "ARCH", "SIZE", "SHA256", "BOXD", "TOOLS", "BUILT"}, rows)
+	a.note("%s from %s", describeCount(len(platforms), "platform bundle"), url)
+}
+
+// toolVersionsLine renders the tools of a bundle as "name version" pairs,
+// sorted by name.
+func toolVersionsLine(tools map[string]string) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(tools))
+	for name := range tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	pairs := make([]string, 0, len(names))
+	for _, name := range names {
+		pairs = append(pairs, name+" "+tools[name])
+	}
+	return strings.Join(pairs, ", ")
 }
 
 // shortSHA shortens a sha256 for a table.

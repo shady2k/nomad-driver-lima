@@ -777,6 +777,96 @@ const indexJSON = `{
   }
 }`
 
+// platformIndexJSON is an index of a store that publishes platform bundles:
+// one image that takes a bundle ("platform": "mount"), one that runs the boxd it
+// carries, two bundle versions for amd64 and one for arm64.
+const platformIndexJSON = `{
+  "schema": 1,
+  "updated_at": "2026-11-02T10:00:00Z",
+  "images": {
+    "1.0.0": {
+      "amd64": {
+        "url": "https://images.test/box-base/1.0.0/amd64/box-base-1.0.0-amd64.qcow2",
+        "sha256": "5dbac55d46a0cae6368a4a820dd2cf610371873e506f8230ab5c961b7cc0ffc1",
+        "size": 1056047104,
+        "built_at": "2026-11-01T09:00:00Z",
+        "platform": "mount"
+      },
+      "arm64": {
+        "url": "https://images.test/box-base/1.0.0/arm64/box-base-1.0.0-arm64.qcow2",
+        "sha256": "a6eb4379fa5d3a86fac99b7712cbddd0e0b9d2f8e6aa7d88672a94e6633fd712",
+        "size": 1056047104,
+        "built_at": "2026-11-01T09:10:00Z",
+        "platform": "mount"
+      }
+    },
+    "2.0.0": {
+      "amd64": {
+        "url": "https://images.test/box-base/2.0.0/amd64/box-base-2.0.0-amd64.qcow2",
+        "sha256": "2b587ed93272cf2a1887989e16913bdee213e0ec0b44539bd37f5bb6549e2b3f",
+        "size": 1056047104,
+        "built_at": "2026-11-02T09:00:00Z"
+      }
+    }
+  },
+  "platforms": {
+    "1.9.0": {
+      "amd64": {
+        "url": "https://images.test/box-platform/1.9.0/box-platform-1.9.0-linux-amd64.tar.gz",
+        "sha256": "425210d28bc8b720946a9f17403d27bece85b3a131d958538bed3dea2edea986",
+        "size": 48234496,
+        "built_at": "2026-11-01T12:00:00Z",
+        "boxd": "0.4.0",
+        "tools": {"opencode": "1.2.0"}
+      }
+    },
+    "1.10.0": {
+      "amd64": {
+        "url": "https://images.test/box-platform/1.10.0/box-platform-1.10.0-linux-amd64.tar.gz",
+        "sha256": "502629c71242657dda4a82b69be1916831afdf959ae184073d290a278c11e6b0",
+        "size": 50331648,
+        "built_at": "2026-11-02T12:00:00Z",
+        "boxd": "0.5.0",
+        "tools": {"editor": "3.0.1", "opencode": "1.3.0"}
+      },
+      "arm64": {
+        "url": "https://images.test/box-platform/1.10.0/box-platform-1.10.0-linux-arm64.tar.gz",
+        "sha256": "8533c58866c54e271e52257f0e28dbc231e7c3e59291d687a5e040e29c7f6af7",
+        "size": 50331648,
+        "built_at": "2026-11-02T12:10:00Z",
+        "boxd": "0.5.0",
+        "tools": {"opencode": "1.3.0"}
+      }
+    }
+  }
+}`
+
+// boxTaskConfig returns the task config of a registered box job, which is what
+// the driver reads and what the platform tests assert on.
+func boxTaskConfig(t *testing.T, ta *testApp, jobID string) map[string]any {
+	t.Helper()
+	ta.cluster.mu.Lock()
+	job, ok := ta.cluster.jobs[jobID]
+	ta.cluster.mu.Unlock()
+	require.True(t, ok, "the job %s is registered", jobID)
+	task, err := boxTask(job)
+	require.NoError(t, err)
+	return task.Config
+}
+
+// callCount counts the recorded Nomad calls that start with prefix.
+func callCount(ta *testApp, prefix string) int {
+	ta.cluster.callsMu.Lock()
+	defer ta.cluster.callsMu.Unlock()
+	n := 0
+	for _, call := range ta.cluster.calls {
+		if strings.HasPrefix(call, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
 // run executes one command line the way main does.
 func (ta *testApp) run(t *testing.T, args ...string) int {
 	t.Helper()

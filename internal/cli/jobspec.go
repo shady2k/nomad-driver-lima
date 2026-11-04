@@ -60,6 +60,8 @@ var boxIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$`)
 
 // BoxSpec is everything that decides the shape of one box.
 type BoxSpec struct {
+	// CPUMHzPerVCPU is what one vCPU reserves on the box's node (0: the default).
+	CPUMHzPerVCPU int
 	// ID is the box id; the job is box-<id> and the volume box-<id>.
 	ID string
 	// ImageVersion is the image version the box was created from.
@@ -67,6 +69,12 @@ type BoxSpec struct {
 	// ImageURL and ImageSHA256 locate the base image.
 	ImageURL    string
 	ImageSHA256 string
+	// PlatformVersion, PlatformURL and PlatformSHA256 name the platform bundle
+	// the node mounts into the guest at /opt/box. All three empty means no
+	// bundle: the image runs the boxd it carries.
+	PlatformVersion string
+	PlatformURL     string
+	PlatformSHA256  string
 	// Arch is amd64 or arm64.
 	Arch string
 	// CPUs is the number of guest vCPUs.
@@ -134,8 +142,14 @@ func (s BoxSpec) overhead() int {
 // overhead of the virtual machine itself.
 func (s BoxSpec) TaskMemoryMiB() int { return s.MemoryMiB + s.overhead() }
 
-// TaskCPUShares is the Nomad CPU reservation: 1000 MHz per vCPU.
-func (s BoxSpec) TaskCPUShares() int { return s.CPUs * 1000 }
+// TaskCPUShares is the Nomad CPU reservation: what one vCPU reserves on the box's
+// node, for each vCPU.
+func (s BoxSpec) TaskCPUShares() int {
+	if s.CPUMHzPerVCPU > 0 {
+		return s.CPUs * s.CPUMHzPerVCPU
+	}
+	return s.CPUs * boxCPUSharesPerVCPU
+}
 
 // DiskBytes is the size of the disk in bytes.
 func (s BoxSpec) DiskBytes() int64 { return int64(s.DiskGiB) * (1 << 30) }
@@ -163,6 +177,14 @@ func (s BoxSpec) Validate() error {
 	}
 	if s.DiskGiB < 1 {
 		return usagef("--disk-gib must be at least 1, got %d", s.DiskGiB)
+	}
+	// A bundle is mounted by url and checked by sha256: half of the pair would
+	// mount whatever the url happens to serve.
+	if s.PlatformVersion != "" || s.PlatformURL != "" || s.PlatformSHA256 != "" {
+		if s.PlatformURL == "" || s.PlatformSHA256 == "" {
+			return usagef("the platform bundle of box %s needs both a url and a sha256, got url %q and sha256 %q",
+				s.ID, s.PlatformURL, s.PlatformSHA256)
+		}
 	}
 	return nil
 }
@@ -200,21 +222,32 @@ func RenderJob(spec BoxSpec) (*api.Job, error) {
 	volumeName := BoxVolumeName(spec.ID)
 	reconcile := api.ReconcileOptionKeepOriginal
 
+	config := map[string]any{
+		"box_id": spec.ID,
+		"image": map[string]any{
+			"url":    spec.ImageURL,
+			"sha256": spec.ImageSHA256,
+		},
+		"cpus":               spec.CPUs,
+		"memory_mib":         spec.MemoryMiB,
+		"disk_gib":           spec.DiskGiB,
+		"guest_log_command":  spec.guestLogCommand(),
+		"files_dir_in_guest": spec.filesDir(),
+	}
+	// A box made of an image that carries its own boxd has no platform block at
+	// all, so its job is exactly the job it was before bundles existed.
+	if spec.PlatformURL != "" && spec.PlatformSHA256 != "" {
+		config["platform"] = map[string]any{
+			"version": spec.PlatformVersion,
+			"url":     spec.PlatformURL,
+			"sha256":  spec.PlatformSHA256,
+		}
+	}
+
 	task := &api.Task{
 		Name:   boxTaskName,
 		Driver: boxDriverName,
-		Config: map[string]any{
-			"box_id": spec.ID,
-			"image": map[string]any{
-				"url":    spec.ImageURL,
-				"sha256": spec.ImageSHA256,
-			},
-			"cpus":               spec.CPUs,
-			"memory_mib":         spec.MemoryMiB,
-			"disk_gib":           spec.DiskGiB,
-			"guest_log_command":  spec.guestLogCommand(),
-			"files_dir_in_guest": spec.filesDir(),
-		},
+		Config: config,
 		Resources: &api.Resources{
 			CPU:      intPtr(spec.TaskCPUShares()),
 			MemoryMB: intPtr(spec.TaskMemoryMiB()),
@@ -397,6 +430,9 @@ func SpecFromJob(job *api.Job) (BoxSpec, error) {
 	}
 	cfg := task.Config
 	spec.CPUs = intFromConfig(cfg, "cpus", 0)
+	if task.Resources != nil && task.Resources.CPU != nil && spec.CPUs > 0 {
+		spec.CPUMHzPerVCPU = *task.Resources.CPU / spec.CPUs
+	}
 	spec.MemoryMiB = intFromConfig(cfg, "memory_mib", 0)
 	spec.DiskGiB = intFromConfig(cfg, "disk_gib", 0)
 	if image, ok := cfg["image"].(map[string]any); ok {
@@ -405,6 +441,17 @@ func SpecFromJob(job *api.Job) (BoxSpec, error) {
 		}
 		if v, ok := image["sha256"].(string); ok {
 			spec.ImageSHA256 = v
+		}
+	}
+	if platform, ok := cfg["platform"].(map[string]any); ok {
+		if v, ok := platform["version"].(string); ok {
+			spec.PlatformVersion = v
+		}
+		if v, ok := platform["url"].(string); ok {
+			spec.PlatformURL = v
+		}
+		if v, ok := platform["sha256"].(string); ok {
+			spec.PlatformSHA256 = v
 		}
 	}
 	if v, ok := cfg["files_dir_in_guest"].(string); ok {
