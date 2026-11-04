@@ -39,6 +39,10 @@ type App struct {
 	// Now and Sleep are injectable for the tests.
 	Now   func() time.Time
 	Sleep func(ctx context.Context, d time.Duration) error
+	// GuestTimeout is how long `box status`, `box top` and `box session ls`
+	// wait for the guest's answer. Zero means guestCallTimeout; the tests
+	// shorten it rather than wait twenty seconds.
+	GuestTimeout time.Duration
 
 	// indexURL is the image index location; main sets it from the
 	// environment, the tests set it directly.

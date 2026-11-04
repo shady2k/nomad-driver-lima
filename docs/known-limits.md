@@ -92,6 +92,53 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   made Nomad ask for `alloc-node-exec` on every guest command (both fixed in
   v0.1.5).
 
+## A guest that stops answering
+
+- **The stalled box was not reproduced under a test.** The twenty minutes of
+  qemu inflating clusters, the missing reply from every `boxctl` call and the
+  absent memory figure come from one real node, not from a suite. The
+  uncompressed disk was measured on a Lima VM here: an 8 GiB image with 98%
+  compressed clusters gave a box disk of 97.35% compressed clusters when the box
+  started from it (the fallback path, `no-such-qemu-img`), and 0.00% when the
+  box started from the uncompressed copy; `qemu-img check` is what counted them
+  (11.1.2). Whether a box then reads its disk faster, and whether the guest was
+  really out of RAM, were not measured - and a unit test does the same
+  comparison with the real `qemu-img`, skipping a host that has none.
+- **The uncompressed copy costs cache space per image.** It sits next to the
+  download in `image_cache_dir` and nothing removes it: a node with three image
+  versions holds three compressed downloads and three uncompressed copies. The
+  size is the image's allocated data, which is uncompressed by definition; an
+  operator who needs the space removes a copy no `lima.yaml` of a running instance
+  names.
+- **A guest that does not answer is only bounded in three commands.** `box
+  status`, `box top` and `box session ls` give up after 20 seconds. `box wait`,
+  `box send`, `box run` and `box exec` still wait as long as their work does, and
+  an abandoned `boxctl` call keeps running in the guest until boxd answers it:
+  the client-side stream ends (Nomad's exec session closes with its context), the
+  guest side is boxd's own.
+- **earlyoom's choice is proven, the recipe's build VM does not run it.** On a
+  2 GiB Ubuntu 24.04 VM (lima 2.2.0, qemu 11.1.2) earlyoom 1.7 with these
+  arguments killed a 1.5 GiB process at 10% available memory, the journal carried
+  "low memory! at or below SIGTERM limits" and "sending SIGTERM to process ...",
+  and the current `boxd` wrote both lines to its own log as "guest earlyoom: ...".
+  `images/provision.sh` enables the unit, starts it to prove the drop-in parses,
+  then stops it for the rest of the build, so the build VM never runs with a
+  process killer racing its installs - and a *box's* first boot is the first time
+  the enabled unit runs for real.
+- **earlyoom protects names, not roles.** `--avoid` matches the process name, so
+  a `boxd`, `sshd`, `systemd`, `lima-guestagent` or `qemu-ga` process is never
+  killed; anything else in the guest can be, including a session's executor and
+  the turn it is in. That is the point (the alternative is a guest that cannot be
+  reached), but a box whose executor holds the memory a build needs loses that
+  executor, not the build's compiler.
+- **A node whose client still caps `kill_timeout` at 30 s powers boxes off
+  hard.** The deploy kit's `nomad_client` role now writes `max_kill_timeout =
+  2m`, and the job asks for 90 s; a hand-written client configuration that leaves
+  Nomad's 30 s default keeps cutting `limactl stop` off, and the task event says
+  so ("Graceful stop of box ... failed ... signal: killed"). A stop still has no
+  test: the 90 s ask and the 2m cap are configuration, and a guest's shutdown
+  takes as long as its services do.
+
 ## Platform bundles
 
 - **Unused bundle directories stay in the cache.** A bundle is one immutable

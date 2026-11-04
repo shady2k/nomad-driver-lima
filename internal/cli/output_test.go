@@ -73,7 +73,7 @@ func TestCommandHelp(t *testing.T) {
 		require.Contains(t, help, "box create <id> --image")
 		require.Contains(t, help, "--arch VALUE")
 		require.Contains(t, help, "--memory-mib N")
-		require.Contains(t, help, "(default 2048)")
+		require.Contains(t, help, "(default 4096)")
 		require.Empty(t, ta.cluster.jobs, "help registers nothing")
 	}
 
@@ -111,7 +111,7 @@ func TestImagesOutput(t *testing.T) {
 	require.Contains(t, table, "1.0.0")
 	require.Contains(t, table, "amd64")
 	require.Contains(t, table, "arm64")
-	require.Contains(t, ta.errOut.String(), "--memory-mib 2048", "the hint is the default create takes")
+	require.Contains(t, ta.errOut.String(), "--memory-mib 4096", "the hint is the default create takes")
 
 	ta.out.Reset()
 	ta.errOut.Reset()

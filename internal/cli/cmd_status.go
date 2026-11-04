@@ -144,20 +144,49 @@ func (a *App) cmdStatus(ctx context.Context, args []string) error {
 		out.TaskEvents = taskEvents(alloc, *events)
 	}
 
-	// The guest is asked last: a box that is not running still has a status.
+	// The guest is asked last, and with a bound: a box that is not running still
+	// has a status, and a guest that does not answer is a fact about the guest,
+	// not a reason to print nothing.
+	var silent error
 	if box.State == "running" {
 		if client, err := a.boxctl(ctx, box); err != nil {
 			out.GuestError = err.Error()
 		} else {
-			if info, err := client.Info(ctx); err != nil {
-				out.GuestError = "the guest did not answer `boxctl info`: " + err.Error()
-			} else {
+			err := a.guestCall(ctx, "`boxctl info`", func(callCtx context.Context) error {
+				info, err := client.Info(callCtx)
+				if err != nil {
+					return err
+				}
 				out.Guest = info
+				return nil
+			})
+			switch {
+			case err == nil:
+			case isGuestSilent(err):
+				silent = err
+				out.GuestError = err.Error()
+			default:
+				out.GuestError = "the guest did not answer `boxctl info`: " + err.Error()
 			}
-			if sessions, err := client.SessionList(ctx); err == nil {
-				out.Sessions = sessions
-			} else if out.GuestError == "" {
-				out.GuestError = "the guest did not answer `boxctl session ls`: " + err.Error()
+			// A guest that did not answer the first call does not answer the
+			// second either, and two bounds would be forty seconds of status.
+			if silent == nil {
+				err = a.guestCall(ctx, "`boxctl session ls`", func(callCtx context.Context) error {
+					sessions, err := client.SessionList(callCtx)
+					if err != nil {
+						return err
+					}
+					out.Sessions = sessions
+					return nil
+				})
+				switch {
+				case err == nil:
+				case isGuestSilent(err):
+					silent = err
+					out.GuestError = err.Error()
+				case out.GuestError == "":
+					out.GuestError = "the guest did not answer `boxctl session ls`: " + err.Error()
+				}
 			}
 		}
 	} else {
@@ -165,10 +194,29 @@ func (a *App) cmdStatus(ctx context.Context, args []string) error {
 	}
 
 	if a.JSON {
-		return a.printJSON(out)
+		if err := a.printJSON(out); err != nil {
+			return err
+		}
+	} else {
+		a.printStatus(out)
 	}
-	a.printStatus(out)
-	return nil
+	return statusSilentError(id, silent, out)
+}
+
+// statusSilentError is the exit code of a status whose guest did not answer:
+// none when everything Nomad knows was printed (which is what a status is for),
+// and a timeout when the silence was the whole of what the status had to say.
+func statusSilentError(id string, silent error, out *statusOutput) error {
+	if silent == nil || out.showedNomadFacts() {
+		return nil
+	}
+	return timeoutf("box %s: %v, and Nomad knows nothing else about it", id, silent)
+}
+
+// showedNomadFacts reports whether a status showed anything about the box other
+// than its job: its allocation, its volume or its task events.
+func (out *statusOutput) showedNomadFacts() bool {
+	return out.Allocation != nil || out.Volume != nil || len(out.TaskEvents) > 0
 }
 
 func (a *App) printStatus(out *statusOutput) {

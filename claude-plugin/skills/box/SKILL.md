@@ -25,7 +25,7 @@ box capacity                      # 1. where can a box go, and how much is free
 box images                        # 2. which base images exist: take the newest
 box executors show                # 3. which executors have credentials, and their models
 box create dev1 --image <newest> --arch amd64 --disk-gib 16 \
-    --repo https://github.com/org/proj        # 2 vCPU, 2048 MiB by default; returns when the box is ready
+    --repo https://github.com/org/proj        # 2 vCPU, 4096 MiB by default; returns when the box is ready
 box session new dev1 --executor prime --model <provider>/<model> --title "fix the tests"   # starts in /work/proj
 box send dev1 s-7f3a2c --file prompt.md   # or the prompt as one argument
 box wait dev1 s-7f3a2c --timeout 15m      # blocks until the turn ends, prints the answer
@@ -60,10 +60,13 @@ running). A non-zero exit is always a sentence you can act on.
   the job, so the box restarts and its disk is kept). A `boxd` or executor
   update therefore needs no new image, and a project image derived from a base
   image never has to be rebuilt for it.
-- **Start at the defaults (2 vCPU, 2048 MiB, 8 GiB) and grow when the work
-  shows it needs more.** They fit an agent session. The node is shared with
-  every other agent: `box resize` adds CPU or memory (a restart, the disk is
-  kept) and grows the disk, so there is no reason to ask for more up front.
+- **Start at the defaults (2 vCPU, 4096 MiB, 8 GiB) and grow when the work
+  shows it needs more.** They fit an agent session and a build of the box's
+  own work: a guest that runs out of memory stops answering `box status`,
+  `box top` and `box session ls`, which look like a hung box. The node is
+  shared with every other agent: `box resize` adds CPU or memory (a restart,
+  the disk is kept) and grows the disk, so there is no reason to ask for more
+  up front.
   A box larger than a quarter of a node is refused without `--large`; pass it
   only for a build or test run that you know needs it, and say why.
 - **The model is one the box's key may use**, as `<provider>/<model>`. The box

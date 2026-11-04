@@ -12,6 +12,9 @@ const topEvery = 5 * time.Second
 type topOutput struct {
 	Box   string      `json:"box"`
 	Usage *GuestUsage `json:"usage"`
+	// GuestError explains why the guest did not answer. It is set only when the
+	// guest ran out of its call bound, and the command then exits 4.
+	GuestError string `json:"guest_error,omitempty"`
 }
 
 // cmdTop prints what the guest is doing, once or, with -f, every few seconds.
@@ -27,8 +30,19 @@ func (a *App) cmdTop(ctx context.Context, args []string) error {
 		return err
 	}
 	for {
-		info, err := client.Info(ctx)
+		var info *BoxInfo
+		err := a.guestCall(ctx, "`boxctl info`", func(callCtx context.Context) error {
+			got, err := client.Info(callCtx)
+			if err != nil {
+				return err
+			}
+			info = got
+			return nil
+		})
 		if err != nil {
+			if isGuestSilent(err) {
+				return a.guestSilentFailure(id, err, topOutput{Box: id, GuestError: err.Error()})
+			}
 			return wrapf(err, "box %s did not say what it is doing", id)
 		}
 		if info.Usage == nil {
@@ -50,6 +64,20 @@ func (a *App) cmdTop(ctx context.Context, args []string) error {
 		case <-time.After(topEvery):
 		}
 	}
+}
+
+// guestSilentFailure ends a command whose guest did not answer: it prints doc
+// as the JSON document when --json was asked for (so a script reads the same
+// fact from a field) and returns the timeout exit code with a sentence that
+// says what to look at.
+func (a *App) guestSilentFailure(id string, err error, doc any) error {
+	if a.JSON {
+		if jsonErr := a.printJSON(doc); jsonErr != nil {
+			return jsonErr
+		}
+	}
+	return timeoutf("box %s: %v; `box logs %s` shows the guest journal and `box status %s` what Nomad knows about the box",
+		id, err, id, id)
 }
 
 // shortTime is an RFC 3339 time as hh:mm:ss UTC.

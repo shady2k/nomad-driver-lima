@@ -213,10 +213,10 @@ So the image has to be:
   asking for less fails at create. Growing the partition into a bigger disk is the
   image's job (below).
 
-Beyond that the recipe installs `qemu-guest-agent`, `openssh-server`, docker with
-buildx and compose, git, curl, jq, ripgrep, build-essential and python3. None of
-it is required; a box is more useful with a toolchain, but which one is the
-operator's choice.
+Beyond that the recipe installs `qemu-guest-agent`, `openssh-server`, `earlyoom`,
+docker with buildx and compose, git, curl, jq, ripgrep, build-essential and
+python3. None of it is required; a box is more useful with a toolchain, but which
+one is the operator's choice.
 
 ## What a bundle image must provide
 
@@ -240,6 +240,13 @@ operator's choice.
   opencode's system configuration and outranks the per-user file, so a box cannot
   be talked into updating itself while the coordinator runs it. It stays in the
   image so the setting applies to whatever opencode the bundle carries.
+- **`earlyoom` enabled, killing at low memory and never the processes that keep
+  the box reachable**: a guest that runs out of memory stops answering `boxctl`
+  (that is a box that looks hung), so the image kills the process that takes the
+  memory while the guest can still run: `-m 10,5 -r 0 --avoid
+  '(^|/)(boxd|sshd|systemd|lima-guestagent|qemu-ga)$'`. boxd follows the unit's
+  journal and writes what earlyoom killed into the task log, so a guest that was
+  short of memory says which process it lost.
 - **no executor home or cache on the disk**: no `/root/.prime`,
   `/root/.config/opencode`, `/root/.local/share/opencode`, `/root/.claude`, no
   `/root/.cache/opencode`. An executor creates some of them the first time it is

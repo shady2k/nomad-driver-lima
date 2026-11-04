@@ -542,6 +542,10 @@ type fakeGuest struct {
 	// block makes a `box run` command run until its context ends, as a
 	// silent long command does.
 	block bool
+	// silent holds the boxctl calls this guest never answers ("info",
+	// "session ls"): each one blocks until its context ends, which is what a
+	// guest out of memory does.
+	silent map[string]bool
 	// tty records whether a command asked for a terminal.
 	tty bool
 	// calls records every command that ran.
@@ -561,6 +565,7 @@ func newFakeGuest(t *testing.T) *fakeGuest {
 		root:      t.TempDir(),
 		responses: map[string]string{},
 		errors:    map[string]boxctlAnswer{},
+		silent:    map[string]bool{},
 	}
 }
 
@@ -595,7 +600,7 @@ func (g *fakeGuest) Exec(ctx context.Context, opts ExecOpts) (int, error) {
 	case len(opts.Command) == 0:
 		return 0, fmt.Errorf("empty command")
 	case opts.Command[0] == boxctlPath:
-		return g.boxctl(opts)
+		return g.boxctl(ctx, opts)
 	case opts.Command[0] == "tar":
 		return g.tar(opts)
 	case opts.Command[0] == "mkdir":
@@ -609,9 +614,15 @@ func (g *fakeGuest) Exec(ctx context.Context, opts ExecOpts) (int, error) {
 	}
 }
 
-func (g *fakeGuest) boxctl(opts ExecOpts) (int, error) {
+func (g *fakeGuest) boxctl(ctx context.Context, opts ExecOpts) (int, error) {
 	args := opts.Command[1:]
 	key := strings.Join(args, " ")
+	if g.silent[key] {
+		<-ctx.Done()
+		// The real transport returns Nomad's -2 and the context's error; the
+		// command has to notice the bound, not the number.
+		return -2, ctx.Err()
+	}
 	var stdin string
 	if opts.Stdin != nil {
 		data, _ := io.ReadAll(opts.Stdin)
@@ -734,7 +745,9 @@ type testApp struct {
 func newTestApp(t *testing.T, indexBody string) *testApp {
 	t.Helper()
 	cluster := newFakeCluster()
-	cluster.addNode("node-1", "node-1", "amd64", 12000, 11961, 150000)
+	// 32 GiB, so the default box (4 GiB of RAM plus the VM overhead) fits under
+	// the quarter-of-a-node rule without --large.
+	cluster.addNode("node-1", "node-1", "amd64", 12000, 32768, 150000)
 	guest := newFakeGuest(t)
 	cluster.exec = guest
 	images := &fakeImages{body: indexBody, status: 200}

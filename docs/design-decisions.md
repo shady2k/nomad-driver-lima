@@ -70,6 +70,56 @@ and versions named in "What was measured".
   never from `lima.yaml`: right after create, a 4 GiB disk still showed 3 GiB of
   partition. The cost is real downtime.
 
+## A guest that stops answering
+
+Measured on a real node: a box of 2 vCPU and 2 GiB ran a large cgo build, the
+guest stopped answering (no reply to `boxctl info`, `box top` or `box session
+ls` - all three hung), and qemu spent about five host cores for twenty minutes
+reading the host page cache in 12 KiB pieces. The box disk is a qcow2 of zlib
+clusters with the image's cluster size, so qemu was inflating compressed clusters
+for a guest that re-read its program files, and the guest being out of RAM is the
+likely reason (not proven: no memory figure was kept). Three decisions follow
+from what the box looked like from outside.
+
+- **A box disk is built from an uncompressed copy of the image.** The published
+  image stays compressed (it is a download, and `images/build.sh` converts with
+  `-c`); the driver converts it once per image with `qemu-img convert -O qcow2`
+  (no `-c`) into its cache, next to the verified download, as a temporary file
+  renamed into place, owned by the runtime user, and reuses it for every box made
+  from that image. The copy stays thin: no preallocation, so the clusters the
+  image never wrote stay unallocated. A node without `qemu-img` falls back to the
+  compressed image and says so in a task event, because a box that starts from a
+  compressed disk is better than a box that does not start.
+- **A guest that does not answer says so in twenty seconds.** `box status`, `box
+  top` and `box session ls` bound their guest call (`guestCallTimeout`, 20 s) and
+  report "the guest does not answer (no reply in 20s): ..." -
+  `box status` after everything Nomad knows, `box top` and `box session ls` as a
+  failure with the timeout exit code that names `box logs` and `box status`. A
+  command that hung was the worst of the three: it showed nothing at all, not even
+  that the guest was the problem. `box wait`, `box send`, `box run` and `box exec`
+  are deliberately not bounded: they run work, and their caller decides how long.
+- **The image kills the process that takes the memory.** A guest out of RAM
+  becomes unusable before the kernel's own OOM killer acts, so
+  `images/provision.sh` installs `earlyoom` and runs it with `-m 10,5 -r 0
+  --avoid '(^|/)(boxd|sshd|systemd|lima-guestagent|qemu-ga)$'`: a process dies
+  while the guest can still run, the services that keep the box reachable are
+  never chosen, and the choice reaches the journal. `boxd` follows the `earlyoom`
+  unit (`watchEarlyOOM`, filter `earlyoomTrouble`) and writes "guest earlyoom:
+  ..." into its own log, which the task log already carries, so a box that was
+  short of memory says which process it lost. earlyoom takes no configuration of
+  ours and no secret, and knows nothing about the executors.
+- **A graceful stop is allowed 90 seconds, and the client must allow it too.**
+  `limactl stop` was killed at 30 s, which powers the guest off hard. Two log
+  lines say it: Nomad's own task event "Sent interrupt. Waiting 30s before force
+  killing" and the driver's "Graceful stop of box ... failed (signal: killed):
+  forcing the VM to stop". The chain is: the job's `kill_timeout`
+  (`boxStopTimeout`, 90 s) -> the client caps it with
+  `min(kill_timeout, client.max_kill_timeout)`, and Nomad's default for that is
+  30 s -> `StopTask` is called with 30 s -> the driver's context, and with it
+  `limactl stop`, ends at 30 s. The job already asked for 90 s; `deploy/ansible`
+  now writes `max_kill_timeout = 2m` on the client, which is what lets the ask
+  arrive.
+
 ## Root client, unprivileged VMs
 
 - **The Nomad client runs as root and every VM process does not.** Lima refuses

@@ -22,6 +22,9 @@ type sessionNewOutput struct {
 type sessionListOutput struct {
 	Box      string    `json:"box"`
 	Sessions []Session `json:"sessions"`
+	// GuestError explains why the guest did not answer. It is set only when the
+	// guest ran out of its call bound, and the command then exits 4.
+	GuestError string `json:"guest_error,omitempty"`
 }
 
 // cmdSession dispatches the session subcommands.
@@ -100,8 +103,19 @@ func (a *App) cmdSessionList(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	sessions, err := client.SessionList(ctx)
+	var sessions []Session
+	err = a.guestCall(ctx, "`boxctl session ls`", func(callCtx context.Context) error {
+		got, err := client.SessionList(callCtx)
+		if err != nil {
+			return err
+		}
+		sessions = got
+		return nil
+	})
 	if err != nil {
+		if isGuestSilent(err) {
+			return a.guestSilentFailure(id, err, sessionListOutput{Box: id, GuestError: err.Error()})
+		}
 		return wrapf(err, "the guest could not list the sessions")
 	}
 	if a.JSON {

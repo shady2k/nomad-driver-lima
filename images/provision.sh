@@ -224,7 +224,7 @@ apt-get install -y --no-install-recommends \
   unzip xz-utils tar gzip zstd procps psmisc lsof file less vim htop tmux \
   iproute2 net-tools iputils-ping dnsutils rsync sqlite3 strace sudo parted \
   docker.io docker-buildx docker-compose-v2 \
-  qemu-guest-agent openssh-server cloud-init
+  qemu-guest-agent openssh-server cloud-init earlyoom
 apt-get clean
 
 # --- docker ------------------------------------------------------------------
@@ -248,6 +248,51 @@ systemctl enable docker.service >/dev/null
 systemctl start docker.service
 for _ in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
 docker info --format 'docker server version: {{.ServerVersion}}' || echo 'docker daemon is not answering'
+
+# --- earlyoom -----------------------------------------------------------------
+# A box that ran out of memory did not answer at all: the guest thrashed, qemu
+# spent twenty minutes inflating the clusters of its disk, no session could be
+# asked anything, and nothing in the journal said why. earlyoom kills the process
+# that takes the memory while the guest can still run, and its choice reaches the
+# journal - which is the task log - so a box that was frozen by memory says which
+# process it was.
+#
+# The arguments are the whole of its configuration: it runs with no secrets and
+# knows nothing about the executors, and every box of this image runs it the same
+# way.
+#   -m 10,5     SIGTERM when 10% of the memory is available, SIGKILL below 5%.
+#               Written down rather than left to the default, so an image keeps
+#               the numbers it was checked with.
+#   -r 0        no periodic "mem avail" report: the journal is the record of what
+#               happened, not a counter that fills it.
+#   --avoid     never the processes that keep the box reachable: boxd (every
+#               boxctl call goes through it), sshd, systemd, lima-guestagent
+#               (what limactl shell talks to) and qemu-ga (the guest agent Lima's
+#               hostagent talks to). earlyoom matches the process name (comm,
+#               15 characters), which is what these are.
+#
+# The distribution's unit is kept and its ExecStart is emptied and written again,
+# so the arguments cannot drift from this recipe by way of /etc/default/earlyoom.
+log "earlyoom"
+install -d -m 0755 /etc/systemd/system/earlyoom.service.d
+cat > /etc/systemd/system/earlyoom.service.d/box.conf <<'EOF'
+# Written by images/provision.sh: what earlyoom kills, and when. An empty
+# ExecStart= drops the arguments the package's unit carries.
+[Service]
+ExecStart=
+ExecStart=/usr/bin/earlyoom -m 10,5 -r 0 --avoid '(^|/)(boxd|sshd|systemd|lima-guestagent|qemu-ga)$'
+EOF
+chmod 0644 /etc/systemd/system/earlyoom.service.d/box.conf
+systemctl daemon-reload
+systemctl enable earlyoom.service >/dev/null
+systemctl start earlyoom.service
+systemctl is-active --quiet earlyoom.service || fail "earlyoom.service did not start"
+EARLYOOM_ARGS=$(systemctl show -p ExecStart --value earlyoom.service)
+printf 'earlyoom args    %s\n' "$EARLYOOM_ARGS"
+# The build continues with installs that take most of this VM's memory, and a
+# process killer must not race them: the unit is enabled for a box's own boots,
+# and images/guest-checks.sh checks that it is active in one.
+systemctl stop earlyoom.service
 
 # --- node --------------------------------------------------------------------
 log "node $NODE_VERSION"
@@ -447,6 +492,8 @@ log "checks"
   printf 'buildx     %s\n' "$(docker buildx version 2>/dev/null || echo absent)"
   printf 'compose    %s\n' "$(docker compose version --short 2>/dev/null || echo absent)"
   printf 'opencode cfg %s\n' "$(tr -d '\n ' < /etc/opencode/opencode.json)"
+  printf 'earlyoom   %s\n' "$(earlyoom -v 2>&1 | head -1)"
+  printf 'earlyoom args %s\n' "$EARLYOOM_ARGS"
   printf 'platform   mount (the node mounts a bundle at /opt/box)\n'
 } | tee "$GUEST_CHECKS"
 

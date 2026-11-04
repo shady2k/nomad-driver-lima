@@ -72,6 +72,14 @@ nomad_node_name: '{{ ansible_facts.hostname }}'
 nomad_data_dir: /opt/nomad/data
 # Where Nomad keeps the directories of dynamic host volumes (the box disks).
 nomad_host_volumes_dir: /opt/nomad/volumes
+# The longest kill_timeout this client honours. Nomad caps a task's kill_timeout
+# at this value, and its own default is 30s; a box asks for 90s (the driver's
+# `boxStopTimeout`), because stopping a VM is a guest shutdown and not a signal.
+# At the default the client cut `limactl stop` off after 30 seconds
+# ("Graceful stop of box ... failed ... signal: killed"), which powers the guest
+# off hard. 2m leaves the 90s ask room on a node that is busy. A job that asks for
+# more than this is still capped here.
+nomad_client_max_kill_timeout: 2m
 # Refuse a path too long for the unix sockets kept under it (see the preflight).
 # Only the kit's own checks, which install into a long throwaway prefix, turn it off.
 nomad_socket_path_check: true

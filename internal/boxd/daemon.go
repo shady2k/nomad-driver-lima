@@ -81,6 +81,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	go d.usage.run(ctx, usageLog)
 	if d.cfg.Diagnostics {
 		go watchKernel(ctx, d.cfg.logf)
+		go watchEarlyOOM(ctx, d.cfg.logf)
 		go watchResources(ctx, d.cfg.logf, []string{"/"})
 		go tailDir(ctx, d.cfg.logf, "prime log", filepath.Join(d.cfg.executorsDir(), "prime", "logs"))
 	}

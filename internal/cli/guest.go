@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -16,6 +17,73 @@ import (
 // boxctlPath is the guest binary every guest call goes through
 // (docs/boxctl-contract.md).
 const boxctlPath = "/usr/local/bin/boxctl"
+
+// isGuestSilent reports whether err is a guest that ran out of its call bound.
+func isGuestSilent(err error) bool {
+	var silent *guestSilent
+	return errors.As(err, &silent)
+}
+
+// guestCallTimeout bounds the guest call of `box status`, `box top` and
+// `box session ls`: a guest that has stopped answering must not hang them.
+//
+// A guest out of memory does not answer at all: no reply to boxctl, and a
+// command that waited for it showed nothing - not even the facts Nomad had, and
+// not even that the guest was the problem. Twenty seconds is longer than a
+// healthy guest needs for `boxctl info` (one round trip through `nomad alloc
+// exec`) and short enough to read as a status rather than a hang.
+//
+// The commands that run work in the guest are not bounded this way: `box wait`,
+// `box send`, `box run` and `box exec` take as long as the work does, and their
+// caller decides (`--timeout`, Ctrl-C).
+const guestCallTimeout = 20 * time.Second
+
+// guestSilent is a guest call that ran out of its bound: the guest does not
+// answer. It carries the call and the cause for the sentence a person reads.
+type guestSilent struct {
+	// timeout is how long the call waited.
+	timeout time.Duration
+	// what names the call, e.g. "`boxctl info`".
+	what string
+	// err is what the transport reported when the call was cut.
+	err error
+}
+
+func (g *guestSilent) Error() string {
+	msg := fmt.Sprintf("the guest does not answer (no reply in %s): %s", g.timeout, g.what)
+	if g.err != nil {
+		msg += ": " + g.err.Error()
+	}
+	return msg
+}
+
+func (g *guestSilent) Unwrap() error { return g.err }
+
+// guestTimeout is the bound of a bounded guest call; the tests shorten it.
+func (a *App) guestTimeout() time.Duration {
+	if a.GuestTimeout > 0 {
+		return a.GuestTimeout
+	}
+	return guestCallTimeout
+}
+
+// guestCall runs one guest call with the guest call bound and turns the bound's
+// expiry into a guestSilent. what names the call for the message.
+//
+// The bound is a context, so the abandoned exec ends on the client side too:
+// Nomad's exec session returns as soon as its context ends and closes its
+// websocket (api.execSession.run), which is what makes the client stop waiting
+// for the call instead of leaving a stream and a goroutine behind.
+func (a *App) guestCall(ctx context.Context, what string, call func(context.Context) error) error {
+	timeout := a.guestTimeout()
+	bounded, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	err := call(bounded)
+	if err != nil && ctx.Err() == nil && errors.Is(bounded.Err(), context.DeadlineExceeded) {
+		return &guestSilent{timeout: timeout, what: what, err: err}
+	}
+	return err
+}
 
 // ExecOpts is one command in the box task's environment.
 type ExecOpts struct {
@@ -129,18 +197,36 @@ type GuestUsage struct {
 	Load5         float64 `json:"load5"`
 	MemTotalMiB   uint64  `json:"mem_total_mib"`
 	MemAvailMiB   uint64  `json:"mem_available_mib"`
-	DiskPath      string  `json:"disk_path"`
-	DiskTotalMiB  uint64  `json:"disk_total_mib"`
-	DiskFreeMiB   uint64  `json:"disk_free_mib"`
-	Top           string  `json:"top,omitempty"`
+	// MemoryPressure is the guest kernel's own report on memory stalls, absent
+	// from a boxd on a kernel without /proc/pressure/memory.
+	MemoryPressure *GuestPressure `json:"memory_pressure,omitempty"`
+	DiskPath       string         `json:"disk_path"`
+	DiskTotalMiB   uint64         `json:"disk_total_mib"`
+	DiskFreeMiB    uint64         `json:"disk_free_mib"`
+	Top            string         `json:"top,omitempty"`
+}
+
+// GuestPressure is how much of the last ten seconds the guest was stalled on
+// memory: some of its tasks, or all of them.
+type GuestPressure struct {
+	SomeAvg10 float64 `json:"some_avg10"`
+	FullAvg10 float64 `json:"full_avg10"`
 }
 
 // Line is the usage in one line, the way box status and box top print it.
 func (u *GuestUsage) Line() string {
 	used := u.MemTotalMiB - u.MemAvailMiB
-	s := fmt.Sprintf("CPU %.0f%% (iowait %.0f%%), load %.1f %.1f, memory %d of %d MiB used (%d available), disk %s %.1f of %.1f GiB used",
-		u.CPUPercent, u.IOWaitPercent, u.Load1, u.Load5, used, u.MemTotalMiB, u.MemAvailMiB,
-		dash(u.DiskPath), float64(u.DiskTotalMiB-u.DiskFreeMiB)/1024, float64(u.DiskTotalMiB)/1024)
+	parts := []string{
+		fmt.Sprintf("CPU %.0f%% (iowait %.0f%%)", u.CPUPercent, u.IOWaitPercent),
+		fmt.Sprintf("load %.1f %.1f", u.Load1, u.Load5),
+		fmt.Sprintf("memory %d of %d MiB used (%d available)", used, u.MemTotalMiB, u.MemAvailMiB),
+	}
+	if p := u.MemoryPressure; p != nil {
+		parts = append(parts, fmt.Sprintf("memory pressure some %.1f%% full %.1f%% (avg10)", p.SomeAvg10, p.FullAvg10))
+	}
+	parts = append(parts, fmt.Sprintf("disk %s %.1f of %.1f GiB used",
+		dash(u.DiskPath), float64(u.DiskTotalMiB-u.DiskFreeMiB)/1024, float64(u.DiskTotalMiB)/1024))
+	s := strings.Join(parts, ", ")
 	if u.Top != "" {
 		s += "; the most resident: " + u.Top
 	}

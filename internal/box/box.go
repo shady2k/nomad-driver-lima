@@ -63,8 +63,13 @@ type Options struct {
 	Limactl string
 	// LimaHome is LIMA_HOME for this driver; a real directory per box lives here.
 	LimaHome string
-	// ImageCacheDir holds downloaded cloud images, keyed by sha256.
+	// ImageCacheDir holds downloaded cloud images, keyed by sha256, and the
+	// uncompressed copy of each one a box disk is built from.
 	ImageCacheDir string
+	// QEMUImg is the qemu-img binary that uncompresses an image once per
+	// image (default "qemu-img" from PATH). Without it a box disk is built
+	// from the compressed download, and a task event says so.
+	QEMUImg string
 	// MemoryOverheadMiB is added to the guest memory for the cgroup limit.
 	MemoryOverheadMiB int
 	// VMType is the Lima VM type (qemu or vz); empty means the OS default.
@@ -179,6 +184,9 @@ func New(opts Options) (*Manager, error) {
 	}
 	if opts.SystemdRun == "" {
 		opts.SystemdRun = "systemd-run"
+	}
+	if opts.QEMUImg == "" {
+		opts.QEMUImg = qemuImgName
 	}
 	if opts.FilesRoot == "" {
 		opts.FilesRoot = DefaultFilesRoot()
@@ -455,7 +463,9 @@ func (b *Box) ownVolumeDir(dir string) {
 // failure a half-created instance directory is removed again.
 func (b *Box) createInstance(ctx context.Context, platformDir string) error {
 	spec := b.spec
-	imagePath, err := b.EnsureImage(ctx, spec.ImageURL, spec.ImageSHA256, func(percent int) {
+	// The disk is built from an uncompressed copy: a compressed image gives a
+	// disk whose clusters qemu has to inflate on every read (image.go).
+	imagePath, err := b.EnsureImageDisk(ctx, spec.ImageURL, spec.ImageSHA256, func(percent int) {
 		b.event("image", fmt.Sprintf("Image download %d%%", percent))
 	})
 	if err != nil {

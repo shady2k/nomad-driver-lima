@@ -58,7 +58,7 @@ waits until the box is running.
 | `--arch amd64\|arm64` | the node's | architecture |
 | `--platform V` | the newest published for the architecture | the platform bundle to mount at `/opt/box`; only an image built for bundles takes one |
 | `--cpus N` | 2 | guest vCPUs |
-| `--memory-mib N` | 2048 | guest RAM: an agent session with its tools needs it |
+| `--memory-mib N` | 4096 | guest RAM: an agent session with its tools plus a build of the box's own work needs it, and a guest that runs out of memory stops answering its `boxctl` calls entirely |
 | `--disk-gib N` | 8 | disk size (it can only grow later) |
 | `--node NAME` | – | pin the box to this node |
 | `--large` | false | allow more than a quarter of the node's CPU, memory or disk |
@@ -90,6 +90,12 @@ occupies on the host, and its sessions.
 
 One box in detail: state, task events (default 10), the platform bundle it
 mounts, the guest and its executors, the sessions, the disk.
+
+The guest is asked with a 20 second bound. A guest that does not answer - what a
+guest out of memory does - costs one line ("the guest does not answer (no reply in
+20s): ...", `guest_error` under `--json`) instead of the status: everything Nomad
+knows is printed either way, and the exit code stays `0` unless the guest was the
+whole of what the status had to show.
 
 ### `box stop <id> [--timeout D]` / `box start <id> [--timeout D] [--wait]`
 
@@ -189,9 +195,16 @@ destination.
 
 What the guest is doing, as boxd measures it every five seconds: CPU and the
 part of it waiting on the disk (iowait), the load average, memory used and
-available, the disk's use, and the three processes with the most resident
-memory. `-f` prints it again every five seconds; `box status` shows the same
-line as `usage`.
+available, the memory pressure the guest kernel reports (`some` and `full`
+avg10), the disk's use, and the three processes with the most resident memory.
+`-f` prints it again every five seconds; `box status` shows the same line as
+`usage`.
+
+A guest that does not answer within 20 seconds fails the command with exit code
+`4` and a sentence that says what to look at (`box logs`, `box status`); under
+`--json` the document carries `guest_error`. `box session ls` behaves the same
+way. `box wait`, `box send`, `box run` and `box exec` are not bounded: they are
+as long as the work they start.
 
 ### `box logs <id> [-f]`
 

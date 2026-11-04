@@ -1,16 +1,27 @@
 package box
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
+
+// qemuImgName is the qemu-img binary EnsureImageDisk looks for when the manager
+// names none. It comes from PATH the way limactl does.
+const qemuImgName = "qemu-img"
+
+// uncompressedSuffix names the uncompressed copy of an image in the cache: it
+// sits next to the verified download and carries the same sha256 key.
+const uncompressedSuffix = ".uncompressed.qcow2"
 
 // EnsureImage makes the cloud image available in the cache directory, keyed by
 // its sha256. A cached file is re-verified; a new download is written to a
@@ -74,6 +85,125 @@ func (b *Box) EnsureImage(ctx context.Context, url, wantSHA256 string, progress 
 	}
 	b.event("image", fmt.Sprintf("Downloaded image %s (%s, sha256 verified)", filepath.Base(dest), humanBytes(size)))
 	return dest, nil
+}
+
+// EnsureImageDisk returns the image a new box disk is built from: an
+// uncompressed qcow2 copy of the verified download, made once per image and
+// reused by every box after it.
+//
+// A published image is compressed (images/build.sh converts with -c) to keep the
+// download small, and Lima builds a box disk out of it as it is: the disk of a
+// box then carries compressed clusters, and qemu inflates them again on every
+// read of a guest file. A box of 2 vCPU and 2 GiB that ran a large cgo build was
+// out of memory, the guest read its program files over and over, and qemu spent
+// about five host cores for twenty minutes inflating cluster after cluster of
+// its own disk, reading the host's page cache in 12 KiB pieces. An uncompressed
+// copy costs one conversion per image and the disk of every box made from it has
+// plain clusters from the first boot.
+//
+// If qemu-img is not installed the compressed image is handed back and a task
+// event says so: a box that starts from a compressed image is what this code did
+// before, and a box that does not start at all is worse.
+func (b *Box) EnsureImageDisk(ctx context.Context, url, wantSHA256 string, progress func(percent int)) (string, error) {
+	imagePath, err := b.EnsureImage(ctx, url, wantSHA256, progress)
+	if err != nil {
+		return "", err
+	}
+	dest := uncompressedPath(imagePath)
+	if st, err := os.Stat(dest); err == nil && st.Mode().IsRegular() && st.Size() > 0 {
+		b.event("image", fmt.Sprintf("Using the uncompressed image %s", filepath.Base(dest)))
+		return dest, nil
+	}
+	if err := b.uncompress(ctx, imagePath, dest); err != nil {
+		var missing *qemuImgMissing
+		if errors.As(err, &missing) {
+			b.event("image", fmt.Sprintf("Box disk stays compressed: %v. Install qemu-img on the node so a new box disk has plain clusters", err))
+		} else {
+			b.event("image", fmt.Sprintf("Box disk stays compressed: %v. The conversion runs again for the next box", err))
+		}
+		return imagePath, nil
+	}
+	b.event("image", fmt.Sprintf("Uncompressed image %s ready (qemu-img convert, reused by every box on this node)", filepath.Base(dest)))
+	return dest, nil
+}
+
+// uncompressedPath is where the uncompressed copy of an image lives: next to the
+// verified download, under the same sha256 key.
+func uncompressedPath(imagePath string) string {
+	return strings.TrimSuffix(imagePath, ".img") + uncompressedSuffix
+}
+
+// qemuImgMissing says that the node has no qemu-img, which is a setting an
+// operator can change rather than a failure of this box.
+type qemuImgMissing struct {
+	name string
+	err  error
+}
+
+func (e *qemuImgMissing) Error() string {
+	return fmt.Sprintf("%s is not installed (%v)", e.name, e.err)
+}
+
+func (e *qemuImgMissing) Unwrap() error { return e.err }
+
+// uncompress writes an uncompressed qcow2 copy of src to dest with qemu-img,
+// into a temporary file in the cache that is renamed into place: a half
+// conversion is never used, and a second box made from the same image at the
+// same moment converts alongside it and loses nothing (both outputs are the same
+// bytes).
+func (b *Box) uncompress(ctx context.Context, src, dest string) error {
+	name := b.m.opts.QEMUImg
+	if name == "" {
+		name = qemuImgName
+	}
+	qemuImg, err := exec.LookPath(name)
+	if err != nil {
+		return &qemuImgMissing{name: name, err: err}
+	}
+	tmp, err := os.CreateTemp(b.m.opts.ImageCacheDir, filepath.Base(dest)+".*.part")
+	if err != nil {
+		return fmt.Errorf("create a temporary file for the uncompressed image: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", tmpName, err)
+	}
+	// qemu-img writes the file itself, as the runtime user, so the temporary
+	// file belongs to that user before it is filled, like the download.
+	if err := b.m.opts.Identity.Chown(tmpName); err != nil {
+		return fmt.Errorf("give the uncompressed image to %s: %w", b.m.opts.Identity.Name, err)
+	}
+	b.event("image", fmt.Sprintf("Uncompressing image %s once for every box on this node", filepath.Base(src)))
+	// No -c: plain clusters are the point. No preallocation option either, so
+	// the copy is as thin as the download.
+	cmd := b.m.childCommand(ctx, qemuImg, "convert", "-O", "qcow2", src, tmpName)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("qemu-img convert %s: %w%s", filepath.Base(src), err, suffix(stderr.String()))
+	}
+	if err := syncFile(tmpName); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		return fmt.Errorf("install the uncompressed image into the cache: %w", err)
+	}
+	return nil
+}
+
+// syncFile flushes a file qemu-img wrote, so a power loss cannot leave a
+// renamed but empty image behind.
+func syncFile(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync %s: %w", path, err)
+	}
+	return nil
 }
 
 // verifyFile reports whether path exists and has the expected sha256. A size

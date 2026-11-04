@@ -256,8 +256,11 @@ func RenderJob(spec BoxSpec) (*api.Job, error) {
 			Volume:      strPtr(boxDiskVolume),
 			Destination: strPtr(boxDiskMount),
 		}},
-		// Stopping a VM takes longer than Nomad's 5 second default; the
-		// driver's own stop timeout is 60 seconds.
+		// Stopping a VM takes longer than Nomad's 5 second default, and longer
+		// than Nomad's own cap: the client trims this value to its
+		// `max_kill_timeout` (30s by default, 2m in deploy/ansible), and at 30s
+		// the client cut `limactl stop` off mid-shutdown and the guest was
+		// powered off hard. The driver's own stop timeout is 60 seconds.
 		KillTimeout: durPtr(boxStopTimeout),
 		// The executor credentials arrive as task files, one template per item,
 		// so the job never carries a secret value: a plain item is read out of

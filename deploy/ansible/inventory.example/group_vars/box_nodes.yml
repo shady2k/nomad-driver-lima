@@ -54,6 +54,10 @@ nomad_meta:
 # Where Nomad keeps the directories of dynamic host volumes (the box disks).
 # nomad_host_volumes_dir: /opt/nomad/volumes
 
+# The longest a task's kill_timeout may be: Nomad caps it at this, and its own
+# default of 30s cuts a VM's graceful shutdown off halfway. A box asks for 90s.
+# nomad_client_max_kill_timeout: 2m
+
 # An ancestor of those paths that the node already had, and that keeps the runtime
 # user out: the volume directory can be right while /opt/nomad is root:root 0750,
 # and then the first box fails with permission denied. The role applies these

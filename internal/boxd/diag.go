@@ -182,16 +182,46 @@ func tailDir(ctx context.Context, logf func(string, ...any), label, dir string) 
 var kernelTrouble = regexp.MustCompile(`(?i)out of memory|oom-kill|oom_reaper|killed process|i/o error|ext4-fs (error|warning)|` +
 	`buffer i/o|no space left|blocked for more than|soft lockup|hard lockup|segfault|general protection|call trace|remounting filesystem read-only`)
 
+// earlyoomTrouble is what of earlyoom's journal matters for a box: that the
+// guest ran out of memory, which process earlyoom killed for it, and whether it
+// had to escalate to SIGKILL. Its periodic "mem avail" report, its startup lines
+// and the "Will avoid killing process names ..." line are not news.
+//
+// The patterns are earlyoom's own wording (1.9): "low memory! at or below
+// SIGTERM limits", "Low memory! Killing process 4711 "cc1"", "sending SIGTERM to
+// process 4711 uid 0 ...", "escalating to SIGKILL after 10.000 seconds".
+var earlyoomTrouble = regexp.MustCompile(`(?i)low memory|SIG(TERM|KILL) to process|Killing process [0-9]|` +
+	`killing whole process group|escalating to SIGKILL|SIGTERM and SIGKILL`)
+
 // watchKernel follows the guest kernel log and writes the lines of
 // kernelTrouble to the journal as "guest kernel: ...". Without journalctl
 // (a test, a guest without systemd) it does nothing.
 func watchKernel(ctx context.Context, logf func(string, ...any)) {
+	followJournal(ctx, logf, "guest kernel", kernelTrouble, "-k", "-f", "-n", "0", "-o", "cat")
+}
+
+// watchEarlyOOM follows the guest's earlyoom service, which is what kills a
+// process when the guest runs out of memory before the kernel would: a box whose
+// guest was frozen by memory has to say which process earlyoom chose, or the
+// task log shows a guest that stopped and nothing about why.
+//
+// It is a journal watch of its own, not part of watchKernel: earlyoom's lines
+// are not kernel lines, and -o cat drops the "earlyoom[pid]:" prefix that would
+// otherwise name them.
+func watchEarlyOOM(ctx context.Context, logf func(string, ...any)) {
+	followJournal(ctx, logf, "guest earlyoom", earlyoomTrouble, "-u", "earlyoom", "-f", "-n", "0", "-o", "cat")
+}
+
+// followJournal follows one part of the journal and writes the lines keep
+// matches to the journal under label, at most 20 a minute. A guest without
+// journalctl (a test, a guest without systemd) gets nothing.
+func followJournal(ctx context.Context, logf func(string, ...any), label string, keep *regexp.Regexp, args ...string) {
 	bin, err := exec.LookPath("journalctl")
 	if err != nil {
 		return
 	}
 	for ctx.Err() == nil {
-		cmd := exec.CommandContext(ctx, bin, "-k", "-f", "-n", "0", "-o", "cat")
+		cmd := exec.CommandContext(ctx, bin, args...)
 		out, err := cmd.StdoutPipe()
 		if err != nil {
 			return
@@ -204,14 +234,14 @@ func watchKernel(ctx context.Context, logf func(string, ...any)) {
 		said, window := 0, time.Now()
 		for sc.Scan() {
 			line := sc.Text()
-			if !kernelTrouble.MatchString(line) {
+			if !keep.MatchString(line) {
 				continue
 			}
 			if time.Since(window) > time.Minute {
 				said, window = 0, time.Now()
 			}
 			if said++; said <= 20 {
-				logf("guest kernel: %s", oneLine(line, 300))
+				logf("%s: %s", label, oneLine(line, 300))
 			}
 		}
 		_ = cmd.Wait()
@@ -348,6 +378,82 @@ func topProcesses(n int) string {
 	return strings.Join(parts, ", ")
 }
 
+// --- memory stall -------------------------------------------------------------
+
+// memoryPressurePath is where the Linux kernel reports memory pressure, if it is
+// built with PSI (CONFIG_PSI, on by default since 4.20).
+const memoryPressurePath = "/proc/pressure/memory"
+
+const (
+	// memoryStallAvg10 is the share of the last ten seconds a guest has to be
+	// stalled on memory for this to count as a stall: 10%.
+	memoryStallAvg10 = 10.0
+	// memoryPressureSaidAfter is how long the stall has to last before the
+	// journal hears of it, so a single spike says nothing.
+	memoryPressureSaidAfter = time.Minute
+)
+
+// Pressure is what the kernel says about a resource's stalls: the share of the
+// last ten seconds in which some (or, for "full", every) task was stalled on it.
+// The kernel also reports the last sixty and three hundred seconds; only the ten
+// second figures are kept, because they are the ones that say "now".
+type Pressure struct {
+	// SomeAvg10 is the percentage of the last ten seconds in which at least one
+	// task was stalled.
+	SomeAvg10 float64 `json:"some_avg10"`
+	// FullAvg10 is the percentage of the last ten seconds in which every task
+	// was stalled: the guest did nothing but wait for memory.
+	FullAvg10 float64 `json:"full_avg10"`
+}
+
+// readPressure reads the pressure file at path. A kernel without the file (no
+// PSI) is not an error: the guest simply has nothing to say about pressure, and
+// nil says exactly that.
+func readPressure(path string) *Pressure {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var p Pressure
+	var some, full bool
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		avg10, ok := avgField(fields[1:], "avg10")
+		if !ok {
+			continue
+		}
+		switch fields[0] {
+		case "some":
+			p.SomeAvg10, some = avg10, true
+		case "full":
+			p.FullAvg10, full = avg10, true
+		}
+	}
+	if !some && !full {
+		return nil
+	}
+	return &p
+}
+
+// avgField returns the value of key in the k=v pairs of one pressure line.
+func avgField(fields []string, key string) (float64, bool) {
+	for _, field := range fields {
+		value, ok := strings.CutPrefix(field, key+"=")
+		if !ok {
+			continue
+		}
+		v, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return 0, false
+		}
+		return v, true
+	}
+	return 0, false
+}
+
 // --- what the guest is doing, for box status and box top ----------------------
 
 // Usage is the guest's load as boxd last measured it.
@@ -359,10 +465,13 @@ type Usage struct {
 	Load5         float64   `json:"load5"`
 	MemTotalMiB   uint64    `json:"mem_total_mib"`
 	MemAvailMiB   uint64    `json:"mem_available_mib"`
-	DiskPath      string    `json:"disk_path"`
-	DiskTotalMiB  uint64    `json:"disk_total_mib"`
-	DiskFreeMiB   uint64    `json:"disk_free_mib"`
-	Top           string    `json:"top,omitempty"`
+	// MemoryPressure is the kernel's own report on memory stalls, nil on a
+	// kernel without /proc/pressure/memory.
+	MemoryPressure *Pressure `json:"memory_pressure,omitempty"`
+	DiskPath       string    `json:"disk_path"`
+	DiskTotalMiB   uint64    `json:"disk_total_mib"`
+	DiskFreeMiB    uint64    `json:"disk_free_mib"`
+	Top            string    `json:"top,omitempty"`
 }
 
 // usageSampler measures the guest every usageEvery and keeps the last sample.
@@ -376,6 +485,21 @@ type usageSampler struct {
 	// after a minute of it.
 	ioSince time.Time
 	ioSaid  bool
+	// memSince is when the memory stall started; the journal hears of it after
+	// a minute of it, once per crossing.
+	memSince time.Time
+	memSaid  bool
+	// pressureFile is where the memory pressure file is read from;
+	// memoryPressurePath when empty (the tests point it at a file).
+	pressureFile string
+}
+
+// pressurePath is the file this sampler reads memory pressure from.
+func (u *usageSampler) pressurePath() string {
+	if u.pressureFile != "" {
+		return u.pressureFile
+	}
+	return memoryPressurePath
 }
 
 const usageEvery = 5 * time.Second
@@ -409,7 +533,8 @@ func (u *usageSampler) sample(logf func(string, ...any)) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	s := Usage{At: time.Now().UTC(), Load1: l1, Load5: l5, MemTotalMiB: total >> 20, MemAvailMiB: avail >> 20,
-		DiskPath: "/", DiskTotalMiB: st.Blocks * uint64(st.Bsize) >> 20, DiskFreeMiB: st.Bavail * uint64(st.Bsize) >> 20,
+		MemoryPressure: readPressure(u.pressurePath()),
+		DiskPath:       "/", DiskTotalMiB: st.Blocks * uint64(st.Bsize) >> 20, DiskFreeMiB: st.Bavail * uint64(st.Bsize) >> 20,
 		Top: topProcesses(3)}
 	if u.prevAll > 0 && all > u.prevAll {
 		d := float64(all - u.prevAll)
@@ -436,6 +561,27 @@ func (u *usageSampler) sample(logf func(string, ...any)) {
 			logf("guest disk wait is back to %.0f%%", s.IOWaitPercent)
 		}
 		u.ioSince, u.ioSaid = time.Time{}, false
+	}
+	if p := s.MemoryPressure; p != nil {
+		switch {
+		case p.FullAvg10 > memoryStallAvg10:
+			if u.memSince.IsZero() {
+				u.memSince = s.At
+			}
+			if !u.memSaid && s.At.Sub(u.memSince) >= memoryPressureSaidAfter {
+				u.memSaid = true
+				logf("guest is stalled on memory: full avg10=%.1f%%, MemAvailable %d of %d MiB; the biggest processes: %s",
+					p.FullAvg10, s.MemAvailMiB, s.MemTotalMiB, s.Top)
+			}
+		// Half the threshold is the way back, so a stall that hovers around 10%
+		// does not say so again every ten seconds.
+		case p.FullAvg10 < memoryStallAvg10/2:
+			if u.memSaid {
+				logf("guest memory stall is over: full avg10=%.1f%%, %d MiB available of %d MiB",
+					p.FullAvg10, s.MemAvailMiB, s.MemTotalMiB)
+			}
+			u.memSince, u.memSaid = time.Time{}, false
+		}
 	}
 }
 

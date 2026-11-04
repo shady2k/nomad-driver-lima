@@ -811,4 +811,25 @@ func TestTopPrintsWhatTheGuestIsDoing(t *testing.T) {
 		"disk / 4.0 of 15.0 GiB used", "go 900 MiB"} {
 		require.Contains(t, out, want)
 	}
+	require.NotContains(t, out, "memory pressure", "a boxd that reports no pressure adds no field")
+}
+
+// TestTopShowsTheMemoryStall: the kernel's own pressure numbers are part of what
+// the guest is doing, and they are what says a guest is stalling rather than
+// working.
+func TestTopShowsTheMemoryStall(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.addBox(t, "dev1")
+	ta.guest.responses["info"] = `{"boxd_version":"0.1.15","usage":{"at":"2026-11-04T16:44:00Z","cpu_percent":12,` +
+		`"mem_total_mib":4096,"mem_available_mib":90,"memory_pressure":{"some_avg10":72.5,"full_avg10":31.0},` +
+		`"disk_path":"/","disk_total_mib":10240,"disk_free_mib":9216,"top":"cc1 900 MiB"}}`
+	require.Equal(t, ExitOK, ta.run(t, "top", "dev1"), ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "memory pressure some 72.5% full 31.0% (avg10)")
+
+	ta.out.Reset()
+	require.Equal(t, ExitOK, ta.run(t, "top", "dev1", "--json"), ta.errOut.String())
+	var doc topOutput
+	require.NoError(t, json.Unmarshal(ta.out.Bytes(), &doc))
+	require.NotNil(t, doc.Usage.MemoryPressure)
+	require.Equal(t, 31.0, doc.Usage.MemoryPressure.FullAvg10)
 }

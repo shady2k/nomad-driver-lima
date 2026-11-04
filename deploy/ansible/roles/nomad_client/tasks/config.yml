@@ -21,7 +21,8 @@
     nomad_client_block: >-
       {{ {'enabled': nomad_client_enabled | bool,
           'servers': nomad_servers,
-          'host_volumes_dir': nomad_host_volumes_dir}
+          'host_volumes_dir': nomad_host_volumes_dir,
+          'max_kill_timeout': nomad_client_max_kill_timeout}
          | combine({'node_pool': nomad_node_pool} if nomad_node_pool | length > 0 else {})
          | combine({'meta': nomad_meta} if nomad_meta | length > 0 else {})
          | combine({'reserved': nomad_reserved} if nomad_reserved | length > 0 else {})

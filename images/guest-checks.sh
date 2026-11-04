@@ -168,6 +168,25 @@ fi
 BOX_ACTIVE=$(systemctl is-active boxd.service 2>/dev/null || true)
 check "boxd.service is active" "active" "$BOX_ACTIVE"
 
+# --- earlyoom ------------------------------------------------------------------
+printf '\n== earlyoom\n'
+# earlyoom is what kills the process that takes the memory before the guest
+# thrashes itself into not answering at all (images/provision.sh). Its arguments
+# are the whole of its configuration, so they are what is checked: enabled, and
+# running with the memory limits, without the periodic report, and avoiding the
+# processes that keep the box reachable.
+if systemctl is-enabled --quiet earlyoom.service 2>/dev/null; then
+  pass "earlyoom.service is enabled" "enabled" "enabled"
+else
+  fail "earlyoom.service is enabled" "enabled" "$(systemctl is-enabled earlyoom.service 2>&1 | head -1)"
+fi
+check "earlyoom.service is active" "active" "$(systemctl is-active earlyoom.service 2>/dev/null || true)"
+EARLYOOM_START=$(systemctl show -p ExecStart --value earlyoom.service 2>/dev/null || true)
+for want in '-m 10,5' '-r 0' '--avoid' 'boxd' 'sshd' 'systemd' 'lima-guestagent'; do
+  check "earlyoom runs with $want" "present" "$(grep -qF -- "$want" <<<"$EARLYOOM_START" && echo present || echo missing)"
+done
+info "earlyoom     $(earlyoom -v 2>&1 | head -1), $(short "$EARLYOOM_START")"
+
 # boxctl is where the image keeps it: the bundle for a platform image, and
 # /usr/local/bin for the older shape. Every call below names the path, so the
 # result does not depend on this shell's PATH.

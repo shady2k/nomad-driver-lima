@@ -23,12 +23,15 @@ type createOutput struct {
 	Prepare *PrepareState `json:"prepare,omitempty"`
 }
 
-// Defaults of `box create`, also what `box images` suggests. 2048 MiB because
-// an agent session with its tools needs it: prime's Python kernel installs
-// pandas into a venv, which 1024 MiB boots but does not comfortably hold.
+// Defaults of `box create`, also what `box images` suggests. 4096 MiB because a
+// guest that runs out of memory does not answer at all: an agent session with
+// its tools, plus a build of the box's own work, filled 2048 MiB and the guest
+// then stalled - no reply to boxctl, qemu inflating disk clusters for twenty
+// minutes while the kernel thrashed. The extra RAM is the cheaper half of that
+// failure by far.
 const (
 	defaultCPUs      = 2
-	defaultMemoryMiB = 2048
+	defaultMemoryMiB = 4096
 	defaultDiskGiB   = 8
 )
 
