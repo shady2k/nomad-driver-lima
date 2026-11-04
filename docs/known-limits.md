@@ -81,7 +81,8 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   but the whole path (a box job reading the variable under real ACLs) was not run
   end to end. A box created after `acl.yml` needs its workload policy attached
   once (`deploy/acl/apply.sh workloads <id>`); until then its executors report
-  "not configured".
+  "not configured". The first real run found the operator policy missing
+  `host_volume "box-*"` (fixed in v0.1.5).
 
 ## Images
 

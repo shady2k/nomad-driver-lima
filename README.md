@@ -459,6 +459,9 @@ client restarts and the same allocation, VM and session are still there.
 `-e box_version=0.1.1`) and run `site.yml` again (`cd deploy/ansible` first, as in
 step 6). The new release installs next to the live one, `current` moves when the
 install is complete and verified, and each node's client restarts once.
+Upgrading from v0.1.4 or older on a cluster with ACLs: run `acl.yml` again too
+(the coordinator policy gained `host_volume "box-*"`; see "ACLs and secrets" in
+`deploy/README.md` for a token with a policy of its own).
 
 **Roll back** to a release that is already on the host:
 

@@ -441,6 +441,19 @@ Anything bigger is a Nomad installation of its own (three servers,
   reads each policy first, so a second run reports `changed=0`. The capabilities each
   policy grants, and why a box needs a job-attached policy at all, are in
   `deploy/acl/README.md`.
+- **A coordinator token needs a host volume rule, not only namespace
+  capabilities.** Nomad checks every host volume of a job by name when it is
+  registered: without `host_volume "box-*" { capabilities = ["mount-readwrite"] }`
+  each `box create`, `start` and `resize` is refused with a bare 403, even with
+  `submit-job`. `box-operator.policy.hcl` grants it since v0.1.5; an older
+  installation runs `acl.yml` again, and a coordinator whose token carries a
+  policy of its own adds the rule to that policy:
+
+  ```hcl
+  host_volume "box-*" {
+    capabilities = ["mount-readwrite"]
+  }
+  ```
 - `box create` does not touch ACLs on purpose (the CLI token has no ACL write), so a
   box created after `acl.yml` needs `box_acl_workload_jobs=[<id>]` once - or
   `deploy/acl/apply.sh workloads <id>`.
