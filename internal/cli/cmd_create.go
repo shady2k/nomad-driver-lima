@@ -15,8 +15,10 @@ type createOutput struct {
 	Job    string         `json:"job"`
 	Volume string         `json:"volume"`
 	Image  *ImageArtifact `json:"image"`
-	Node   string         `json:"node"`
-	Warn   string         `json:"warning,omitempty"`
+	// Platform is the platform bundle the box mounts, when its image takes one.
+	Platform *PlatformArtifact `json:"platform,omitempty"`
+	Node     string            `json:"node"`
+	Warn     string            `json:"warning,omitempty"`
 	// Prepare is the box's preparation, when create was given its sources.
 	Prepare *PrepareState `json:"prepare,omitempty"`
 }
@@ -40,6 +42,8 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	memoryMiB := fs.Int("memory-mib", defaultMemoryMiB, "guest RAM in MiB")
 	diskGiB := fs.Int("disk-gib", defaultDiskGiB, "box disk size in GiB (on a dynamic host volume)")
 	nodeName := fs.String("node", "", "pin the box to this node")
+	platformVersion := fs.String("platform", "", "platform bundle version to mount "+
+		"(default: the newest published for the box's architecture)")
 	large := fs.Bool("large", false, "allow more than a quarter of a node's CPU, memory or disk")
 	src := addPrepareFlags(fs)
 	prepTimeout := fs.Duration("prepare-timeout", defaultPrepareTimeout, "time limit of the preparation, and how long create waits for it")
@@ -116,6 +120,7 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	var (
 		node    *NodeCapacity
 		image   *ImageArtifact
+		bundle  *PlatformArtifact
 		reasons []string
 		codes   []int
 	)
@@ -131,6 +136,45 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 			codes = append(codes, ExitCode(err))
 			continue
 		}
+		// The image's own index entry decides whether a bundle is mounted: an
+		// image that carries its own boxd keeps running it, and its /opt/box is
+		// not hidden by a mount. The bundle belongs to the candidate that is
+		// chosen, so it is reset with each candidate: an arm64 image that carries
+		// its own boxd must not inherit the amd64 candidate's bundle.
+		var candidateBundle *PlatformArtifact
+		if artifact.Platform != "mount" {
+			if want := strings.TrimSpace(*platformVersion); want != "" {
+				return usagef("box create %s: the image %s does not take a platform bundle (its index entry has no "+
+					"\"platform\": \"mount\"), so --platform does not apply: that image runs the boxd it carries",
+					id, artifact.Version)
+			}
+		} else {
+			if len(index.Platforms) == 0 {
+				// No architecture can be served: the index has no bundle at all.
+				return errorf("the image %s needs a platform bundle, but the image index %s lists none yet",
+					artifact.Version, indexURL)
+			}
+			want := strings.TrimSpace(*platformVersion)
+			if want == "" {
+				want = "latest"
+			}
+			resolved, err := index.ResolvePlatform(want, candidate)
+			if err != nil {
+				if want == "latest" && ExitCode(err) == ExitNotFound {
+					err = notFoundf("the image %s needs a platform bundle and none is published for architecture %s; published: %s",
+						artifact.Version, candidate, strings.Join(index.PlatformVersions(), ", "))
+				}
+				reasons = append(reasons, err.Error())
+				codes = append(codes, ExitCode(err))
+				continue
+			}
+			if err := resolved.Validate(); err != nil {
+				reasons = append(reasons, err.Error())
+				codes = append(codes, ExitCode(err))
+				continue
+			}
+			candidateBundle = resolved
+		}
 		requested.Arch = candidate
 		chosen, _, err := ChooseNode(nodes, requested)
 		if err != nil {
@@ -138,7 +182,7 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 			codes = append(codes, ExitCode(err))
 			continue
 		}
-		node, image = chosen, artifact
+		node, image, bundle = chosen, artifact, candidateBundle
 		break
 	}
 	if node == nil || image == nil {
@@ -158,6 +202,7 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	}
 
 	spec := BoxSpec{
+		CPUMHzPerVCPU: int(node.vcpuMHz()),
 		ID:           id,
 		ImageVersion: image.Version,
 		ImageURL:     image.URL,
@@ -167,6 +212,11 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		MemoryMiB:    *memoryMiB,
 		DiskGiB:      *diskGiB,
 		NodeID:       node.NodeID,
+	}
+	if bundle != nil {
+		spec.PlatformVersion = bundle.Version
+		spec.PlatformURL = bundle.URL
+		spec.PlatformSHA256 = bundle.SHA256
 	}
 	spec.ExecutorItems = a.executorItems(ctx)
 	spec.VaultRole = strings.TrimSpace(*vaultRole)
@@ -186,10 +236,11 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 			BoxVolumeName(id), node.Name)
 	}
 	repo := &createOutput{
-		Job:    BoxJobName(id),
-		Volume: created.ID,
-		Image:  image,
-		Node:   node.Name,
+		Job:      BoxJobName(id),
+		Volume:   created.ID,
+		Image:    image,
+		Platform: bundle,
+		Node:     node.Name,
 	}
 
 	resp, err := a.Nomad.RegisterJob(ctx, job)
@@ -292,6 +343,10 @@ func (a *App) printCreate(out *createOutput) error {
 	box := out.Box
 	a.note("created box %s (job %s) on node %s", box.ID, out.Job, out.Node)
 	a.note("  image  %s (%s) sha256 %s", out.Image.Version, out.Image.Arch, shortSHA(out.Image.SHA256))
+	if out.Platform != nil {
+		a.note("  platform %s (boxd %s, sha256 %s)", out.Platform.Version, dash(out.Platform.Boxd),
+			shortSHA(out.Platform.SHA256))
+	}
 	a.note("  size   %d vCPU, %d MiB RAM, %d GiB disk", box.CPUs, box.MemoryMiB, box.DiskGiB)
 	a.note("  state  %s%s", box.State, allocationSuffix(box))
 	if out.Warn != "" {

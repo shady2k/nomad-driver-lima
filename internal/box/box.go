@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shady2k/nomad-driver-lima/internal/identity"
@@ -32,6 +33,11 @@ const (
 	// reached memory.max within 20 minutes, its qemu spent five cores
 	// reclaiming, and the guest got I/O errors and stopped.
 	DefaultMemoryOverheadMiB = 512
+
+	// CPUOverheadCores is the host CPU a box may use above its vCPUs: qemu's main
+	// loop and its disk threads run outside them. Without it they would take
+	// their time from the guest.
+	CPUOverheadCores = 1
 
 	// gracefulStopTimeout bounds a shutdown the driver starts by itself (the
 	// graceful limit Nomad asks for comes from StopTask).
@@ -94,6 +100,10 @@ type Spec struct {
 	// task's local/ and secrets/ files (files.go); empty means the defaults.
 	FilesDirInGuest   string
 	SecretsDirInGuest string
+	// Platform is the bundle the guest mounts read-only at /opt/box: the boxd
+	// and the executors of the box. Nil means the image's own boxd runs
+	// (platform.go).
+	Platform *PlatformSpec
 }
 
 // Validate checks the parts of the spec the driver cannot check from HCL.
@@ -106,6 +116,14 @@ func (s *Spec) Validate() error {
 	}
 	if s.ImageURL == "" || s.ImageSHA256 == "" {
 		return fmt.Errorf("%w: image.url and image.sha256 are required", ErrInvalidSpec)
+	}
+	if s.Platform != nil {
+		if _, err := normalizeSHA(s.Platform.SHA256); err != nil {
+			return fmt.Errorf("%w: platform.sha256: %v", ErrInvalidSpec, err)
+		}
+		if s.Platform.URL == "" {
+			return fmt.Errorf("%w: platform.url is required", ErrInvalidSpec)
+		}
 	}
 	if s.CPUs <= 0 {
 		return fmt.Errorf("%w: cpus must be positive", ErrInvalidSpec)
@@ -129,12 +147,17 @@ type State struct {
 	Resized    bool
 	CgroupMode string // "systemd-scope" when the VM runs under a memory cap
 	VMType     string
+	// PlatformDir is the unpacked platform bundle the guest mounts at /opt/box,
+	// "" when the box runs the boxd its image carries.
+	PlatformDir string
 }
 
 // Manager creates and adopts boxes. It is safe for concurrent use.
 type Manager struct {
 	opts Options
 	lima *limactl.Client
+	// platformMu serialises putting an unpacked platform bundle in place.
+	platformMu sync.Mutex
 }
 
 // New returns a Manager. It does not touch the host.
@@ -278,6 +301,17 @@ func (b *Box) Ensure(ctx context.Context) (*State, error) {
 	}
 	b.ownVolumeDir(volumeDir)
 
+	// The bundle is in the cache before anything boots: the guest mounts it from
+	// its first second, like the task files.
+	platformDir := ""
+	if spec.Platform != nil {
+		dir, err := b.EnsurePlatform(ctx, *spec.Platform)
+		if err != nil {
+			return nil, err
+		}
+		platformDir = dir
+	}
+
 	volDisk := b.DiskPath()
 	state := &State{BoxID: spec.BoxID, DiskPath: volDisk, VMType: spec.VMType}
 
@@ -295,7 +329,7 @@ func (b *Box) Ensure(ctx context.Context) (*State, error) {
 			state.Adopted = true
 			b.event("adopt", fmt.Sprintf("Volume %s holds the disk of box %s but the Lima instance directory is gone: recreating the instance around the existing disk", volumeDir, spec.BoxID))
 		}
-		if err := b.createInstance(ctx); err != nil {
+		if err := b.createInstance(ctx, platformDir); err != nil {
 			return nil, err
 		}
 		inst, err = b.m.lima.Get(ctx, spec.BoxID)
@@ -337,7 +371,7 @@ func (b *Box) Ensure(ctx context.Context) (*State, error) {
 	}
 
 	if inst != nil && b.m.Alive(inst) {
-		diff := b.m.configDiff(inst, spec)
+		diff := b.m.configDiff(inst, spec, platformDir)
 		if diff == "" {
 			b.event("adopt", fmt.Sprintf("Box %s is already running with the requested configuration: attaching to the existing VM (disk %s)", spec.BoxID, volDisk))
 			state.Instance = inst
@@ -363,6 +397,13 @@ func (b *Box) Ensure(ctx context.Context) (*State, error) {
 	}
 	state.Resized = resized
 
+	// An existing instance keeps the mounts it was created with, and Lima reads
+	// them from its own lima.yaml: the platform block (also a changed one, which
+	// is what an upgrade re-registers) is written there before the VM starts.
+	if err := b.applyPlatformMount(inst, platformDir); err != nil {
+		return nil, err
+	}
+
 	mode, err := b.m.startInstance(ctx, b)
 	if err != nil {
 		return nil, err
@@ -381,8 +422,12 @@ func (b *Box) Ensure(ctx context.Context) (*State, error) {
 		return nil, fmt.Errorf("limactl start finished but box %s is %s", spec.BoxID, status)
 	}
 	state.Instance = inst
+	state.PlatformDir = platformDir
 	b.event("start", fmt.Sprintf("Box %s is running (pid %d, %d vCPU, %d MiB RAM, disk %s, cgroup %s)",
 		spec.BoxID, inst.DriverPID, spec.CPUs, spec.MemoryMiB, volDisk, mode))
+	if platformDir != "" {
+		b.event("platform", platformMessage(spec.Platform, platformDir))
+	}
 	return state, nil
 }
 
@@ -408,7 +453,7 @@ func (b *Box) ownVolumeDir(dir string) {
 
 // createInstance writes the Lima configuration and creates the instance. On
 // failure a half-created instance directory is removed again.
-func (b *Box) createInstance(ctx context.Context) error {
+func (b *Box) createInstance(ctx context.Context, platformDir string) error {
 	spec := b.spec
 	imagePath, err := b.EnsureImage(ctx, spec.ImageURL, spec.ImageSHA256, func(percent int) {
 		b.event("image", fmt.Sprintf("Image download %d%%", percent))
@@ -416,7 +461,7 @@ func (b *Box) createInstance(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	content, err := renderLimaYAML(spec, imagePath, b.m.guestMounts(spec))
+	content, err := renderLimaYAML(spec, imagePath, b.m.guestMounts(spec, platformDir))
 	if err != nil {
 		return err
 	}
@@ -544,7 +589,9 @@ func (b *Box) resize(ctx context.Context, inst *limactl.Instance) (bool, error) 
 	if inst.IsRunning() {
 		return false, fmt.Errorf("refusing to resize running box %s", b.spec.BoxID)
 	}
-	diff := b.m.configDiff(inst, b.spec)
+	// A resize is only about cpu, memory and disk: the platform mount is
+	// written by applyPlatformMount, which compares it itself.
+	diff := b.m.configDiff(inst, b.spec, b.m.instancePlatformMount(inst))
 	if diff == "" {
 		return false, nil
 	}
@@ -881,8 +928,9 @@ func (m *Manager) ReattachReason(inst *limactl.Instance) string {
 }
 
 // configDiff describes how the instance differs from the requested
-// configuration ("" when it matches).
-func (m *Manager) configDiff(inst *limactl.Instance, spec Spec) string {
+// configuration ("" when it matches). platformDir is the unpacked bundle the
+// task asks for, "" when it asks for none.
+func (m *Manager) configDiff(inst *limactl.Instance, spec Spec, platformDir string) string {
 	var parts []string
 	if inst.CPUs != 0 && inst.CPUs != spec.CPUs {
 		parts = append(parts, fmt.Sprintf("cpus %d -> %d", inst.CPUs, spec.CPUs))
@@ -892,6 +940,12 @@ func (m *Manager) configDiff(inst *limactl.Instance, spec Spec) string {
 	}
 	if want := int64(spec.DiskGiB) * 1024 * 1024 * 1024; inst.Disk != 0 && inst.Disk != want {
 		parts = append(parts, fmt.Sprintf("disk %d GiB -> %d GiB", inst.Disk/(1024*1024*1024), spec.DiskGiB))
+	}
+	// The bundle a VM mounts is part of its configuration: a new platform block
+	// (an upgrade) has to stop the box, write the mount and start it again, or
+	// the guest keeps the boxd it booted with.
+	if current := m.instancePlatformMount(inst); current != platformDir {
+		parts = append(parts, platformDiff(current, platformDir))
 	}
 	return strings.Join(parts, ", ")
 }

@@ -181,6 +181,31 @@
     - box_system_changes | bool
     - box_controllers.rc | default(1) != 0
 
+- name: Scope | Report when the cpu controller is not delegated to the user manager
+  ansible.builtin.command:
+    argv: ['grep', '-qw', 'cpu', '/sys/fs/cgroup/user.slice/user-{{ box_runtime_uid }}.slice/user@{{ box_runtime_uid }}.service/cgroup.controllers']
+  register: box_cpu_controller
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - box_os == 'linux'
+    - box_cgroup_enabled | bool
+    - box_system_changes | bool
+
+- name: Scope | Warn when the cpu controller is missing
+  ansible.builtin.debug:
+    msg: >-
+      The cpu controller is not delegated to user@{{ box_runtime_uid }}.service,
+      so a box scope gets no cpu.max and one box can take every core of this node.
+      Add cpu to Delegate= with a drop-in for user@.service. The driver still starts
+      the boxes and reports the missing limit as a task event.
+  when:
+    - box_os == 'linux'
+    - box_cgroup_enabled | bool
+    - box_system_changes | bool
+    - box_cpu_controller.rc | default(1) != 0
+
 # ------------------------------------------------------------------ the release
 # Nomad matches an external task driver to its `plugin` block by the executable
 # name, so the driver is installed as "box"; the volume plugin keeps its own name

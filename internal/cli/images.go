@@ -32,6 +32,29 @@ type ImageArtifact struct {
 	SHA256  string `json:"sha256"`
 	Size    int64  `json:"size"`
 	BuiltAt string `json:"built_at,omitempty"`
+	// Platform is the image's own "platform" field. "mount" means the image
+	// expects a platform bundle at /opt/box; any other value (or none) means it
+	// runs the boxd it carries.
+	Platform string `json:"platform,omitempty"`
+}
+
+// PlatformArtifact is one published platform bundle: one version for one
+// architecture.
+//
+// The bundle holds what moves faster than an image -- boxd, boxctl and the
+// executors -- and the node mounts it read-only into the guest, so an image does
+// not have to be rebuilt for every boxd change.
+type PlatformArtifact struct {
+	Version string `json:"version"`
+	Arch    string `json:"arch"`
+	URL     string `json:"url"`
+	SHA256  string `json:"sha256"`
+	Size    int64  `json:"size"`
+	BuiltAt string `json:"built_at,omitempty"`
+	// Boxd is the boxd version the bundle carries.
+	Boxd string `json:"boxd,omitempty"`
+	// Tools maps a tool name to the version the bundle carries of it.
+	Tools map[string]string `json:"tools,omitempty"`
 }
 
 // ImageIndex is the parsed index.json: every version, every architecture.
@@ -40,6 +63,10 @@ type ImageIndex struct {
 	UpdatedAt string
 	// Images maps a version to its artifacts per architecture.
 	Images map[string]map[string]*ImageArtifact
+	// Platforms maps a platform bundle version to its artifacts per
+	// architecture. An index without "platforms" has no bundles: that is a
+	// valid index, because images come first and bundles follow.
+	Platforms map[string]map[string]*PlatformArtifact
 }
 
 // ImageSource fetches the index document. The integer is the HTTP status.
@@ -112,7 +139,10 @@ func ParseImageIndex(body []byte) (*ImageIndex, error) {
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, fmt.Errorf("not a JSON object: %w", err)
 	}
-	index := &ImageIndex{Images: map[string]map[string]*ImageArtifact{}}
+	index := &ImageIndex{
+		Images:    map[string]map[string]*ImageArtifact{},
+		Platforms: map[string]map[string]*PlatformArtifact{},
+	}
 	if raw, ok := doc["schema"]; ok {
 		_ = json.Unmarshal(raw, &index.Schema)
 	}
@@ -168,7 +198,103 @@ func ParseImageIndex(body []byte) (*ImageIndex, error) {
 			index.Images[version][arch] = artifact
 		}
 	}
+	index.Platforms = parsePlatforms(doc["platforms"])
 	return index, nil
+}
+
+// parsePlatforms reads the "platforms" object of the index.
+//
+//	{"platforms": {"<version>": {"<arch>": {"url","sha256","size","boxd","tools"}}}}
+//
+// The key is optional: an index published before there were bundles lists no
+// platforms, and that index is valid. A platforms entry that is not an object
+// is skipped rather than failing the whole index, so one broken bundle does not
+// hide the images beside it.
+func parsePlatforms(raw json.RawMessage) map[string]map[string]*PlatformArtifact {
+	out := map[string]map[string]*PlatformArtifact{}
+	if len(raw) == 0 {
+		return out
+	}
+	var byVersion map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &byVersion); err != nil {
+		// "platforms" is there but is not an object of versions: nothing to
+		// read, and no reason to refuse the images.
+		return out
+	}
+	for version, versionRaw := range byVersion {
+		var arches map[string]json.RawMessage
+		if err := json.Unmarshal(versionRaw, &arches); err != nil {
+			continue
+		}
+		for arch, artifactRaw := range arches {
+			artifact, ok := parsePlatformArtifact(artifactRaw)
+			if !ok {
+				continue
+			}
+			artifact.Version = version
+			artifact.Arch = NormalizeArch(arch)
+			if out[version] == nil {
+				out[version] = map[string]*PlatformArtifact{}
+			}
+			out[version][artifact.Arch] = artifact
+		}
+	}
+	return out
+}
+
+// parsePlatformArtifact reads one platform bundle entry. The second value is
+// false for an entry that is not an object or that names neither a url nor a
+// sha256, which is how a key that is not a bundle (a "built_at" beside the
+// arches, say) is skipped.
+func parsePlatformArtifact(raw json.RawMessage) (*PlatformArtifact, bool) {
+	var doc struct {
+		URL     string          `json:"url"`
+		SHA256  string          `json:"sha256"`
+		Size    int64           `json:"size"`
+		BuiltAt string          `json:"built_at"`
+		Boxd    string          `json:"boxd"`
+		Tools   json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, false
+	}
+	if doc.URL == "" && doc.SHA256 == "" {
+		return nil, false
+	}
+	return &PlatformArtifact{
+		URL:     doc.URL,
+		SHA256:  doc.SHA256,
+		Size:    doc.Size,
+		BuiltAt: doc.BuiltAt,
+		Boxd:    doc.Boxd,
+		Tools:   parseToolVersions(doc.Tools),
+	}, true
+}
+
+// parseToolVersions reads a bundle's "tools" map.
+//
+// A value that is not a JSON string is skipped: the bundle's tool list is a
+// report, not a reason to refuse the index.
+func parseToolVersions(raw json.RawMessage) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	out := make(map[string]string, len(doc))
+	for name, valueRaw := range doc {
+		var version string
+		if err := json.Unmarshal(valueRaw, &version); err != nil {
+			continue
+		}
+		out[name] = version
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func ensureArches(m map[string]map[string]*ImageArtifact, version string) map[string]*ImageArtifact {
@@ -272,6 +398,96 @@ func (i *ImageIndex) Resolve(version, arch string) (*ImageArtifact, error) {
 			version, arch, strings.Join(have, ", "))
 	}
 	return artifact, nil
+}
+
+// PlatformVersions returns the platform bundle versions in the index, newest
+// first.
+func (i *ImageIndex) PlatformVersions() []string {
+	out := make([]string, 0, len(i.Platforms))
+	for v := range i.Platforms {
+		out = append(out, v)
+	}
+	sort.Slice(out, func(a, b int) bool { return versionLess(out[b], out[a]) })
+	return out
+}
+
+// PlatformArtifacts returns every platform bundle, newest version first, amd64
+// before arm64.
+func (i *ImageIndex) PlatformArtifacts() []*PlatformArtifact {
+	var out []*PlatformArtifact
+	for _, version := range i.PlatformVersions() {
+		for _, arch := range ImageArchitectures {
+			if a := i.Platforms[version][arch]; a != nil {
+				out = append(out, a)
+			}
+		}
+		for arch, a := range i.Platforms[version] {
+			if arch != "amd64" && arch != "arm64" {
+				out = append(out, a)
+			}
+		}
+	}
+	return out
+}
+
+// ResolvePlatform returns the platform bundle of one version and architecture.
+//
+// The version "latest" means the newest version that has this architecture; it
+// is what `box create` and `box upgrade` mount unless a version is named.
+func (i *ImageIndex) ResolvePlatform(version, arch string) (*PlatformArtifact, error) {
+	arch = NormalizeArch(arch)
+	if version == "latest" || version == "" {
+		for _, v := range i.PlatformVersions() {
+			if a := i.Platforms[v][arch]; a != nil {
+				return a, nil
+			}
+		}
+		if len(i.Platforms) == 0 {
+			return nil, notFoundf("the image index lists no platform bundles yet")
+		}
+		return nil, notFoundf("no platform bundle is published for architecture %s; published versions: %s",
+			arch, strings.Join(i.PlatformVersions(), ", "))
+	}
+
+	arches, ok := i.Platforms[version]
+	if !ok {
+		return nil, notFoundf("there is no platform bundle version %q; published versions: %s",
+			version, strings.Join(i.PlatformVersions(), ", "))
+	}
+	artifact, ok := arches[arch]
+	if !ok {
+		have := make([]string, 0, len(arches))
+		for a := range arches {
+			have = append(have, a)
+		}
+		sort.Strings(have)
+		return nil, notFoundf("platform bundle %s is not published for architecture %s; it has: %s",
+			version, arch, strings.Join(have, ", "))
+	}
+	return artifact, nil
+}
+
+// Validate checks that a platform bundle can be mounted into a box.
+func (a *PlatformArtifact) Validate() error {
+	if a.URL == "" {
+		return errorf("the platform bundle %s/%s has no url in the image index", a.Version, a.Arch)
+	}
+	sum := strings.TrimSpace(a.SHA256)
+	if len(sum) >= len("sha256:") && strings.EqualFold(sum[:len("sha256:")], "sha256:") {
+		sum = sum[len("sha256:"):]
+	}
+	sum = strings.ToLower(sum)
+	if sum == "" {
+		return errorf("the platform bundle %s/%s has no sha256 in the image index", a.Version, a.Arch)
+	}
+	if len(sum) != 64 {
+		return errorf("the platform bundle %s/%s has a sha256 of %d characters, want 64", a.Version, a.Arch, len(sum))
+	}
+	if _, err := hex.DecodeString(sum); err != nil {
+		return errorf("the platform bundle %s/%s has a sha256 that is not hexadecimal", a.Version, a.Arch)
+	}
+	a.SHA256 = sum
+	return nil
 }
 
 // Validate checks that an artifact can be used to create a box.

@@ -39,7 +39,13 @@ subtracting the running VMs that no task owns.
 
 ### `box images`
 
-The base image versions published in the index, newest first.
+The base image versions published in the index, newest first, and the platform
+bundles published with them.
+
+An image whose index entry says `"platform": "mount"` expects a platform bundle:
+its `boxd`, `boxctl` and its executors come from that bundle, which is mounted
+read-only at `/opt/box` when the box starts. An image without the field runs the
+`boxd` it carries, and nothing of it changes.
 
 ### `box create <id> [flags]`
 
@@ -50,6 +56,7 @@ waits until the box is running.
 | --- | --- | --- |
 | `--image V` | – (required) | base image version from the index |
 | `--arch amd64\|arm64` | the node's | architecture |
+| `--platform V` | the newest published for the architecture | the platform bundle to mount at `/opt/box`; only an image built for bundles takes one |
 | `--cpus N` | 2 | guest vCPUs |
 | `--memory-mib N` | 2048 | guest RAM: an agent session with its tools needs it |
 | `--disk-gib N` | 8 | disk size (it can only grow later) |
@@ -67,6 +74,13 @@ a node's CPU, memory or disk: a larger request names the node and what it asked
 for, and is refused unless `--large` is given. Start at the defaults and grow
 with `box resize`, which holds to the same quarter.
 
+An image built for bundles gets one mounted at `/opt/box` without asking: the
+newest bundle for the box's architecture. `--platform <version>` picks an older
+one, and `box upgrade` moves a box on later. The image that does not take a
+bundle refuses `--platform` and says so, and an image that needs one is refused
+when the index has no bundle for its architecture: a box never boots with half
+of what its image expects.
+
 ### `box ls`
 
 Every box with its state, node, allocation, image, size, the disk it really
@@ -74,8 +88,8 @@ occupies on the host, and its sessions.
 
 ### `box status <id> [--events N]`
 
-One box in detail: state, task events (default 10), the guest and its
-executors, the sessions, the disk.
+One box in detail: state, task events (default 10), the platform bundle it
+mounts, the guest and its executors, the sessions, the disk.
 
 ### `box stop <id> [--timeout D]` / `box start <id> [--timeout D] [--wait]`
 
@@ -92,6 +106,25 @@ refuses to ask from a non-interactive shell.
 Changes the size of a box. It is an **offline** change: the VM stops, is edited
 and starts again. Memory must be at least 256 MiB, and the disk can only grow.
 More than a quarter of the node needs `--large`, as with `box create`.
+
+### `box upgrade <id> [--platform VERSION] [--timeout D] [--wait]`
+
+Moves a box to the newest platform bundle, or to the one `--platform` names. It
+re-registers the box job, so the box **restarts** -- its disk, its files and the
+transcripts of its sessions are kept -- and comes back with the bundle mounted
+at `/opt/box`. This is how a box picks up a new `boxd` or new executors without
+a new image, and how a project image derived from a base image stays as it is.
+
+The command needs the image index to know what the box's image expects:
+
+- an image that does not take a bundle runs the `boxd` it carries; `box upgrade`
+  refuses it and says why (the image has to be rebuilt for bundles first);
+- a bundle version the index does not publish is a not-found error that lists
+  the published ones;
+- a box created before bundles existed has none: `box upgrade` gives it the
+  newest one for its architecture.
+
+`--wait=false` returns as soon as Nomad has taken the new job.
 
 ## Preparing a box
 

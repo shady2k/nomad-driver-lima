@@ -92,6 +92,43 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   made Nomad ask for `alloc-node-exec` on every guest command (both fixed in
   v0.1.5).
 
+## Platform bundles
+
+- **Unused bundle directories stay in the cache.** A bundle is one immutable
+  directory per sha256 under `<image_cache_dir>/platform/`, and nothing removes
+  one: a running box may mount any of them, and a bundle is shared by every box
+  on the node, so a deletion heuristic is not obviously safe. The cost is the
+  size of the unpacked archive per bundle version (a few tens of MB); an
+  operator who needs the space removes a directory that no `lima.yaml` of a
+  running instance names. `box` has no command for it.
+- **A bundle is trusted by sha256 only.** Like an image, it is pinned by digest
+  through the index: no signature, no transparency log. Whoever can write the
+  index decides what `boxd` and which executors run in every box.
+- **The driver mounts what the task names and checks nothing else.** It never
+  asks the index what the box's architecture or its image expects: a hand-written
+  job can point a task at an archive for another architecture, or at one whose
+  `manifest.json` names another version than the block. The mount then does not
+  boot (`boxd.service` fails on an incompatible binary) and the task log says
+  so; the CLI is what keeps the two in step.
+- **The mount is only there for an image that declares it.** An image built for
+  bundles carries `"platform": "mount"` twice (in `/etc/box/image.json` and on
+  its index entry). An image without the field gets no block from the CLI, and
+  a hand-written task that adds one hides the image's own `/opt/box` under the
+  mount.
+- **`box upgrade` restarts the box.** The bundle is a mount of the instance's
+  configuration, so a new one means stop, write, start: the VM is down for a
+  boot, and an in-flight session turn dies with it. Plan an upgrade like a
+  resize, with the sessions idle.
+- **The guest's `boxd.service` needs the mount, and nothing waits for it.** The
+  unit has `RequiresMountsFor=/opt/box`, so a box that starts without the mount
+  fails instead of running an image's stale `boxd` -- but the failure is only
+  visible in the task log and `box status`, not in the box state.
+- **The mount is 9p on a Linux node.** The executors are started from the
+  mount, so a large binary is read over 9p on its first run (with fscache, once).
+  It was not measured against a run from the box disk, and no bundle of the
+  real executors was measured at all: the end-to-end check uses a hand-made
+  bundle.
+
 ## Images
 
 - **This project publishes no image, and never carries an image binary.** It keeps
@@ -200,7 +237,7 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   restarted client to a running external plugin, so the plugin stops when its
   client goes away. It can go when Nomad fixes reattachment.
 - **Capacity's uncounted numbers are a convention.** `box capacity` subtracts
-  1000 MHz per vCPU and reads everything from the driver's periodic fingerprint,
+  the node's reservation per vCPU and reads everything from the driver's periodic fingerprint,
   so a stale fingerprint either double-counts a VM or misses it.
 
 ## Deploy

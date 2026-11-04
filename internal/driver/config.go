@@ -160,6 +160,19 @@ type ImageConfig struct {
 	SHA256 string `codec:"sha256"`
 }
 
+// PlatformConfig is the task's optional platform block: the bundle of boxd and
+// executors the guest mounts read-only at /opt/box.
+//
+// It is optional and has the shape of the image block, so a job that does not
+// name one behaves exactly as before: the box runs the boxd its image carries.
+type PlatformConfig struct {
+	// Version names the bundle for messages and task events. The sha256 is what
+	// identifies it: the driver checks the download against it.
+	Version string `codec:"version"`
+	URL     string `codec:"url"`
+	SHA256  string `codec:"sha256"`
+}
+
 // TaskConfig is the driver configuration of one box task.
 type TaskConfig struct {
 	BoxID           string      `codec:"box_id"`
@@ -176,6 +189,9 @@ type TaskConfig struct {
 	// the guest, owned by root with mode 0700. A credential must never be on the
 	// box disk, and boxd reads this directory (see internal/boxd).
 	SecretsDirInGuest string `codec:"secrets_dir_in_guest"`
+	// Platform is the platform bundle the guest mounts at /opt/box. Nil means
+	// the image's own boxd runs.
+	Platform *PlatformConfig `codec:"platform"`
 }
 
 // taskConfigSpec is the HCL schema of the task's driver block.
@@ -209,6 +225,13 @@ var taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 		hclspec.NewAttr("secrets_dir_in_guest", "string", false),
 		hclspec.NewLiteral(`"`+box.DefaultSecretsDirInGuest+`"`),
 	),
+	// Optional, like a block a newer CLI writes and an older driver ignores: a
+	// task without it runs the boxd its image carries.
+	"platform": hclspec.NewBlock("platform", false, hclspec.NewObject(map[string]*hclspec.Spec{
+		"version": hclspec.NewAttr("version", "string", false),
+		"url":     hclspec.NewAttr("url", "string", true),
+		"sha256":  hclspec.NewAttr("sha256", "string", true),
+	})),
 })
 
 // applyDefaults fills the optional fields and validates the required ones.
@@ -248,6 +271,19 @@ func (c *TaskConfig) applyDefaults() error {
 	}
 	if c.CPUs <= 0 || c.MemoryMiB <= 0 || c.DiskGiB <= 0 {
 		return fmt.Errorf("cpus, memory_mib and disk_gib must be positive")
+	}
+	if p := c.Platform; p != nil {
+		// Validated like the image block: the sha256 is what the download is
+		// checked against, so a task without a usable one must not start.
+		if p.SHA256 == "" {
+			return fmt.Errorf("platform.sha256 is required")
+		}
+		if p.URL == "" {
+			return fmt.Errorf("platform.url is required")
+		}
+		if _, err := box.NormalizeSHA256(p.SHA256); err != nil {
+			return fmt.Errorf("platform.sha256: %w", err)
+		}
 	}
 	return nil
 }

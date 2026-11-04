@@ -236,6 +236,7 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 		out.Warn = "nothing to change: the box already has these values"
 		return a.printLifecycle(&out)
 	}
+	a.refreshCPUReservation(ctx, &spec, box.NodeID)
 	if !*large {
 		if err := a.checkShare(ctx, spec, box.NodeID); err != nil {
 			return err
@@ -441,6 +442,25 @@ func (a *App) waitForNoLiveAllocs(ctx context.Context, jobID string, timeout tim
 		}
 		if err := a.sleep(ctx, waitPollInterval); err != nil {
 			return wrapf(err, "stopped waiting for %s to stop", jobID)
+		}
+	}
+}
+
+// refreshCPUReservation sets what one vCPU of the box reserves on its node, so
+// a box re-registered for any other reason gets the node's real figure. A node
+// Nomad cannot describe leaves the job's figure as it is.
+func (a *App) refreshCPUReservation(ctx context.Context, spec *BoxSpec, nodeID string) {
+	if nodeID == "" {
+		nodeID = spec.NodeID
+	}
+	nodes, err := a.nodeCapacities(ctx)
+	if err != nil {
+		return
+	}
+	for _, n := range nodes {
+		if nodeID != "" && n.NodeID == nodeID {
+			spec.CPUMHzPerVCPU = int(n.vcpuMHz())
+			return
 		}
 	}
 }

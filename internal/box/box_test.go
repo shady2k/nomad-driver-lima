@@ -407,7 +407,7 @@ func TestStageTaskFiles(t *testing.T) {
 	require.DirExists(t, filepath.Join(dir, "local"), "the mount point's source stays")
 
 	// The guest mounts exactly the two directories, at the guest paths.
-	mounts := m.guestMounts(Spec{BoxID: "box1"})
+	mounts := m.guestMounts(Spec{BoxID: "box1"}, "")
 	require.Equal(t, []limaMount{
 		{Location: filepath.Join(dir, "local"), MountPoint: "/etc/box/local"},
 		{Location: filepath.Join(dir, "secrets"), MountPoint: DefaultSecretsDirInGuest},

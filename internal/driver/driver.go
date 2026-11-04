@@ -582,6 +582,9 @@ func (d *Driver) boxFor(h *taskHandle, volumeDir string, rep box.Reporter) (*box
 		FilesDirInGuest:   h.cfg.FilesDirInGuest,
 		SecretsDirInGuest: h.cfg.SecretsDirInGuest,
 	}
+	if p := h.cfg.Platform; p != nil {
+		spec.Platform = &box.PlatformSpec{Version: p.Version, URL: p.URL, SHA256: p.SHA256}
+	}
 	return d.boxm.Box(spec, rep)
 }
 

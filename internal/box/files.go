@@ -41,8 +41,13 @@ const defaultFilesDirInGuest = "/etc/box"
 // FilesDir is the host directory of one box's task files.
 func (m *Manager) FilesDir(boxID string) string { return filepath.Join(m.opts.FilesRoot, boxID) }
 
-// guestMounts are the two mounts of a box: host directory -> guest path.
-func (m *Manager) guestMounts(spec Spec) []limaMount {
+// guestMounts are the mounts of a box: host directory -> guest path.
+//
+// platformDir is the unpacked platform bundle, or "" when the box runs the boxd
+// its image carries. The bundle is mounted with a 9p cache: it is one immutable
+// directory per bundle version, so caching it costs nothing and saves every
+// guest read of boxd and of the executors.
+func (m *Manager) guestMounts(spec Spec, platformDir string) []limaMount {
 	files, secrets := spec.FilesDirInGuest, spec.SecretsDirInGuest
 	if files == "" {
 		files = defaultFilesDirInGuest
@@ -51,10 +56,18 @@ func (m *Manager) guestMounts(spec Spec) []limaMount {
 		secrets = DefaultSecretsDirInGuest
 	}
 	dir := m.FilesDir(spec.BoxID)
-	return []limaMount{
+	mounts := []limaMount{
 		{Location: filepath.Join(dir, boxLocalDir), MountPoint: filepath.Join(files, boxLocalDir)},
 		{Location: filepath.Join(dir, boxSecretsDir), MountPoint: secrets},
 	}
+	if platformDir != "" {
+		mounts = append(mounts, limaMount{
+			Location:   platformDir,
+			MountPoint: PlatformMountPoint,
+			Cache:      CacheFscache,
+		})
+	}
+	return mounts
 }
 
 // StageTaskFiles puts the task's local/ and secrets/ files into the box's host

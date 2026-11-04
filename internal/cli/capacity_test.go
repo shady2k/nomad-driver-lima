@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -416,4 +417,45 @@ func TestBuildCapacityIgnoresKeysOfAGoneBox(t *testing.T) {
 	require.Equal(t, "lost", cap.Driver.Orphans)
 	require.Equal(t, "amd64", cap.Arch, "the node's own attributes are still read")
 	require.NotEmpty(t, cap.Driver.Version)
+}
+
+// The node from production: 8 cores of 2 GHz with 500 MHz kept by the client
+// takes exactly four boxes of 2 vCPU.
+func TestReservationFitsFourBoxesOnEightCores(t *testing.T) {
+	cluster := newFakeCluster()
+	node := cluster.addNode("node-1", "node-1", "amd64", 15992, 64000, 900000)
+	node.Attributes["cpu.numcores"] = "8"
+	node.ReservedResources = &api.NodeReservedResources{Cpu: api.NodeReservedCpuResources{CpuShares: 500}}
+	req := PlacementRequest{CPUs: 2, MemoryMiB: 4096, DiskGiB: 16}
+
+	var allocs []*api.Allocation
+	for placed := 0; placed < 4; placed++ {
+		capacity := BuildCapacity(node, allocs)
+		require.Equal(t, int64(1936), capacity.CPUMHzPerVCPU)
+		require.Empty(t, capacity.NodeProblem(req), "box %d", placed+1)
+		allocs = append(allocs, &api.Allocation{ID: fmt.Sprint("a", placed), ClientStatus: "running",
+			AllocatedResources: &api.AllocatedResources{Tasks: map[string]*api.AllocatedTaskResources{
+				"box": {Cpu: api.AllocatedCpuResources{CpuShares: 2 * capacity.CPUMHzPerVCPU}},
+			}}})
+	}
+	require.Contains(t, BuildCapacity(node, allocs).NodeProblem(req), "MHz of CPU free")
+}
+
+func TestMHzPerVCPUFallsBack(t *testing.T) {
+	require.Equal(t, int64(1936), mhzPerVCPU(15992, 500, "8"))
+	require.Equal(t, int64(boxCPUSharesPerVCPU), mhzPerVCPU(15992, 500, ""))
+	require.Equal(t, int64(boxCPUSharesPerVCPU), mhzPerVCPU(15992, 500, "0"))
+	require.Equal(t, int64(boxCPUSharesPerVCPU), mhzPerVCPU(4, 0, "8"))
+}
+
+func TestSpecFromJobKeepsTheReservation(t *testing.T) {
+	spec := goodSpec()
+	spec.CPUs, spec.CPUMHzPerVCPU = 2, 1936
+	job, err := RenderJob(spec)
+	require.NoError(t, err)
+	require.Equal(t, 3872, *job.TaskGroups[0].Tasks[0].Resources.CPU)
+	back, err := SpecFromJob(job)
+	require.NoError(t, err)
+	require.Equal(t, 1936, back.CPUMHzPerVCPU)
+	require.Equal(t, 3872, back.TaskCPUShares())
 }
