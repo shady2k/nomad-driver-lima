@@ -60,6 +60,20 @@ where one is known, what would close it. Nothing here is a promise to fix it.
 - **The guest journal needs passwordless sudo.** The default guest log command is
   `sudo -n journalctl -u boxd`, because the task user cannot read another user's
   journal. Putting the box user in `systemd-journal` in the image would close it.
+- **On macOS the rendered key passes the node's disk.** Nomad renders a task's
+  `secrets/` directory into the allocation directory. On Linux, with the client
+  running as root, that directory is a tmpfs; on macOS it is a plain directory
+  under the client's `alloc_dir`, on the disk, for as long as the allocation
+  lives, and a crash can leave it there. The driver adds no copy of its own: it
+  streams the files into the guest. Putting `alloc_dir` on a RAM disk would
+  close it, at the cost of the allocations' local logs and files after a reboot;
+  it has not been tested.
+- **A key in a box is readable by everything in the box.** The executor gets it
+  as a file on the guest's tmpfs or in its environment; the executor, its
+  children and root in the guest can read it, and so can root on the node (the
+  guest's memory is a process of the node). Keeping it off the disks protects it
+  from a lost or copied disk, not from the box itself. Scope the Vault role to the
+  one secret and give boxes a key of their own that can be revoked.
 - **Credentials at rest are in the Nomad variable**, stored in the cluster's
   state. This project does not encrypt it; mTLS and ACLs are the protection.
 - **ACLs were measured on a cluster without them.** The workload policy is

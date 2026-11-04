@@ -106,7 +106,8 @@ func (f *Fake) Calls(t testing.TB) []string {
 	return readLines(t, f.path(".fake-calls.log"))
 }
 
-// Copies returns every recorded `limactl copy` invocation.
+// Copies returns every recorded `limactl copy` invocation and every file of a
+// tar stream sent to `limactl shell`, as "name<TAB>mode<TAB>uid:gid<TAB>sha256".
 func (f *Fake) Copies(t testing.TB) []string {
 	t.Helper()
 	return readLines(t, f.path(".fake-copies.log"))

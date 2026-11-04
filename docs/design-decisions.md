@@ -142,6 +142,14 @@ and versions named in "What was measured".
   boxd derives everything it needs below `/run/boxd`. Sessions and transcripts
   stay on the disk; no secret does. The image build and the guest checks fail if
   any executor credential location is non-empty.
+- **Task files travel as a stream, never as a staged copy.** The driver reads
+  the task's files and writes them as a tar stream into the stdin of one
+  `limactl shell`; root in the guest unpacks it into a staging directory on the
+  tmpfs and moves it into place. Rejected: copying them first into a directory
+  the runtime user owns on the host and running `limactl copy`, which is what the
+  driver did up to v0.1.3 -- it wrote every credential to the host disk, and a
+  crash could leave it there. The driver removes that old directory when it
+  starts.
 - **The key is read from Vault, never copied from a host.** An item named
   `prime/auth.json.tmpl` is Nomad template text holding a Vault path, not a key:
   `box create` embeds the text in the job and Nomad renders the file on the node

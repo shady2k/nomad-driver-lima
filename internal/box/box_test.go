@@ -398,29 +398,34 @@ func TestCopyTaskFiles(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 3, n)
 
-	copies := f.Copies(t)
-	require.Len(t, copies, 3)
-	joined := strings.Join(copies, "\n")
-	// Everything is staged on the tmpfs, so a secret never passes the disk.
-	require.Contains(t, joined, "box1:/run/box/stage-box1-a1b2c3d4/config.yaml")
-	require.Contains(t, joined, "box1:/run/box/stage-box1-a1b2c3d4/nested/extra.conf")
-	require.Contains(t, joined, "box1:/run/box/stage-box1-a1b2c3d4/token")
+	// The files reach the guest as a tar stream, root-owned and private; the
+	// guest sets the final modes.
+	sum := func(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
+	require.Equal(t, []string{
+		"config.yaml\t600\t0:0\t" + sum("a: b"),
+		"nested/extra.conf\t600\t0:0\t" + sum("x"),
+		"token\t600\t0:0\t" + sum("s3cret"),
+	}, f.Copies(t))
 
 	var installs []string
 	for _, c := range f.CallsWith(t, "shell box1 --") {
-		if strings.Contains(c, "cp -a") {
+		if strings.Contains(c, "tar -x") {
 			installs = append(installs, c)
 		}
 	}
-	require.Len(t, installs, 2, "one install for the job files, one for the credentials")
+	require.Len(t, installs, 2, "one stream for the job files, one for the credentials")
 	localInstall, secretInstall := installs[0], installs[1]
 	require.Contains(t, localInstall, "install -d -m 0755 -o root -g root '/etc/box/local'")
 	require.Contains(t, localInstall, "chmod -R u+rwX,go-rwx")
 	require.NotContains(t, localInstall, DefaultSecretsDirInGuest)
 
+	// The guest stages on its tmpfs, so a secret never passes the box disk.
+	require.Contains(t, secretInstall, "mktemp -d '/run/box/stage-box1-XXXXXXXX'")
 	require.Contains(t, secretInstall, "install -d -m 0700 -o root -g root '"+DefaultSecretsDirInGuest+"'")
 	require.Contains(t, secretInstall, "chown -R root:root '"+DefaultSecretsDirInGuest+"'")
 	require.Contains(t, secretInstall, "chmod -R u+rwX,go-rwx '"+DefaultSecretsDirInGuest+"'")
+	require.NotContains(t, secretInstall, "s3cret", "the content goes on stdin, not in the command")
+	requireNoFileContains(t, f.Home, "s3cret")
 
 	// A box without credentials still gets the (empty, root-only) directory, so
 	// boxd reads a directory and not an error.
@@ -432,6 +437,60 @@ func TestCopyTaskFiles(t *testing.T) {
 	require.Len(t, shells, 1, "only the secrets directory is created: %v", shells)
 	require.Contains(t, shells[0], "install -d -m 0700 -o root -g root '"+DefaultSecretsDirInGuest+"'")
 	require.Empty(t, f.Copies(t), "no file to copy")
+}
+
+// TestCopyTaskFilesLeavesNoSecretOnTheHost breaks the stream halfway, as a
+// dropped connection or a crash would: the copy fails, and no file on the host
+// holds the secret, because the driver never wrote one.
+func TestCopyTaskFilesLeavesNoSecretOnTheHost(t *testing.T) {
+	f := fakelima.New(t)
+	m := newTestManager(t, f)
+	vol := volumeDir(t)
+	b, err := m.Box(testSpec(t, vol), nil)
+	require.NoError(t, err)
+
+	const marker = "MARKER-7f3c9a-not-a-real-key"
+	secrets := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(secrets, "prime"), 0o700))
+	// Larger than a pipe buffer, so the driver is still writing when the guest
+	// side goes away.
+	big := strings.Repeat(marker+"\n", 1<<14)
+	require.NoError(t, os.WriteFile(filepath.Join(secrets, "prime", "auth.json"), []byte(big), 0o600))
+
+	f.SetMode(t, map[string]any{"fail_copy": true})
+	_, err = b.CopyTaskFiles(context.Background(), "", secrets, "/etc/box", DefaultSecretsDirInGuest)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), marker)
+	requireNoFileContains(t, f.Home, marker)
+	require.NoDirExists(t, filepath.Join(f.Home, legacyStagingDir))
+}
+
+// TestNewRemovesTheLegacyStagingDirectory: a driver up to v0.1.3 staged the
+// task files on the host disk and a crash could leave a credential there.
+func TestNewRemovesTheLegacyStagingDirectory(t *testing.T) {
+	f := fakelima.New(t)
+	stale := filepath.Join(f.Home, legacyStagingDir, "files-box1-123", "prime")
+	require.NoError(t, os.MkdirAll(stale, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(stale, "auth.json"), []byte("left behind"), 0o600))
+	newTestManager(t, f)
+	require.NoDirExists(t, filepath.Join(f.Home, legacyStagingDir))
+}
+
+// requireNoFileContains fails when any file below root holds needle.
+func requireNoFileContains(t *testing.T, root, needle string) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		require.NotContains(t, string(data), needle, "%s holds the secret", path)
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 // TestCopyTaskFilesErrorIsReported fails the start when the guest copy fails.

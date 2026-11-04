@@ -118,8 +118,14 @@ func (c *Client) Run(ctx context.Context, args ...string) (string, string, error
 // first boot under vz it cut `limactl start` at two minutes while the guest was
 // still coming up.
 func (c *Client) RunLong(ctx context.Context, args ...string) (string, string, error) {
+	return c.runWithInput(ctx, nil, args...)
+}
+
+// runWithInput executes a limactl call with stdin read from in (nil: no input).
+func (c *Client) runWithInput(ctx context.Context, in io.Reader, args ...string) (string, string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := c.Command(ctx, args...)
+	cmd.Stdin = in
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
@@ -263,6 +269,19 @@ func formatGiB(v float64) string {
 func (c *Client) Shell(ctx context.Context, name string, cmd []string) (string, string, error) {
 	args := append([]string{"shell", name, "--"}, cmd...)
 	return c.Run(ctx, args...)
+}
+
+// ShellInput runs a command inside the guest with its stdin read from in,
+// bounded by Timeout like Shell. The data goes over the ssh connection of
+// limactl shell and is never written to a file on the host.
+func (c *Client) ShellInput(ctx context.Context, name string, cmd []string, in io.Reader) (string, string, error) {
+	if c.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.Timeout)
+		defer cancel()
+	}
+	args := append([]string{"shell", name, "--"}, cmd...)
+	return c.runWithInput(ctx, in, args...)
 }
 
 // ShellCmd returns a limactl shell command for streaming use.

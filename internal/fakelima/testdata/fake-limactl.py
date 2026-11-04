@@ -6,10 +6,13 @@ $LIMA_HOME/.fake-mode.json (written by the test before a call), and every
 invocation is appended to $LIMA_HOME/.fake-calls.log. Instance directories are
 real directories under $LIMA_HOME, like lima's own.
 """
+import hashlib
+import io
 import json
 import os
 import shutil
 import sys
+import tarfile
 
 HOME = os.environ.get("LIMA_HOME")
 if not HOME:
@@ -224,23 +227,22 @@ def main():
         if mode.get("fail_shell"):
             sys.stderr.write("fake limactl: shell failed\n")
             return 1
-        # The driver creates the guest staging directory with "mktemp -d
-        # <template>" inside a shell script and copies the task files into the
-        # path that prints; answer with the template, the way mktemp does.
-        joined = " ".join(args)
-        marker = "mktemp -d "
-        if marker in joined:
-            rest = joined[joined.index(marker) + len(marker):]
-            # The template is quoted or a plain word; either way it ends at the
-            # first quote or space.
-            for quote in ("'", '"'):
-                if rest.startswith(quote):
-                    rest = rest[1:]
-                    template = rest.split(quote)[0]
-                    break
-            else:
-                template = rest.split()[0]
-            print(template.replace("XXXXXXXX", "a1b2c3d4"))
+        # The driver sends the task files as a tar stream on stdin. The fake
+        # records each member's name and the sha256 of its content, never the
+        # content: a test checks that no plaintext of a secret reaches the disk.
+        if "tar -x" in " ".join(args):
+            if mode.get("fail_copy"):
+                # The connection drops after the first block: the driver is
+                # still writing the stream.
+                sys.stdin.buffer.read(512)
+                sys.stderr.write("fake limactl: tar: unexpected end of stream\n")
+                return 1
+            data = sys.stdin.buffer.read()
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r|") as tar, open(COPIES_PATH, "a") as f:
+                for member in tar:
+                    content = tar.extractfile(member).read() if member.isfile() else b""
+                    f.write("%s\t%o\t%d:%d\t%s\n" % (member.name, member.mode, member.uid, member.gid,
+                                                     hashlib.sha256(content).hexdigest()))
             return 0
         print("fake shell ok")
         return 0

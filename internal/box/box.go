@@ -7,6 +7,7 @@
 package box
 
 import (
+	"archive/tar"
 	"context"
 	"errors"
 	"fmt"
@@ -153,6 +154,9 @@ func New(opts Options) (*Manager, error) {
 		}
 		opts.Identity = id
 	}
+	// Nothing writes there any more; whatever an older driver left behind may be
+	// a credential.
+	_ = os.RemoveAll(filepath.Join(opts.LimaHome, legacyStagingDir))
 	lima := limactl.New(opts.Limactl, opts.LimaHome)
 	lima.Identity = opts.Identity
 	lima.Env = opts.Identity.Env(opts.LimaHome)
@@ -794,11 +798,13 @@ func collectTaskFiles(root, prefix string) ([]taskFile, error) {
 // installTaskFiles puts the files into destDirInGuest. dirMode is the mode of the
 // destination tree (0755 for job files, 0700 for the secrets).
 //
-// The task directory belongs to the Nomad client, which is root on a Linux node,
-// and limactl copy is an rsync over ssh that runs as the runtime user: it cannot
-// read the task directory, so the files are staged in a directory the runtime
-// user owns first. That staging directory is in /run, like the destination of the
-// secrets, so a secret never touches the disk on the way in.
+// The files travel as a tar stream on the stdin of one limactl shell: the driver
+// reads them from the task directory (it runs as the Nomad client, which can) and
+// writes them into the ssh connection, so no copy of a credential is ever written
+// on the host, not even for a moment, and a crash leaves none behind. In the guest
+// root unpacks the stream into a staging directory on the tmpfs and only then
+// copies it into place, so a broken stream never leaves half a tree in
+// destDirInGuest.
 func (b *Box) installTaskFiles(ctx context.Context, files []taskFile, destDirInGuest, dirMode string) (int, error) {
 	if !filepath.IsAbs(destDirInGuest) {
 		return 0, fmt.Errorf("the guest destination %q is not an absolute path", destDirInGuest)
@@ -812,83 +818,70 @@ func (b *Box) installTaskFiles(ctx context.Context, files []taskFile, destDirInG
 		return 0, nil
 	}
 
-	stage, err := b.stageTaskFiles(files)
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(writeTaskTar(pw, files)) }()
+	defer pr.Close()
+
+	// umask 077 and mktemp keep the staging directory root's alone; the trap
+	// removes it whatever happens after it exists.
+	script := fmt.Sprintf("set -eu; umask 077; install -d -m 0755 -o root -g root '%s'; "+
+		"d=$(mktemp -d '%s/stage-%s-XXXXXXXX'); trap 'rm -rf \"$d\"' EXIT; "+
+		"tar -x --no-same-owner --no-same-permissions -f - -C \"$d\"; "+
+		"install -d -m %s -o root -g root '%s'; cp -a \"$d/.\" '%s/'; "+
+		"chown -R root:root '%s'; chmod -R u+rwX,go-rwx '%s'",
+		tmpfsStagingRoot, tmpfsStagingRoot, b.spec.BoxID,
+		dirMode, destDirInGuest, destDirInGuest, destDirInGuest, destDirInGuest)
+	_, stderr, err := b.m.lima.ShellInput(ctx, b.spec.BoxID, []string{"sudo", "-n", "bash", "-euo", "pipefail", "-c", script}, pr)
 	if err != nil {
-		return 0, err
-	}
-	defer os.RemoveAll(stage)
-
-	// The staging directory in the guest belongs to the guest user too: a
-	// root-owned directory refuses the write ("mkstemp ...: Permission denied").
-	// It is created by root (the box user cannot write to /run/box) and given to
-	// the box user, so limactl copy can write into it.
-	create := fmt.Sprintf("set -eu; sudo -n install -d -m 0755 -o root -g root '%s'; "+
-		"d=$(sudo -n mktemp -d '%s/stage-%s-XXXXXXXX'); sudo -n chown $(id -u):$(id -g) \"$d\"; printf '%%s\\n' \"$d\"",
-		tmpfsStagingRoot, tmpfsStagingRoot, b.spec.BoxID)
-	out, stderr, err := b.m.lima.Shell(ctx, b.spec.BoxID, []string{"bash", "-euo", "pipefail", "-c", create})
-	staging := ""
-	if lines := strings.Split(strings.TrimSpace(out), "\n"); len(lines) > 0 {
-		staging = strings.TrimSpace(lines[len(lines)-1])
-	}
-	if err != nil || staging == "" {
-		return 0, fmt.Errorf("create a staging directory in the guest: %w%s (output %q)", err, suffix(stderr), strings.TrimSpace(out))
-	}
-
-	for _, f := range files {
-		parent := filepath.Dir(filepath.Join(staging, f.rel))
-		if _, stderr, err := b.m.lima.Shell(ctx, b.spec.BoxID, []string{"mkdir", "-p", parent}); err != nil {
-			return 0, fmt.Errorf("create guest directory %s: %w%s", parent, err, suffix(stderr))
-		}
-		staged := filepath.Join(stage, f.rel)
-		if err := b.m.lima.Copy(ctx, []string{staged}, b.spec.BoxID+":"+filepath.Join(staging, f.rel)); err != nil {
-			return 0, fmt.Errorf("copy %s into the guest: %w", f.log, err)
-		}
-	}
-	install := fmt.Sprintf("set -eu; sudo -n install -d -m %s -o root -g root '%s'; "+
-		"sudo -n cp -a '%s/.' '%s/'; sudo -n chown -R root:root '%s'; "+
-		"sudo -n chmod -R u+rwX,go-rwx '%s'; sudo -n rm -rf '%s'",
-		dirMode, destDirInGuest, staging, destDirInGuest, destDirInGuest, destDirInGuest, staging)
-	if _, stderr, err := b.m.lima.Shell(ctx, b.spec.BoxID, []string{"bash", "-euo", "pipefail", "-c", install}); err != nil {
-		return 0, fmt.Errorf("install the task files into %s: %w%s", destDirInGuest, err, suffix(stderr))
+		return 0, fmt.Errorf("copy the task files into %s: %w%s", destDirInGuest, err, suffix(stderr))
 	}
 	return len(files), nil
 }
 
-// stageTaskFiles copies the task files into a host directory the runtime user
-// owns and returns it. The caller removes it; the files keep their relative path
-// below the task's local/ and secrets/ roots.
-func (b *Box) stageTaskFiles(files []taskFile) (string, error) {
-	id := b.m.opts.Identity
-	// The staging root sits inside the Lima home but under a name Lima ignores:
-	// every other directory there is an instance, and Lima would report a
-	// directory without a lima.yaml as a broken instance. Lima skips the names
-	// that start with an underscore, like its own _config and the driver's
-	// default _image-cache.
-	root := filepath.Join(b.m.opts.LimaHome, "_staging")
-	if err := id.EnsureDir(root, 0o700); err != nil {
-		return "", fmt.Errorf("create the file staging directory: %w", err)
-	}
-	stage, err := os.MkdirTemp(root, "files-"+b.spec.BoxID+"-")
-	if err != nil {
-		return "", fmt.Errorf("create the file staging directory: %w", err)
-	}
+// writeTaskTar writes the files as a tar stream: root-owned, mode 0600 (the guest
+// sets the final modes), each read straight from the task directory.
+func writeTaskTar(w io.Writer, files []taskFile) error {
+	tw := tar.NewWriter(w)
 	for _, f := range files {
-		dst := filepath.Join(stage, f.rel)
-		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-			os.RemoveAll(stage)
-			return "", fmt.Errorf("create staging directory for %s: %w", f.rel, err)
-		}
-		if err := copyFile(f.host, dst); err != nil {
-			os.RemoveAll(stage)
-			return "", fmt.Errorf("stage task file %s: %w", f.rel, err)
+		if err := writeTaskTarFile(tw, f); err != nil {
+			return err
 		}
 	}
-	if err := id.ChownTree(stage); err != nil {
-		os.RemoveAll(stage)
-		return "", fmt.Errorf("give the staged task files to %s: %w", id.Name, err)
-	}
-	return stage, nil
+	return tw.Close()
 }
+
+func writeTaskTarFile(tw *tar.Writer, f taskFile) error {
+	in, err := os.Open(f.host)
+	if err != nil {
+		return fmt.Errorf("read task file %s: %w", f.log, err)
+	}
+	defer in.Close()
+	fi, err := in.Stat()
+	if err != nil {
+		return fmt.Errorf("read task file %s: %w", f.log, err)
+	}
+	hdr := &tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     filepath.ToSlash(f.rel),
+		Mode:     0o600,
+		Size:     fi.Size(),
+		ModTime:  fi.ModTime(),
+		Format:   tar.FormatPAX,
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		return fmt.Errorf("send task file %s: %w", f.log, err)
+	}
+	// A file that grows while it is read fails the header's size; a re-render
+	// copies it again.
+	if _, err := io.Copy(tw, io.LimitReader(in, fi.Size())); err != nil {
+		return fmt.Errorf("send task file %s: %w", f.log, err)
+	}
+	return nil
+}
+
+// legacyStagingDir is where drivers up to v0.1.3 staged the task files, secrets
+// included, on the host disk. A crash could leave a copy there; New removes it.
+const legacyStagingDir = "_staging"
 
 // taskFile is one file of a task directory as it appears in the guest.
 type taskFile struct {
@@ -897,24 +890,6 @@ type taskFile struct {
 	rel string
 	// log names the file for messages ("secrets/prime/auth.json").
 	log string
-}
-
-// copyFile copies one regular file, keeping it private to its owner.
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 func suffix(stderr string) string {

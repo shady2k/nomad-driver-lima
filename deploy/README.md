@@ -444,11 +444,13 @@ Anything bigger is a Nomad installation of its own (three servers,
 - `box create` does not touch ACLs on purpose (the CLI token has no ACL write), so a
   box created after `acl.yml` needs `box_acl_workload_jobs=[<id>]` once - or
   `deploy/acl/apply.sh workloads <id>`.
-- **The executor credentials never touch a disk, and no host ever holds the key.**
-  `box executors set` writes the files of the variable
+- **The executor credentials never touch the box disk, and no host ever holds the
+  key.** `box executors set` writes the files of the variable
   `nomad/jobs/box-executors`; a box renders that variable into its task
-  `secrets/` directory, and the driver writes those files to the guest's tmpfs at
-  `/run/box/secrets/<executor>/` (root-only, mode 0700), not to the box disk. The
+  `secrets/` directory, and the driver streams those files to the guest's tmpfs
+  at `/run/box/secrets/<executor>/` (root-only, mode 0700), not to the box disk,
+  without a copy on the node. The task's `secrets/` itself is a tmpfs on a Linux
+  node and a plain directory on macOS (see `docs/known-limits.md`). The
   provider key is not in the variable either: it is a template item
   (`prime/auth.json.tmpl`), Nomad reads it from Vault with the box's own workload
   identity, and the job spec holds the path. `box executors show` prints file
