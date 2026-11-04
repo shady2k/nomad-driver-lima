@@ -153,9 +153,15 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   `box_id` on the same node share one VM, which is not validated.
 - **`disk_gib` is not checked against free space.** qcow2 is sparse, so a size
   check is not obviously right, and a box can fill its node's volume filesystem.
-- **Orphans are reported, never removed.** A Lima instance with no task appears
-  in the driver's fingerprint and in `box capacity`; how an operator dismisses it
-  is still an open question.
+- **Orphans are reported, never removed.** A Lima instance with no task for ten
+  minutes, or without its disk, appears in the driver's fingerprint and as a line
+  of `box capacity`; the operator removes it on the node with `limactl delete`.
+  No command of this project does it.
+- **Nomad keeps a node attribute the driver stops sending.** It removes one only
+  when the new value is empty, so the driver sends a gone box's keys empty once
+  and `box capacity` reads the driver's own attributes, not the node's. Keys a
+  driver before v0.1.7 left on a node stay in `nomad node status -verbose` until
+  that client restarts; nothing reads them.
 - **Stale allocations accumulate.** A job stopped and started often leaves
   several stopped allocations naming one box; the driver tolerates them and only
   Nomad's garbage collection removes them.

@@ -182,7 +182,8 @@ func boxInstancesFromAttributes(attrs map[string]string) []BoxInstance {
 	byBox := map[string]*BoxInstance{}
 	order := []string{}
 	for key, value := range attrs {
-		if !strings.HasPrefix(key, boxInstanceAttrPrefix) {
+		// An empty value is the driver clearing the key of a box that is gone.
+		if !strings.HasPrefix(key, boxInstanceAttrPrefix) || value == "" {
 			continue
 		}
 		rest := strings.TrimPrefix(key, boxInstanceAttrPrefix)
@@ -309,6 +310,37 @@ func nodeArch(attrs map[string]string, driver DriverInfo) string {
 	return ""
 }
 
+// boxAttrPrefix is the prefix of every attribute the box driver publishes.
+const boxAttrPrefix = "driver.box."
+
+// nodeAttributes returns the node's attributes with the box driver's own taken
+// from its driver info.
+//
+// Nomad merges a driver's fingerprint into node.Attributes key by key and never
+// removes a key the driver stops sending, so a box deleted from the node would
+// stay there for good (client/node_updater.go). The driver info holds the last
+// fingerprint as a whole, so it is the one to read. A node whose driver info
+// carries no attributes keeps the merged ones.
+func nodeAttributes(node *api.Node) map[string]string {
+	info := node.Drivers[boxDriverName]
+	if info == nil || len(info.Attributes) == 0 {
+		if node.Attributes == nil {
+			return map[string]string{}
+		}
+		return node.Attributes
+	}
+	attrs := make(map[string]string, len(node.Attributes)+len(info.Attributes))
+	for k, v := range node.Attributes {
+		if !strings.HasPrefix(k, boxAttrPrefix) {
+			attrs[k] = v
+		}
+	}
+	for k, v := range info.Attributes {
+		attrs[k] = v
+	}
+	return attrs
+}
+
 // BuildCapacity turns one node and its allocations into a NodeCapacity.
 //
 // Free resources are the node's totals minus what the client reserves minus
@@ -318,10 +350,7 @@ func BuildCapacity(node *api.Node, allocs []*api.Allocation) *NodeCapacity {
 	if node == nil {
 		return nil
 	}
-	attrs := node.Attributes
-	if attrs == nil {
-		attrs = map[string]string{}
-	}
+	attrs := nodeAttributes(node)
 	driver := DriverInfo{
 		Version:     attrs["driver.box.version"],
 		Arch:        attrs["driver.box.arch"],

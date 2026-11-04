@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -385,4 +386,34 @@ func TestBuildCapacityReportsMemoryLimit(t *testing.T) {
 	node := cluster.addNode("node-1", "node-1", "amd64", 12000, 11961, 150000)
 	node.Attributes["driver.box.memory_limit"] = "off"
 	require.Equal(t, "off", BuildCapacity(node, nil).Driver.MemoryLimit)
+}
+
+// TestBuildCapacityIgnoresKeysOfAGoneBox: Nomad never removes a driver
+// attribute from node.Attributes when the driver stops sending it, so a deleted
+// box stays there. The driver info holds the last fingerprint whole, and that
+// is what capacity reads.
+func TestBuildCapacityIgnoresKeysOfAGoneBox(t *testing.T) {
+	cluster := newFakeCluster()
+	node := cluster.addNode("node-1", "node-1", "amd64", 12000, 11961, 150000)
+	withInstance(node, "gone", "Running", "none", 4, 3072, 16)
+	node.Attributes[boxDiskAttrPrefix+"gone"+boxDiskUsedSuffix] = "1048576"
+	node.Attributes[boxDiskAttrPrefix+"gone"+boxDiskVirtualSuffix] = "8589934592"
+
+	live := map[string]string{}
+	for k, v := range node.Attributes {
+		if strings.HasPrefix(k, boxAttrPrefix) && !strings.Contains(k, ".gone.") {
+			live[k] = v
+		}
+	}
+	live["driver.box.orphans"] = "lost"
+	node.Drivers[boxDriverName].Attributes = live
+
+	cap := BuildCapacity(node, nil)
+	require.Empty(t, cap.Instances, "the gone box is not a VM on the node")
+	require.Empty(t, cap.Uncounted, "and its memory is not taken off the free memory")
+	require.Empty(t, cap.Disks)
+	require.Equal(t, int64(11961), cap.Memory.Free)
+	require.Equal(t, "lost", cap.Driver.Orphans)
+	require.Equal(t, "amd64", cap.Arch, "the node's own attributes are still read")
+	require.NotEmpty(t, cap.Driver.Version)
 }

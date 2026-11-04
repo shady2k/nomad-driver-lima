@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -98,6 +99,9 @@ type Driver struct {
 	limaVersion   string
 	limaVersionAt time.Time
 	unattached    map[string]time.Time
+	// published is the per-box attribute keys of the last fingerprint, so the
+	// next one can clear the keys of a box that is gone (see clearGoneKeys).
+	published map[string]bool
 }
 
 // NewDriver returns a driver bound to ctx (the plugin's lifetime).
@@ -201,6 +205,46 @@ func (d *Driver) Fingerprint(ctx context.Context) (<-chan *drivers.Fingerprint, 
 }
 
 func (d *Driver) buildFingerprint(ctx context.Context) *drivers.Fingerprint {
+	fp := d.fingerprintOnce(ctx)
+	d.clearGoneKeys(fp)
+	return fp
+}
+
+// clearGoneKeys sends an empty value for every per-box key the previous
+// fingerprint had and this one has not.
+//
+// Nomad merges a fingerprint into the node's attributes key by key and removes
+// a key only when its new value is empty (client/node_updater.go); a key that
+// is simply left out stays on the node for good, and a deleted box would be
+// reported there forever. One empty value is enough: Nomad drops the key, and
+// the fingerprint after that no longer names it.
+func (d *Driver) clearGoneKeys(fp *drivers.Fingerprint) {
+	now := map[string]bool{}
+	for key := range fp.Attributes {
+		if isPerBoxKey(key) {
+			now[key] = true
+		}
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for key := range d.published {
+		if !now[key] {
+			fp.Attributes[key] = structs.NewStringAttribute("")
+		}
+	}
+	d.published = now
+}
+
+// isPerBoxKey reports whether an attribute names one box: its disk or its
+// instance, not a node-wide total.
+func isPerBoxKey(key string) bool {
+	if strings.HasPrefix(key, instanceAttributePrefix) {
+		return true
+	}
+	return strings.HasPrefix(key, diskAttributePrefix) && key != diskTotalUsed && key != diskTotalVirtual
+}
+
+func (d *Driver) fingerprintOnce(ctx context.Context) *drivers.Fingerprint {
 	fp := &drivers.Fingerprint{
 		Attributes:        map[string]*structs.Attribute{},
 		Health:            drivers.HealthStateHealthy,

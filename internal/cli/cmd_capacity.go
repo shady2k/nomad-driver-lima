@@ -96,6 +96,17 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 		}
 	}
 
+	// An orphan is a Lima instance no task has owned for a while, or whose disk
+	// is gone. The driver never removes one, so the operator has to hear of it.
+	for _, node := range nodes {
+		for _, name := range strings.Split(node.Driver.Orphans, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				a.note("%s/%s: an orphan, a VM with no box task for 10 minutes or without its disk; the driver leaves it "+
+					"alone, remove it on the node with limactl delete as the driver's runtime user", node.Name, name)
+			}
+		}
+	}
+
 	// Per box, because the owner asked for the space each VM occupies, not only
 	// the sum.
 	for _, node := range nodes {

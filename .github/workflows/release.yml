@@ -35,6 +35,20 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Claude Code refreshes an installed plugin only when its version changes,
+      # so a release whose plugin still names the previous one would leave every
+      # agent on the old skill.
+      - name: The plugin carries the release's version
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          for f in claude-plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json; do
+            got=$(jq -r '.version // .metadata.version' "$f")
+            if [ "$got" != "$want" ]; then
+              echo "$f has version $got, the tag is $want: bump it and tag again" >&2
+              exit 1
+            fi
+          done
+
       # The tag names the version: v1.2.3 becomes 1.2.3, which is what Nomad
       # parses when it loads the plugin.
       - name: Build the release artifacts

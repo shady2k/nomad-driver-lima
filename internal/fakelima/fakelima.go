@@ -100,6 +100,21 @@ func (f *Fake) SetState(t testing.TB, name string, fields map[string]any) {
 	}
 }
 
+// RemoveInstance drops one fake instance from the table, as a `limactl delete`
+// done behind the driver's back would.
+func (f *Fake) RemoveInstance(t testing.TB, name string) {
+	t.Helper()
+	state := f.State(t)
+	delete(state, name)
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("encode fake state: %v", err)
+	}
+	if err := os.WriteFile(f.path(".fake-state.json"), data, 0o644); err != nil {
+		t.Fatalf("write fake state: %v", err)
+	}
+}
+
 // Calls returns every recorded limactl invocation.
 func (f *Fake) Calls(t testing.TB) []string {
 	t.Helper()

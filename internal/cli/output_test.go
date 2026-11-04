@@ -46,6 +46,21 @@ func TestCapacityOutput(t *testing.T) {
 	require.Equal(t, "dev1", doc.Nodes[0].Disks[0].BoxID)
 }
 
+// TestCapacityNamesOrphans: the driver never removes an orphan, so the human
+// output names it with what to do about it.
+func TestCapacityNamesOrphans(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	node := ta.cluster.addNode("node-2", "node-2", "arm64", 4000, 8000, 50000)
+	node.Attributes["driver.box.orphans"] = "lost1,lost2"
+
+	require.Equal(t, ExitOK, ta.run(t, "capacity"))
+	notes := ta.errOut.String()
+	require.Contains(t, notes, "node-2/lost1: an orphan")
+	require.Contains(t, notes, "node-2/lost2: an orphan")
+	require.Contains(t, notes, "limactl delete")
+	require.NotContains(t, notes, "node-1/", "a node without orphans names none")
+}
+
 func TestCapacityWithoutNodes(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	ta.cluster.nodes = map[string]*api.Node{}

@@ -172,3 +172,39 @@ func attrInt(t *testing.T, fp *drivers.Fingerprint, key string) int64 {
 	require.NoError(t, err, "attribute %q = %q is not a number", key, value)
 	return n
 }
+
+// TestFingerprintClearsTheKeysOfAGoneBox: Nomad keeps a node attribute the
+// driver stops sending, so the fingerprint after a box is gone sends its keys
+// empty once, which makes Nomad drop them, and the one after names them no more.
+func TestFingerprintClearsTheKeysOfAGoneBox(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	dir := f.InstanceDir("gone")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "disk"), make([]byte, 4096), 0o644))
+	f.SetState(t, "gone", map[string]any{"status": limactl.StatusStopped, "dir": dir})
+
+	fp := d.buildFingerprint(context.Background())
+	require.NotEmpty(t, attrValue(t, fp, "driver.box.disk.gone.used_bytes"))
+	require.Equal(t, "Stopped", attrValue(t, fp, "driver.box.instance.gone.state"))
+
+	f.RemoveInstance(t, "gone")
+	fp = d.buildFingerprint(context.Background())
+	for _, key := range []string{
+		"driver.box.disk.gone.used_bytes", "driver.box.disk.gone.virtual_bytes",
+		"driver.box.instance.gone.state", "driver.box.instance.gone.task",
+		"driver.box.instance.gone.cpus", "driver.box.instance.gone.memory_mib",
+		"driver.box.instance.gone.disk_gib",
+	} {
+		attr, ok := fp.Attributes[key]
+		require.True(t, ok, "%s is sent to be cleared", key)
+		v, _ := attr.GetString()
+		require.Empty(t, v, key)
+	}
+	require.Equal(t, "0", attrValue(t, fp, "driver.box.disk.used_bytes"), "a total is never cleared")
+
+	fp = d.buildFingerprint(context.Background())
+	for key := range fp.Attributes {
+		require.NotContains(t, key, ".gone.", "a cleared key is not sent again")
+	}
+}
