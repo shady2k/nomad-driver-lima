@@ -204,3 +204,46 @@ func hasCompressedClusters(t *testing.T, qemuImg, path string) bool {
 	}
 	return false
 }
+
+// TestEnsureImageOfADraftThatIsNotCached: a draft is a file the node baked, not a
+// download. A cache that lost it says so, and names the image, instead of trying
+// to fetch a url that is not one.
+func TestEnsureImageOfADraftThatIsNotCached(t *testing.T) {
+	f := fakelima.New(t)
+	m := newTestManager(t, f)
+	vol := volumeDir(t)
+	spec := testSpec(t, vol)
+	rep, _ := collectEvents()
+	b, err := m.Box(spec, rep)
+	require.NoError(t, err)
+
+	sum := sha256.Sum256([]byte("the image a bake wrote"))
+	digest := hex.EncodeToString(sum[:])
+	_, err = b.EnsureImage(context.Background(), DraftURLPrefix+"project-1", digest, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "is a draft of this node")
+	require.Contains(t, err.Error(), "no longer in the image cache")
+	require.Contains(t, err.Error(), digest, "it names the digest that is missing")
+	require.Contains(t, err.Error(), "baking the box again")
+}
+
+// TestEnsureImageOfADraftInTheCache: the cache has it, so nothing is fetched and
+// the file is handed back.
+func TestEnsureImageOfADraftInTheCache(t *testing.T) {
+	f := fakelima.New(t)
+	m := newTestManager(t, f)
+	spec := testSpec(t, volumeDir(t))
+	rep, _ := collectEvents()
+	b, err := m.Box(spec, rep)
+	require.NoError(t, err)
+
+	payload := []byte("the image a bake wrote")
+	sum := sha256.Sum256(payload)
+	digest := hex.EncodeToString(sum[:])
+	require.NoError(t, m.opts.Identity.EnsureDir(m.opts.ImageCacheDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(m.opts.ImageCacheDir, digest+".img"), payload, 0o644))
+
+	path, err := b.EnsureImage(context.Background(), DraftURLPrefix+"project-1", digest, nil)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(m.opts.ImageCacheDir, digest+".img"), path)
+}

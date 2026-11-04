@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,32 @@ import (
 type taskStats struct {
 	mu      sync.Mutex
 	tracker *cpustats.Tracker
+	// vmPID is the VM process Lima's pid files do not name, and vmSearched when
+	// it was last looked for: the search runs lsof, so not on every sample.
+	vmPID      int
+	vmSearched time.Time
+}
+
+// vmSearchInterval is how often a VM process that is not known yet is looked for.
+const vmSearchInterval = 30 * time.Second
+
+// hypervisor returns the VM process of the box, or 0 while it is not found. A
+// pid that stopped answering is looked for again.
+func (t *taskStats) hypervisor(paths []string) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.vmPID > 0 {
+		if _, err := processUsage(t.vmPID); err == nil {
+			return t.vmPID
+		}
+		t.vmPID = 0
+	}
+	if time.Since(t.vmSearched) < vmSearchInterval {
+		return 0
+	}
+	t.vmSearched = time.Now()
+	t.vmPID = hypervisorPID(paths)
+	return t.vmPID
 }
 
 func newTaskStats() *taskStats { return &taskStats{} }
@@ -169,11 +196,24 @@ func (d *Driver) sampleBox(ctx context.Context, h *taskHandle) (*drivers.TaskRes
 		return nil, fmt.Errorf("no VM process found: no %s, %s or ha.pid in %s, and limactl lists none",
 			box.DriverPIDFile(box.VMTypeQEMU), box.DriverPIDFile(box.VMTypeVZ), inst)
 	}
+	if pid := h.stats.hypervisor(boxPaths(inst, h.volumeDir)); pid > 0 && !slices.Contains(pids, pid) {
+		pids = append(pids, pid)
+	}
 	usage, err := h.stats.sample(d.compute, pids)
 	if err != nil {
 		return nil, fmt.Errorf("read the VM processes %v: %w", pids, err)
 	}
 	return usage, nil
+}
+
+// boxPaths are where a box's disk may be open from: its instance directory, its
+// volume, and the volume's real path, which is what lsof names.
+func boxPaths(instanceDir, volumeDir string) []string {
+	paths := []string{instanceDir, volumeDir}
+	if real, err := filepath.EvalSymlinks(volumeDir); err == nil && real != volumeDir {
+		paths = append(paths, real)
+	}
+	return paths
 }
 
 // limaPIDs asks limactl for the driver and host agent pids of one box.

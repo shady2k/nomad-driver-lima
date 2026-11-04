@@ -1,0 +1,308 @@
+package cli
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/hashicorp/nomad/api"
+	"github.com/stretchr/testify/require"
+)
+
+// Project images in the commands that deal with them: the listing, creating a box
+// from a draft, publishing a draft, and the store a publish reads.
+
+// TestImagesListsProjectImagesAndDrafts: the table says which images are base
+// images, which are projects, and which of them exist on one node only.
+func TestImagesListsProjectImagesAndDrafts(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.withDraft(t, "project-2", "project", "1.0.0", 12)
+	require.Equal(t, ExitOK, ta.run(t, "images"), ta.errOut.String())
+
+	table := ta.out.String()
+	require.Contains(t, table, "KIND")
+	require.Contains(t, table, "BEHIND")
+	require.Contains(t, table, "base")
+	require.Contains(t, table, "project-2")
+	require.Contains(t, table, "draft on node-1")
+	require.Contains(t, table, "parent 1.0.0, newest base 2.0.0")
+	// The hint to create a box names a base image, never a project image.
+	require.Contains(t, ta.errOut.String(), "create a box with: box create <id> --image 2.0.0")
+	require.Contains(t, ta.errOut.String(), "box images publish project-2 --yes")
+
+	ta.out.Reset()
+	ta.errOut.Reset()
+	require.Equal(t, ExitOK, ta.run(t, "images", "--json"), ta.errOut.String())
+	var doc imagesOutput
+	require.NoError(t, json.Unmarshal(ta.out.Bytes(), &doc))
+	require.Len(t, doc.Drafts, 1)
+	require.Equal(t, "project-2", doc.Drafts[0].Version)
+	require.Equal(t, "node-1", doc.Drafts[0].NodeID)
+	require.Equal(t, "1.0.0", doc.Drafts[0].Parent)
+}
+
+// TestLatestNeverPicksAProjectImage: `--image latest` means the newest base image.
+func TestLatestNeverPicksAProjectImage(t *testing.T) {
+	ta := newTestApp(t, `{
+	  "schema": 1,
+	  "images": {
+	    "1.0.0": {"amd64": {"url": "https://images.test/1.0.0/amd64/box.qcow2", "sha256": "`+
+		strings.Repeat("a1", 32)+`", "size": 1024, "platform": "mount"}},
+	    "project-9": {"amd64": {"url": "file:///box-draft/project-9/amd64", "sha256": "`+
+		strings.Repeat("b2", 32)+`", "size": 1024, "kind": "project", "name": "project", "platform": "mount"}}
+	  },
+	  "platforms": {"1.0.0": {"amd64": {"url": "https://images.test/p.tar.gz", "sha256": "`+
+		strings.Repeat("c3", 32)+`", "size": 1024}}}
+	}`)
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
+	require.Equal(t, ExitOK, ta.run(t, "create", "dev9", "--image", "latest", "--cpus", "1",
+		"--memory-mib", "512", "--disk-gib", "4"), ta.errOut.String())
+	image, ok := boxTaskConfig(t, ta, "box-dev9")["image"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "1.0.0", ta.cluster.jobs["box-dev9"].Meta["image"])
+	require.Equal(t, "https://images.test/1.0.0/amd64/box.qcow2", image["url"])
+}
+
+// TestCreateFromADraft: a draft exists on one node, so the box runs there, its disk
+// is at least the image's, and its url is never fetched.
+func TestCreateFromADraft(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	draft := ta.withDraft(t, "project-2", "project", "1.0.0", 12)
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
+
+	require.Equal(t, ExitOK, ta.run(t, "create", "dev2", "--image", "project-2", "--cpus", "1",
+		"--memory-mib", "512"), ta.errOut.String())
+
+	image, ok := boxTaskConfig(t, ta, "box-dev2")["image"].(map[string]any)
+	require.True(t, ok, "the job has an image block")
+	require.Equal(t, DraftURLPrefix+"project-2", image["url"], "a draft's url is never fetched")
+	require.Equal(t, draft.SHA256, image["sha256"])
+	// The disk is the image's: 12 GiB, not the default 8.
+	require.Equal(t, 12, int(toInt(boxTaskConfig(t, ta, "box-dev2")["disk_gib"], 0)))
+	volume := ta.cluster.volumes["vol-1"]
+	require.NotNil(t, volume)
+	require.Equal(t, "node-1", volume.NodeID, "a draft is created from on the node that holds it")
+	require.Equal(t, int64(12)<<30, volume.CapacityBytes)
+
+	ta.out.Reset()
+	ta.errOut.Reset()
+	rc := ta.run(t, "create", "dev3", "--image", "project-2", "--disk-gib", "4")
+	require.Equal(t, ExitUsage, rc)
+	require.Contains(t, ta.errOut.String(), "smaller than the disk inside the image project-2")
+	require.Contains(t, ta.errOut.String(), "Lima never shrinks a disk")
+}
+
+// TestCreateImageNameIsTheNewestVersion: `--image project` is the newest project-N.
+func TestCreateImageNameIsTheNewestVersion(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	ta.withDraft(t, "project-3", "project", "1.0.0", 8)
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
+	require.Equal(t, ExitOK, ta.run(t, "create", "dev4", "--image", "project", "--cpus", "1",
+		"--memory-mib", "512", "--disk-gib", "8"), ta.errOut.String())
+	require.Equal(t, "project-3", ta.cluster.jobs["box-dev4"].Meta["image"])
+}
+
+// TestCreateFromADraftOnAnotherNodeRefused: the draft's image is in one node's
+// cache, so the box cannot run elsewhere.
+func TestCreateFromADraftOnAnotherNodeRefused(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	ta.cluster.addNode("node-2", "node-2", "amd64", 12000, 32768, 150000)
+	rc := ta.run(t, "create", "dev5", "--image", "project-2", "--node", "node-2", "--cpus", "1",
+		"--memory-mib", "512", "--disk-gib", "8")
+	require.Equal(t, ExitUsage, rc)
+	require.Contains(t, ta.errOut.String(), "the draft project-2 is on node node-1")
+}
+
+// TestImagesPublishRefusesWithoutYes: publishing distributes the image.
+func TestImagesPublishRefusesWithoutYes(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	rc := ta.run(t, "images", "publish", "project-2")
+	require.Equal(t, ExitError, rc)
+	require.Contains(t, ta.errOut.String(), "Ask its owner before publishing")
+	require.Zero(t, callCount(ta, "RegisterJob box-publish"))
+}
+
+// TestImagesPublishRegistersTheJob: the publish job is pinned to the draft's node
+// and carries the store as templated files, never as a value.
+func TestImagesPublishRegistersTheJob(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	draft := ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	ta.cluster.variables[boxStoreVariable] = &api.Variable{Path: boxStoreVariable, Items: map[string]string{
+		"url":        "https://store.example.com",
+		"token.tmpl": `{{ with secret "kv/data/box/store" }}{{ .Data.data.token }}{{ end }}`,
+	}}
+	ta.finishWorkJobs(t, map[string]string{"kind": "publish", "version": "project-2", "arch": "amd64",
+		"sha256": draft.SHA256, "index": "https://store.example.com/box-base/index.json"}, "")
+
+	require.Equal(t, ExitOK, ta.run(t, "images", "publish", "project-2", "--yes"), ta.errOut.String())
+	job := ta.workJob
+	require.NotNil(t, job)
+	require.Equal(t, "publish", job.Meta[boxWorkMarker])
+	require.Equal(t, "project-2", job.Meta["image"])
+	// Pinned to the node that holds the draft.
+	require.Len(t, job.Constraints, 1)
+	require.Equal(t, "${node.unique.id}", job.Constraints[0].LTarget)
+	require.Equal(t, "node-1", job.Constraints[0].RTarget)
+	task, err := boxTask(job)
+	require.NoError(t, err)
+	publish, ok := task.Config["publish"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, draft.SHA256, publish["sha256"])
+	require.Equal(t, "amd64", publish["arch"])
+
+	// The store reaches the task as two files: the url from the Variable, the
+	// token through the template. Neither the job nor the variable holds a value.
+	templates := job.TaskGroups[0].Tasks[0].Templates
+	require.Len(t, templates, 2)
+	dests := []string{derefStr(templates[0].DestPath, ""), derefStr(templates[1].DestPath, "")}
+	require.Equal(t, []string{"store/url", "store/token"}, dests)
+	for _, template := range templates {
+		require.NotContains(t, derefStr(template.EmbeddedTmpl, ""), "the-store-token")
+	}
+	require.Contains(t, derefStr(templates[1].EmbeddedTmpl, ""), "secret",
+		"the token is a template that reads Vault, not the token itself")
+	require.NotNil(t, job.TaskGroups[0].Tasks[0].Vault, "a token template needs a Vault block")
+
+	out := ta.errOut.String()
+	require.Contains(t, out, "published project-2 (amd64) to https://store.example.com")
+	require.Contains(t, out, "https://store.example.com/box-base/project-2/amd64/box-base-project-2-amd64.qcow2")
+	require.Contains(t, out, "every node can create a box from it now")
+	require.True(t, callCount(ta, "StopJob box-publish-project-2 purge=true") > 0)
+}
+
+// TestImagesPublishWithoutAStore: the store is a Variable, and its absence says
+// which command writes it.
+func TestImagesPublishWithoutAStore(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	rc := ta.run(t, "images", "publish", "project-2", "--yes")
+	require.Equal(t, ExitError, rc)
+	require.Contains(t, ta.errOut.String(), "no image store")
+	require.Contains(t, ta.errOut.String(), "box store set")
+}
+
+// TestStoreSetAndShow: the CLI writes and reads the store's Variable, and never
+// prints the token.
+func TestStoreSetAndShow(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte("a-store-token\n"), 0o600))
+
+	require.Equal(t, ExitOK, ta.run(t, "store", "set", "--url", "https://store.example.com/",
+		"--from-file", tokenFile), ta.errOut.String())
+	v, err := ta.cluster.VariableRead(nil, boxStoreVariable)
+	require.NoError(t, err)
+	require.Equal(t, "https://store.example.com", v.Items["url"], "the trailing slash goes")
+	require.Equal(t, "a-store-token", v.Items["token"])
+	require.Contains(t, ta.errOut.String(), "stored in the Variable")
+	require.NotContains(t, ta.errOut.String(), "a-store-token", "the token is never printed")
+	require.NotContains(t, ta.out.String(), "a-store-token")
+
+	ta.out.Reset()
+	ta.errOut.Reset()
+	require.Equal(t, ExitOK, ta.run(t, "store", "show"), ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "https://store.example.com")
+	require.Contains(t, ta.errOut.String(), "token")
+	require.NotContains(t, ta.errOut.String(), "a-store-token")
+
+	// A template item holds a path, not a value.
+	templateFile := filepath.Join(t.TempDir(), "token.tmpl")
+	require.NoError(t, os.WriteFile(templateFile,
+		[]byte(`{{ with secret "kv/data/box/store" }}{{ .Data.data.token }}{{ end }}`), 0o644))
+	ta.errOut.Reset()
+	require.Equal(t, ExitOK, ta.run(t, "store", "set", "--url", "https://store.example.com",
+		"--template", templateFile), ta.errOut.String())
+	v, err = ta.cluster.VariableRead(nil, boxStoreVariable)
+	require.NoError(t, err)
+	_, plain := v.Items["token"]
+	require.False(t, plain, "a template replaces the plain item: one token, one way")
+	require.Contains(t, v.Items["token.tmpl"], "secret")
+	require.Contains(t, ta.errOut.String(), "read from Vault")
+
+	// Two ways to give the token is a usage error, and so is a template that holds
+	// no template text.
+	ta.errOut.Reset()
+	require.Equal(t, ExitUsage, ta.run(t, "store", "set", "--url", "https://s.example.com",
+		"--from-file", tokenFile, "--template", templateFile))
+	require.Contains(t, ta.errOut.String(), "give one")
+	plainFile := filepath.Join(t.TempDir(), "plain")
+	require.NoError(t, os.WriteFile(plainFile, []byte("a-token"), 0o600))
+	ta.errOut.Reset()
+	require.Equal(t, ExitUsage, ta.run(t, "store", "set", "--url", "https://s.example.com", "--template", plainFile))
+	require.Contains(t, ta.errOut.String(), "holds no template text")
+}
+
+// TestStoreShowWithoutAStore: a cluster with no store is a state, not a failure.
+func TestStoreShowWithoutAStore(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	require.Equal(t, ExitOK, ta.run(t, "store", "show"))
+	require.Contains(t, ta.errOut.String(), "no image store is configured")
+}
+
+// TestRebuildRefusals: a rebuild needs an image with a recipe, and a base image
+// that a box can be baked from.
+func TestRebuildRefusals(t *testing.T) {
+	t.Run("no such image", func(t *testing.T) {
+		ta := newTestApp(t, platformIndexJSON)
+		rc := ta.run(t, "bake", "--rebuild", "nothing")
+		require.Equal(t, ExitNotFound, rc)
+		require.Contains(t, ta.errOut.String(), "no image is named")
+	})
+	t.Run("an image without a recipe", func(t *testing.T) {
+		ta := newTestApp(t, platformIndexJSON)
+		ta.withDraftNoRecipe(t, "project-2", "project", "1.0.0")
+		rc := ta.run(t, "bake", "--rebuild", "project-2")
+		require.Equal(t, ExitError, rc)
+		require.Contains(t, ta.errOut.String(), "carries no recipe")
+	})
+	t.Run("a base image that cannot be baked", func(t *testing.T) {
+		ta := newTestApp(t, indexJSON)
+		ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+		rc := ta.run(t, "bake", "--rebuild", "project-2")
+		require.Equal(t, ExitError, rc)
+		require.Contains(t, ta.errOut.String(), "takes no platform bundle")
+	})
+}
+
+// TestRebuildCreatesTheBoxAndKeepsItWhenTheRecipeFails: the temporary box is what
+// a failure leaves behind, because what it ran is the evidence.
+func TestRebuildCreatesTheBoxAndKeepsItWhenTheRecipeFails(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
+	ta.guest.runExit = 3
+
+	// The newest base image is 2.0.0, which carries its own boxd: a rebuild names
+	// the base image it starts from.
+	rc := ta.run(t, "bake", "--rebuild", "project-2", "--base", "1.0.0")
+	require.Equal(t, ExitError, rc, ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "the temporary box project-rebuild was kept")
+	require.Contains(t, ta.errOut.String(), "box rm project-rebuild --yes")
+
+	// The box was created from the newest base image, and the recipe ran in it.
+	job := ta.job(t, "box-project-rebuild")
+	require.Equal(t, "1.0.0", job.Meta["image"])
+	command := ta.guest.calls[len(ta.guest.calls)-1]
+	require.Equal(t, "setsid", command[0])
+	require.Equal(t, "bash", command[len(command)-2])
+	require.Equal(t, "-s", command[len(command)-1])
+	require.Contains(t, strings.Join(ta.guest.stdin, "\n"), "echo recipe")
+	require.Zero(t, callCount(ta, "RegisterJob box-bake-project-rebuild"), "a failed recipe bakes nothing")
+}
+
+// withDraftNoRecipe publishes a draft that carries no recipe.
+func (ta *testApp) withDraftNoRecipe(t *testing.T, version, name, parent string) *DraftImage {
+	t.Helper()
+	draft := ta.withDraft(t, version, name, parent, 8)
+	ta.cluster.mu.Lock()
+	defer ta.cluster.mu.Unlock()
+	node := ta.cluster.nodes["node-1"]
+	delete(node.Attributes, draftAttributePrefix+version+".recipe")
+	draft.Recipe = ""
+	return draft
+}

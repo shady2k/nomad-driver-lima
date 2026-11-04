@@ -2,9 +2,9 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/nomad/api"
 )
@@ -91,16 +91,28 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		return err
 	}
 
-	indexURL, err := a.requireImageIndexURL()
+	// The index is where published images are, and the drafts are on the nodes.
+	// Either may be absent: a cluster that only bakes images has no index yet.
+	index, err := a.loadIndexOptional(ctx)
 	if err != nil {
 		return err
 	}
-	index, err := LoadImageIndex(ctx, a.Images, indexURL)
-	if err != nil {
-		if errors.Is(err, ErrIndexMissing) {
+	drafts, err := a.nodeDrafts(ctx)
+	if err != nil && index == nil {
+		return wrapf(err, "cannot read the project images of the nodes")
+	}
+	if index == nil && len(drafts) == 0 {
+		// Neither a published image nor a draft: the index is what is missing,
+		// and it is the one thing an operator has to set.
+		if url, urlErr := a.requireImageIndexURL(); urlErr != nil {
+			return urlErr
+		} else {
 			return errorf("there are no base images yet: the image index %s answers 404. "+
-				"Publish an image, or point BOX_IMAGE_INDEX (or --image-index) at an index that exists", indexURL)
+				"Publish an image, or point BOX_IMAGE_INDEX (or --image-index) at an index that exists", url)
 		}
+	}
+	version, err := a.resolveImageVersion(*imageVersion, index, drafts)
+	if err != nil {
 		return err
 	}
 	nodes, err := a.nodeCapacities(ctx)
@@ -109,10 +121,11 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	}
 
 	wantArch := NormalizeArch(*arch)
+	diskGiven := flagSet(fs, "disk-gib")
 	requested := PlacementRequest{Arch: wantArch, CPUs: *cpus, MemoryMiB: *memoryMiB, DiskGiB: *diskGiB, Node: *nodeName, Large: *large}
 
 	// Pick the architecture and the node together: the node decides which
-	// architecture is possible, the index decides which one has an image.
+	// architecture is possible, the images decide which one there is.
 	candidateArches := ImageArchitectures
 	if wantArch != "" {
 		if wantArch != "amd64" && wantArch != "arm64" {
@@ -127,9 +140,15 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		reasons []string
 		codes   []int
 	)
+	disk := *diskGiB
 	for _, candidate := range candidateArches {
-		artifact, err := index.Resolve(*imageVersion, candidate)
+		artifact, err := a.resolveImage(index, drafts, version, candidate)
 		if err != nil {
+			// A usage error is about the command line, not about one candidate
+			// architecture: it stands whatever the other candidates say.
+			if ExitCode(err) == ExitUsage {
+				return err
+			}
 			reasons = append(reasons, err.Error())
 			codes = append(codes, ExitCode(err))
 			continue
@@ -139,23 +158,33 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 			codes = append(codes, ExitCode(err))
 			continue
 		}
-		// The image's own index entry decides whether a bundle is mounted: an
-		// image that carries its own boxd keeps running it, and its /opt/box is
-		// not hidden by a mount. The bundle belongs to the candidate that is
-		// chosen, so it is reset with each candidate: an arm64 image that carries
-		// its own boxd must not inherit the amd64 candidate's bundle.
+		// A project image's disk is the floor of the box's disk, and a box made
+		// from a draft runs on the node that holds it.
+		candidateDisk, err := diskForImage(artifact, disk, diskGiven)
+		if err != nil {
+			if ExitCode(err) == ExitUsage {
+				return err
+			}
+			reasons = append(reasons, err.Error())
+			codes = append(codes, ExitCode(err))
+			continue
+		}
+		// The image's own entry decides whether a bundle is mounted: an image
+		// that carries its own boxd keeps running it, and its /opt/box is not
+		// hidden by a mount. The bundle belongs to the candidate that is chosen,
+		// so it is reset with each candidate: an arm64 image that carries its own
+		// boxd must not inherit the amd64 candidate's bundle.
 		var candidateBundle *PlatformArtifact
 		if artifact.Platform != "mount" {
 			if want := strings.TrimSpace(*platformVersion); want != "" {
-				return usagef("box create %s: the image %s does not take a platform bundle (its index entry has no "+
+				return usagef("box create %s: the image %s does not take a platform bundle (its entry has no "+
 					"\"platform\": \"mount\"), so --platform does not apply: that image runs the boxd it carries",
 					id, artifact.Version)
 			}
 		} else {
-			if len(index.Platforms) == 0 {
-				// No architecture can be served: the index has no bundle at all.
+			if index == nil || len(index.Platforms) == 0 {
 				return errorf("the image %s needs a platform bundle, but the image index %s lists none yet",
-					artifact.Version, indexURL)
+					artifact.Version, a.ImageIndexURL())
 			}
 			want := strings.TrimSpace(*platformVersion)
 			if want == "" {
@@ -179,13 +208,24 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 			candidateBundle = resolved
 		}
 		requested.Arch = candidate
-		chosen, _, err := ChooseNode(nodes, requested)
+		requested.DiskGiB = candidateDisk
+		var chosen *NodeCapacity
+		if artifact.IsDraft() {
+			// A draft exists on one node, and its image is in that node's cache:
+			// the box runs there.
+			chosen, err = draftNode(nodes, drafts, artifact.Version, candidate, *nodeName)
+		} else {
+			chosen, _, err = ChooseNode(nodes, requested)
+		}
 		if err != nil {
+			if ExitCode(err) == ExitUsage {
+				return err
+			}
 			reasons = append(reasons, err.Error())
 			codes = append(codes, ExitCode(err))
 			continue
 		}
-		node, image, bundle = chosen, artifact, candidateBundle
+		node, image, bundle, disk = chosen, artifact, candidateBundle, candidateDisk
 		break
 	}
 	if node == nil || image == nil {
@@ -203,7 +243,86 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		}
 		return &Error{Code: code, Msg: strings.Join(reasons, "; ")}
 	}
+	diskGiB = &disk
 
+	out, err := a.createBox(ctx, boxRequest{
+		ID:            id,
+		Image:         image,
+		Platform:      bundle,
+		Node:          node,
+		CPUs:          *cpus,
+		MemoryMiB:     *memoryMiB,
+		DiskGiB:       *diskGiB,
+		VaultRole:     strings.TrimSpace(*vaultRole),
+		ExecutorItems: a.executorItems(ctx),
+	}, *wait, *timeout)
+	if err != nil {
+		return err
+	}
+	if !*wait || !src.given() {
+		return a.printCreate(out)
+	}
+	// The box runs; now its sources, and the box is ready when they are. A
+	// preparation that fails keeps the box: it says why, and `box prepare`
+	// runs it again.
+	if !a.JSON {
+		if err := a.printCreate(out); err != nil {
+			return err
+		}
+	}
+	opts, err := src.options(*prepTimeout)
+	if err != nil {
+		return err
+	}
+	client, _, err := a.boxctlFor(ctx, id)
+	if err != nil {
+		return wrapKeep(err, "the box %s runs but could not be prepared; `box prepare %s` tries again", id, id)
+	}
+	prepErr := a.prepareBox(ctx, client, id, opts, *prepTimeout, false)
+	if a.JSON {
+		if st, err := client.PrepareGet(ctx); err == nil {
+			out.Prepare = st
+		}
+		if err := a.printJSON(out); err != nil {
+			return err
+		}
+	}
+	return prepErr
+}
+
+// boxRequest is a box ready to be created: the image, the bundle and the node are
+// decided, and what is left is its volume, its job and the wait for it to run.
+type boxRequest struct {
+	ID string
+	// Image is the artifact the box's disk is built from: a published image or a
+	// draft on the node that holds it.
+	Image *ImageArtifact
+	// Platform is the bundle the guest mounts, nil for an image that carries its
+	// own boxd.
+	Platform *PlatformArtifact
+	// Node is where the box runs and its disk lives.
+	Node      *NodeCapacity
+	CPUs      int
+	MemoryMiB int
+	DiskGiB   int
+	// VaultRole is the Vault role the box reads its secrets with.
+	VaultRole string
+	// ExecutorItems are the items of the executors variable the job renders.
+	ExecutorItems []ExecutorItem
+}
+
+// createBox registers the volume and the job of a box and waits for it to run.
+//
+// It is the second half of `box create`, and the whole of what `box bake --rebuild`
+// does for its temporary box: everything here works on a decision already made.
+func (a *App) createBox(ctx context.Context, req boxRequest, wait bool, timeout time.Duration) (*createOutput, error) {
+	if req.Image == nil {
+		return nil, errorf("a box needs an image")
+	}
+	if req.Node == nil {
+		return nil, errorf("a box needs a node")
+	}
+	id, node, image, bundle := req.ID, req.Node, req.Image, req.Platform
 	spec := BoxSpec{
 		CPUMHzPerVCPU: int(node.vcpuMHz()),
 		ID:            id,
@@ -211,34 +330,38 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		ImageURL:      image.URL,
 		ImageSHA256:   image.SHA256,
 		Arch:          image.Arch,
-		CPUs:          *cpus,
-		MemoryMiB:     *memoryMiB,
-		DiskGiB:       *diskGiB,
+		CPUs:          req.CPUs,
+		MemoryMiB:     req.MemoryMiB,
+		DiskGiB:       req.DiskGiB,
 		NodeID:        node.NodeID,
+		// A project image carries its recipe: a box made from it passes it on, so
+		// baking this box again, or rebuilding it on a newer parent, has the
+		// recipe that made its environment.
+		Recipe: image.Recipe,
 	}
 	if bundle != nil {
 		spec.PlatformVersion = bundle.Version
 		spec.PlatformURL = bundle.URL
 		spec.PlatformSHA256 = bundle.SHA256
 	}
-	spec.ExecutorItems = a.executorItems(ctx)
-	spec.VaultRole = strings.TrimSpace(*vaultRole)
+	spec.ExecutorItems = req.ExecutorItems
+	spec.VaultRole = strings.TrimSpace(req.VaultRole)
 	a.noteNoVaultRole(spec)
 	job, err := RenderJob(spec)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	volume, err := RenderVolume(VolumeSpec{BoxID: id, NodeID: node.NodeID, DiskGiB: *diskGiB})
+	volume, err := RenderVolume(VolumeSpec{BoxID: id, NodeID: node.NodeID, DiskGiB: req.DiskGiB})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	created, err := a.Nomad.CreateHostVolume(ctx, volume)
 	if err != nil {
-		return wrapf(err, "Nomad could not create the box disk %s on node %s",
+		return nil, wrapf(err, "Nomad could not create the box disk %s on node %s",
 			BoxVolumeName(id), node.Name)
 	}
-	repo := &createOutput{
+	out := &createOutput{
 		Job:      BoxJobName(id),
 		Volume:   created.ID,
 		Image:    image,
@@ -255,15 +378,15 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		probe := a.probeBoxJob(ctx, id)
 		switch {
 		case !probe.Known:
-			return wrapKeep(err, "Nomad did not say whether the job %s was registered (%s), so nothing was deleted: "+
+			return nil, wrapKeep(err, "Nomad did not say whether the job %s was registered (%s), so nothing was deleted: "+
 				"the box may well be running (`box status %s` shows it, `box rm %s --yes` removes it)",
 				BoxJobName(id), oneLine(errText(probe.Err), 200), id, id)
 		case !probe.Found:
 			// The job is definitively gone: the disk has no box left to serve.
 			a.discardVolume(ctx, created)
-			return wrapf(err, "Nomad rejected the box job %s%s", BoxJobName(id), registerDenied(err, BoxVolumeName(id)))
+			return nil, wrapf(err, "Nomad rejected the box job %s%s", BoxJobName(id), registerDenied(err, BoxVolumeName(id)))
 		case !probe.IsBox:
-			return errorf("the job %s exists but is not a box (it has no meta.box = \"true\"), so the disk %s was kept: "+
+			return nil, errorf("the job %s exists but is not a box (it has no meta.box = \"true\"), so the disk %s was kept: "+
 				"`nomad job status %s` shows what job that name belongs to", BoxJobName(id), created.ID, BoxJobName(id))
 		}
 		// The job exists: the registration did take, so the box and its disk
@@ -277,65 +400,37 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		evalID = resp.EvalID
 	}
 
-	if !*wait {
+	if !wait {
 		rec, _, err := a.findBox(ctx, id)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		repo.Box = rec
-		repo.Warn = joinNotes(lost, "the box was created and is starting; `box status "+id+"` shows when it is ready")
-		return a.printCreate(repo)
+		out.Box = rec
+		out.Warn = joinNotes(lost, "the box was created and is starting; `box status "+id+"` shows when it is ready")
+		return out, nil
 	}
 
-	rec, err := a.waitForBoxRunning(ctx, id, evalID, *timeout)
+	rec, err := a.waitForBoxRunning(ctx, id, evalID, timeout)
 	if err != nil {
 		// A box that never got an allocation is taken away again: there is
 		// nothing to look at and nothing to keep. A box that did start and then
 		// failed is kept, because its task events and its log are the evidence.
 		if rec.AllocationID == "" {
 			if cleanupErr := a.discardBox(ctx, id, created); cleanupErr != nil {
-				return &Error{Code: ExitCode(err), Msg: err.Error() + "; " + cleanupErr.Error() +
+				return nil, &Error{Code: ExitCode(err), Msg: err.Error() + "; " + cleanupErr.Error() +
 					"; `box rm " + id + " --yes` removes it"}
 			}
-			return err
+			return nil, err
 		}
-		return wrapKeep(err, "the box %s was kept so you can look at it (`box status %s`, `box logs %s`); `box rm %s --yes` removes it",
+		return nil, wrapKeep(err, "the box %s was kept so you can look at it (`box status %s`, `box logs %s`); `box rm %s --yes` removes it",
 			id, id, id, id)
 	}
-	repo.Box = rec
-	repo.Warn = lost
+	out.Box = rec
+	out.Warn = lost
 	if resp != nil && resp.Warnings != "" {
-		repo.Warn = joinNotes(lost, oneLine(resp.Warnings, 300))
+		out.Warn = joinNotes(lost, oneLine(resp.Warnings, 300))
 	}
-	if !src.given() {
-		return a.printCreate(repo)
-	}
-	// The box runs; now its sources, and the box is ready when they are. A
-	// preparation that fails keeps the box: it says why, and `box prepare`
-	// runs it again.
-	if !a.JSON {
-		if err := a.printCreate(repo); err != nil {
-			return err
-		}
-	}
-	opts, err := src.options(*prepTimeout)
-	if err != nil {
-		return err
-	}
-	client, _, err := a.boxctlFor(ctx, id)
-	if err != nil {
-		return wrapKeep(err, "the box %s runs but could not be prepared; `box prepare %s` tries again", id, id)
-	}
-	prepErr := a.prepareBox(ctx, client, id, opts, *prepTimeout, false)
-	if a.JSON {
-		if st, err := client.PrepareGet(ctx); err == nil {
-			repo.Prepare = st
-		}
-		if err := a.printJSON(repo); err != nil {
-			return err
-		}
-	}
-	return prepErr
+	return out, nil
 }
 
 // printCreate writes the result of `box create`.

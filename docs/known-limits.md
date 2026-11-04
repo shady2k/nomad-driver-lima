@@ -200,6 +200,33 @@ where one is known, what would close it. Nothing here is a promise to fix it.
 - **A published version cannot be withdrawn** by any tooling here: the store's
   own permissions decide whether an operator can delete a file, and boxes hold
   the digest of what they pulled.
+- **A sealed box is an empty machine.** `box bake` seals the box and leaves it
+  stopped with its disk; `box start` on it boots the image's files with none of
+  the work, because the seal deleted `/work` and every session. Its disk is the
+  image now, so `box rm <id> --yes` is the step after a bake, and the work has to
+  be pushed out or copied out before it.
+- **A draft lives on one node.** It is a file in that node's image cache, so a
+  box is created from it there: `box create --image NAME-N` pins the box to that
+  node, and `--node` must name the same node or be left out. A node with no room
+  for the box fails the create, so a draft on a full node waits until something
+  there stops. Publishing is what makes the image available on every node.
+- **Drafts are never pruned.** The image cache keeps every baked image and its
+  record, and `box images` keeps listing it: nothing here expires an image, and a
+  full cache is the operator's to clean. A cache entry removed by hand is a draft
+  whose record stays on the node: creating a box from it fails, and the driver's
+  task event names the image it could not find.
+- **An arm64 box bakes an arm64 image, and a disk is not portable.** The bake job
+  is placed by the node's architecture, so an image is always the architecture of
+  the node that baked it, and a box created from it on another architecture is
+  refused as any image of the wrong architecture is. There is no conversion
+  between them.
+- **A published image expires by the store's own policy, not by this tooling.**
+  Nothing here deletes a published file: the publish task only writes, and the
+  token in `nomad/jobs/box-store` is the credential the operator supplied for that.
+  A store credential without a delete right cannot remove an image, so retiring a
+  version is a retention rule in the store, or a delete with a credential that has
+  the right. Until then the version stays readable, and a box created from it
+  keeps working: it holds only the digest of what it pulled.
 
 ## Sessions and executors
 
@@ -283,6 +310,11 @@ where one is known, what would close it. Nothing here is a promise to fix it.
 - **The plugin watchdog is a workaround.** Nomad 2.0 does not reattach a
   restarted client to a running external plugin, so the plugin stops when its
   client goes away. It can go when Nomad fixes reattachment.
+- **On macOS a VM's graphs depend on finding its process.** A `vz` VM runs in a
+  Virtualization.framework XPC service that no Lima pid file names, so the driver
+  finds it by the box's disk among the files it holds open (`lsof`, every 30 s
+  until found). Without it, Nomad shows only the hostagent. Its resident size can
+  exceed the task's memory: macOS has no cgroup, and nothing enforces that limit.
 - **Capacity's uncounted numbers are a convention.** `box capacity` subtracts
   the node's reservation per vCPU and reads everything from the driver's periodic fingerprint,
   so a stale fingerprint either double-counts a VM or misses it.

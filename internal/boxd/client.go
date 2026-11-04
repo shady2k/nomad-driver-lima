@@ -225,3 +225,57 @@ func (c *Client) PrepareSkip(ctx context.Context) (PrepareState, error) {
 	err := c.call(ctx, http.MethodPost, "/v1/prepare/skip", nil, &out)
 	return out, err
 }
+
+// Seal seals the box into an image and reports every step to say.
+//
+// The daemon answers a stream of JSON lines: a line per step, then the result or
+// an error. A seal that fails has already written its steps, so the error arrives
+// as a document, not as an HTTP status.
+func (c *Client) Seal(ctx context.Context, req SealRequest, say func(string)) (SealResult, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return SealResult{}, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://boxd/v1/seal", bytes.NewReader(body))
+	if err != nil {
+		return SealResult{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := c.hc.Do(httpReq)
+	if err != nil {
+		return SealResult{}, Errorf(CodeBoxdUnavailable, "boxd is not reachable on %s: %s", c.socket, oneLine(err.Error(), 160))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		var er ErrorResponse
+		if json.Unmarshal(data, &er) == nil && er.Error.Code != "" {
+			return SealResult{}, &Error{Code: er.Error.Code, Message: er.Error.Message}
+		}
+		return SealResult{}, Errorf(CodeInternal, "boxd answered HTTP %d: %s", resp.StatusCode, oneLine(string(data), 200))
+	}
+	var out SealResult
+	dec := json.NewDecoder(resp.Body)
+	for {
+		var line struct {
+			Line  string      `json:"line"`
+			Seal  *SealResult `json:"seal"`
+			Error *ErrorBody  `json:"error"`
+		}
+		if err := dec.Decode(&line); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return out, Errorf(CodeInternal, "reading the seal's answer: %v", err)
+		}
+		switch {
+		case line.Error != nil && line.Error.Code != "":
+			return out, &Error{Code: line.Error.Code, Message: line.Error.Message}
+		case line.Seal != nil:
+			out = *line.Seal
+		case line.Line != "" && say != nil:
+			say(line.Line)
+		}
+	}
+	return out, nil
+}

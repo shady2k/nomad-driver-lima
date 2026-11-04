@@ -23,6 +23,16 @@ const qemuImgName = "qemu-img"
 // sits next to the verified download and carries the same sha256 key.
 const uncompressedSuffix = ".uncompressed.qcow2"
 
+// DraftURLPrefix is the url of a project image that was baked on this node: the
+// file is in the cache under its digest, and there is nothing to download.
+//
+// A box created from a draft names it this way (`internal/cli` writes it), and the
+// driver treats it as a cache lookup and never as a download: the cache holds
+// every image a box on this node is created from, and a url that is not fetchable
+// would only report a broken URL instead of the truth, which is that the image is
+// no longer in the cache.
+const DraftURLPrefix = "file:///box-draft/"
+
 // EnsureImage makes the cloud image available in the cache directory, keyed by
 // its sha256. A cached file is re-verified; a new download is written to a
 // temporary file, verified, then renamed into place so a half download is never
@@ -48,6 +58,13 @@ func (b *Box) EnsureImage(ctx context.Context, url, wantSHA256 string, progress 
 	} else if ok {
 		b.event("image", fmt.Sprintf("Using cached image %s (sha256 verified)", filepath.Base(dest)))
 		return dest, nil
+	}
+	if strings.HasPrefix(url, DraftURLPrefix) {
+		// A draft is a file this node baked, not a download: a cache that lost it
+		// is a bake that has to run again.
+		return "", fmt.Errorf("the image %s is a draft of this node and its file is no longer in the image cache %s "+
+			"(sha256 %s): `box images` lists the drafts there are, and baking the box again makes a new one",
+			strings.TrimPrefix(url, DraftURLPrefix), b.m.opts.ImageCacheDir, want)
 	}
 
 	b.event("image", fmt.Sprintf("Downloading box image from %s", url))
@@ -115,7 +132,7 @@ func (b *Box) EnsureImageDisk(ctx context.Context, url, wantSHA256 string, progr
 		return dest, nil
 	}
 	if err := b.uncompress(ctx, imagePath, dest); err != nil {
-		var missing *qemuImgMissing
+		var missing *QEMUImgMissing
 		if errors.As(err, &missing) {
 			b.event("image", fmt.Sprintf("Box disk stays compressed: %v. Install qemu-img on the node so a new box disk has plain clusters", err))
 		} else {
@@ -133,18 +150,21 @@ func uncompressedPath(imagePath string) string {
 	return strings.TrimSuffix(imagePath, ".img") + uncompressedSuffix
 }
 
-// qemuImgMissing says that the node has no qemu-img, which is a setting an
+// QEMUImgMissing says that the node has no qemu-img, which is a setting an
 // operator can change rather than a failure of this box.
-type qemuImgMissing struct {
+type QEMUImgMissing struct {
 	name string
 	err  error
 }
 
-func (e *qemuImgMissing) Error() string {
+func (e *QEMUImgMissing) Error() string {
 	return fmt.Sprintf("%s is not installed (%v)", e.name, e.err)
 }
 
-func (e *qemuImgMissing) Unwrap() error { return e.err }
+// Err is why qemu-img could not be used.
+func (e *QEMUImgMissing) Err() error { return e.err }
+
+func (e *QEMUImgMissing) Unwrap() error { return e.err }
 
 // uncompress writes an uncompressed qcow2 copy of src to dest with qemu-img,
 // into a temporary file in the cache that is renamed into place: a half
@@ -158,7 +178,7 @@ func (b *Box) uncompress(ctx context.Context, src, dest string) error {
 	}
 	qemuImg, err := exec.LookPath(name)
 	if err != nil {
-		return &qemuImgMissing{name: name, err: err}
+		return &QEMUImgMissing{name: name, err: err}
 	}
 	tmp, err := os.CreateTemp(b.m.opts.ImageCacheDir, filepath.Base(dest)+".*.part")
 	if err != nil {

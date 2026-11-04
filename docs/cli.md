@@ -39,13 +39,192 @@ subtracting the running VMs that no task owns.
 
 ### `box images`
 
-The base image versions published in the index, newest first, and the platform
-bundles published with them.
+The images a box can be created from, newest first -- the base images published in
+the index, the **project images** published with them, and the **drafts** the
+nodes baked -- and the platform bundles published with the base images.
+
+An image's row:
+
+| column | what it holds |
+| --- | --- |
+| `VERSION` | the image's version: `1.0.8` for a base image, `NAME-N` for a project image |
+| `ARCH` | `amd64` or `arm64` |
+| `KIND` | `base`, or `project` for an image baked from a box |
+| `PARENT` | the image a project image was baked on top of; `-` for a base image |
+| `BEHIND` | how far a project image's parent is behind the newest base image: `parent 1.0.8, newest base 1.0.12`, or `parent 1.0.8 (newest base)` |
+| `SIZE` | the compressed size of the image file |
+| `SHA256` | the first 12 characters of its digest |
+| `WHERE` | `published`, or `draft on <node>` |
+
+Below the table come the counts, the `box create` line for the newest base image,
+lines that say where a draft is created from and how to publish it, and -- when
+a project image or a draft was grown from an older base image -- the `box bake
+--rebuild` that replays it on the newest one.
+
+A **draft** exists on one node only: the bake wrote it into that node's image
+cache, and the driver publishes its record as node attributes. `box create` from
+a draft pins the box to that node; `box images publish` makes it available
+everywhere. A cluster with no image index still lists the drafts, with a line
+that says why there are no published images: baking comes before publishing.
+
+`latest` and the newest-version hint never pick a project image: a box created
+with `--image latest` is always a base image.
+
+`--json` gives `index_url`, `available`, `updated_at`, `images` (the base and
+published project images), `drafts`, `platforms` and, when the index could not be
+read, `error`.
 
 An image whose index entry says `"platform": "mount"` expects a platform bundle:
 its `boxd`, `boxctl` and its executors come from that bundle, which is mounted
 read-only at `/opt/box` when the box starts. An image without the field runs the
 `boxd` it carries, and nothing of it changes.
+
+### `box images publish <version> [--yes] [--timeout D]`
+
+Publishes a draft into the operator's store, which is what makes an image
+available on every node. Publishing distributes it and a published version never
+changes, so the command refuses without `--yes`; the skill an agent follows says
+it asks its owner first.
+
+It reads the drafts of the nodes and refuses a version no node holds, naming the
+drafts there are. Then it registers a batch job `box-publish-<version>` of the
+driver, pinned to the node that baked the draft -- the image is in that node's
+cache and nowhere else -- and waits for it. The task:
+
+1. refuses the version when the store already holds any of its files, and when
+   `index.json` already names it;
+2. uploads the image, its `.sha256` and its manifest under
+   `box-base/<version>/<arch>/`, with the names `images/publish.sh` writes;
+3. reads the image back and compares its sha256 (and its size, and the two small
+   files byte for byte) before the index names it;
+4. re-reads `index.json`, merges the entry, writes it and reads it back: this
+   entry is there and every entry that was there before survived.
+
+The store's url and token reach the task as templated files, out of the variable
+`box store set` writes (below); the token is never in the job spec, in a task
+event or in a log. The job reads that variable through
+`deploy/acl/box-store.policy.hcl` attached to that job, never through a box's
+policy, and the job is purged when it ends.
+
+It prints the version, the architecture, the sha256, the store, the image's url
+and the index's url, and the `box create` line for the image. `--json` gives
+`version`, `arch`, `sha256`, `size`, `store`, `url`, `index_url` and `node`.
+
+Exit codes are the page's: `0` published, `1` the job failed or no store is
+configured, `2` usage, `3` no node holds that draft, `4` the job did not finish
+within `--timeout` (default 30m).
+
+### `box bake <id> --name NAME [--recipe FILE | --no-recipe] [--yes] [--timeout D]`
+
+Turns a box into an image: the box is sealed from inside, stopped, and its disk
+is baked into the node's image cache as a draft (`docs/guest-image.md`, "Project
+images"). Those are the only flags.
+
+A bake is refused, with a sentence that says why, when:
+
+- the box's image takes no platform bundle (`"platform"` is not `mount`): boxd and
+  the executors come from the node's `/opt/box`, so an image that carries its own
+  boxd cannot be baked;
+- the box is not running: the seal runs inside it;
+- `--recipe` and `--no-recipe` are both given: they say opposite things;
+- `--yes` is missing.
+
+Without `--yes` the command names the image it would make and says what the seal
+does: it deletes `/work` and every session in the box, and the box cannot be
+sealed twice. Push the work out of the box first.
+
+The recipe is the script that makes the box's environment from its parent image.
+It comes from `--recipe FILE`, or else from the record of the image the box was
+created from, and the command says which. `--no-recipe` bakes an image with none:
+it can be created from and never rebuilt. A recipe is at most 64 KiB; a longer
+script belongs in the project's sources, which the recipe prepares.
+
+| flag | default | meaning |
+| --- | --- | --- |
+| `--name NAME` | – (required) | the project the image belongs to: `NAME-1`, `NAME-2`, ... |
+| `--recipe FILE` | the box's image record | the script that makes this environment from the parent image |
+| `--no-recipe` | false | bake without a recipe; such an image cannot be rebuilt |
+| `--yes` | false | seal the box without asking |
+| `--timeout D` | 30m | how long to wait for the bake job |
+
+The steps, in this order:
+
+1. `boxctl seal` in the guest: it deletes the work, the sessions and the
+   credentials, and proves the result. Its lines go to stderr as they happen (not
+   under `--json`), and a failed seal fails the command with the seal's own
+   message.
+2. `box stop` the box. A sealed box is not started again: it is an empty, clean
+   machine with the image's files, not the work.
+3. The batch job `box-bake-<id>`, which mounts the box's volume read-only -- the
+   volume also places the job on the node that holds the disk. It runs no VM: it
+   compresses the disk with `qemu-img` and records the image. A node without
+   `qemu-img` fails it with a sentence.
+4. The job is purged, and the result is printed: version, sha256, size, node, and
+   the next steps.
+
+The box is not deleted. It stays stopped with its disk, and `box rm <id> --yes`
+removes it when its work is out of it.
+
+The version is `NAME-N`, with `N` one above the highest number among the versions
+of that name in the index and the drafts of every node, so a draft and a published
+image never share a number. `NAME` is 1 to 63 lower-case letters, digits and
+dashes, starting and ending with a letter or a digit, and it may not look like a
+base image's version (`1.0.0`, `v2`).
+
+`--json` gives `box` (the sealed box), `version`, `arch`, `name`, `parent`,
+`sha256`, `size`, `virtual_bytes`, `node` and `draft`.
+
+Exit codes are the page's: `0` baked, `1` the seal, the stop or the job failed,
+`2` usage, `4` the job did not finish within `--timeout` (it keeps running).
+
+### `box bake --rebuild NAME [--base VERSION] [--timeout D]`
+
+Replays an image's recipe on a newer parent. `NAME` is a project image's name or
+version; without `--base` the newest base image is the parent.
+
+It refuses an image that carries no recipe: a rebuild replays the recipe that made
+the environment, and an image baked with `--no-recipe` has none.
+
+Then it creates a temporary box `NAME-rebuild` from the base image, runs the
+recipe in it with the machinery of `box run` -- its output on the terminal, and no
+time limit other than `--timeout` (default 1h) -- bakes the result as the next
+`NAME-N` with the new parent, and deletes the temporary box. On a failure it keeps
+the box and says so: what the box ran is the way to see why (`box logs`, then `box
+rm NAME-rebuild --yes`).
+
+It publishes nothing: that is `box images publish`. `--yes` is accepted and
+unnecessary, and the command says so: the only box it seals is its own temporary
+one.
+
+### `box store set --url URL --from-file FILE | --template FILE`
+
+Writes the operator's image store, which a publish reads: the Nomad variable
+`nomad/jobs/box-store`, holding the store's base url and either its write token or
+template text that reads the token at render time.
+
+- `--url URL` is required and must be an http(s) url. The `box-base/` layout is
+  written below it.
+- `--from-file FILE` stores the file's content as the token, in the variable.
+- `--template FILE` stores the file's text as a Nomad template, for example
+  `{{ with secret "kv/data/box/store" }}{{ .Data.data.token }}{{ end }}`: the
+  token is then read from Vault when the publish task renders, and even the
+  variable holds a path. The file must contain `{{`, and it must never contain the
+  token; this is the form to prefer.
+
+Giving both is a usage error, and so is an empty file. The command prints the url,
+how the token reaches a publish (`read from Vault when the task renders`, `stored
+in the Variable`, or `none`), and the item names. It never prints a value.
+
+### `box store show`
+
+The same lines for the store that is configured, or one line saying there is none.
+`--json` gives `url`, `token` (`variable`, `template`, or empty for a store
+written without authentication), `items` and `configured`; the token is never a
+value here either.
+
+A publish job reads that variable with a workload policy of its own
+(`deploy/acl/box-store.policy.hcl`); `deploy/acl/README.md` shows how it is
+attached to the job.
 
 ### `box create <id> [flags]`
 
@@ -54,7 +233,7 @@ waits until the box is running.
 
 | flag | default | meaning |
 | --- | --- | --- |
-| `--image V` | – (required) | base image version from the index |
+| `--image V` | – (required) | a published version, a draft's version (`NAME-N`), or a project's name, which means the newest version of it |
 | `--arch amd64\|arm64` | the node's | architecture |
 | `--platform V` | the newest published for the architecture | the platform bundle to mount at `/opt/box`; only an image built for bundles takes one |
 | `--cpus N` | 2 | guest vCPUs |
@@ -65,6 +244,18 @@ waits until the box is running.
 | `--vault-role ROLE` | `BOX_VAULT_ROLE`, else the cluster's default role | the Vault role the box reads its secrets with, used when the executors hold a template item (see "Executor credentials") |
 | `--timeout D` | 10m | how long to wait for it to run |
 | `--wait` | true | wait until it is running |
+
+A draft is created from on its own node: `--image NAME-N` pins the box to the node
+that holds the image, and `--node` must name that node or be left out. Its url in
+the job is `file:///box-draft/<version>`, which is never fetched: the
+node's cache already has the file, keyed by the record's sha256. A node that lost
+the file fails the box, and the driver's task event says which image it could not
+find. A `--disk-gib` below the image's virtual size is refused,
+and the default disk grows to at least that size: an image's disk is the floor of
+a box's disk.
+
+`--image NAME` without a number is the newest version of that project, among the
+published images and the drafts.
 
 A box id is `[a-z0-9-]{1,40}`. A failed create removes the half-made box, so a
 failure leaves no disk behind.

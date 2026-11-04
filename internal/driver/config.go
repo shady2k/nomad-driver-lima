@@ -57,6 +57,10 @@ type Config struct {
 	MemoryLimit string `codec:"memory_limit"`
 	// VMType is qemu (Linux) or vz (macOS); empty means the OS default.
 	VMType string `codec:"vm_type"`
+	// QEMUImg is the qemu-img binary (default "qemu-img" from PATH). It
+	// uncompresses an image once per image, and a bake compresses a sealed disk
+	// with it.
+	QEMUImg string `codec:"qemu_img"`
 	// RuntimeUser is the unprivileged user every Lima process runs as. Lima
 	// refuses to run as root, so a driver that runs as root (the Nomad client on
 	// a Linux node) requires it; a driver that runs as another user may leave it
@@ -100,6 +104,10 @@ var configSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 	),
 	"vm_type": hclspec.NewDefault(
 		hclspec.NewAttr("vm_type", "string", false),
+		hclspec.NewLiteral(`""`),
+	),
+	"qemu_img": hclspec.NewDefault(
+		hclspec.NewAttr("qemu_img", "string", false),
 		hclspec.NewLiteral(`""`),
 	),
 	"runtime_user": hclspec.NewDefault(
@@ -173,6 +181,36 @@ type PlatformConfig struct {
 	SHA256  string `codec:"sha256"`
 }
 
+// BakeConfig is the task's optional bake block: the task makes an image out of the
+// disk of a sealed box instead of running a VM.
+//
+// The disk only exists on the node, and the driver is the host-side code this
+// repository has, so baking is a task of the driver: StartTask with this block
+// does no VM work at all.
+type BakeConfig struct {
+	// Name is the project's name; Version is the image's own ("<name>-<n>").
+	Name    string `codec:"name"`
+	Version string `codec:"version"`
+	// Parent is the image the box came from.
+	Parent string `codec:"parent"`
+	// Arch is amd64 or arm64.
+	Arch string `codec:"arch"`
+	// Recipe is the script that makes this environment from the parent image,
+	// base64, as the image's own /etc/box/image.json carries it.
+	Recipe string `codec:"recipe"`
+}
+
+// PublishConfig is the task's optional publish block: the task puts an image that
+// was baked on this node into the operator's store and into the store's index.
+//
+// The store itself (its url and its token) comes from the task's secrets, never
+// from this block: a task config is readable by anyone who may read the job.
+type PublishConfig struct {
+	Version string `codec:"version"`
+	Arch    string `codec:"arch"`
+	SHA256  string `codec:"sha256"`
+}
+
 // TaskConfig is the driver configuration of one box task.
 type TaskConfig struct {
 	BoxID           string      `codec:"box_id"`
@@ -192,6 +230,13 @@ type TaskConfig struct {
 	// Platform is the platform bundle the guest mounts at /opt/box. Nil means
 	// the image's own boxd runs.
 	Platform *PlatformConfig `codec:"platform"`
+	// Bake, when set, makes this task a bake: it reads the disk of a sealed box
+	// and writes it into the image cache as a project image. A bake runs no VM,
+	// so the image, cpus, memory and disk of a box do not apply to it.
+	Bake *BakeConfig `codec:"bake"`
+	// Publish, when set, makes this task a publish: it uploads an image that was
+	// baked on this node into the operator's store and writes the store's index.
+	Publish *PublishConfig `codec:"publish"`
 }
 
 // taskConfigSpec is the HCL schema of the task's driver block.
@@ -232,6 +277,20 @@ var taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 		"url":     hclspec.NewAttr("url", "string", true),
 		"sha256":  hclspec.NewAttr("sha256", "string", true),
 	})),
+	// A bake or a publish is one step of an image's life, not a box: the block is
+	// what says so, and a task carries at most one of them.
+	"bake": hclspec.NewBlock("bake", false, hclspec.NewObject(map[string]*hclspec.Spec{
+		"name":    hclspec.NewAttr("name", "string", true),
+		"version": hclspec.NewAttr("version", "string", true),
+		"parent":  hclspec.NewAttr("parent", "string", false),
+		"arch":    hclspec.NewAttr("arch", "string", true),
+		"recipe":  hclspec.NewAttr("recipe", "string", false),
+	})),
+	"publish": hclspec.NewBlock("publish", false, hclspec.NewObject(map[string]*hclspec.Spec{
+		"version": hclspec.NewAttr("version", "string", true),
+		"arch":    hclspec.NewAttr("arch", "string", true),
+		"sha256":  hclspec.NewAttr("sha256", "string", true),
+	})),
 })
 
 // applyDefaults fills the optional fields and validates the required ones.
@@ -263,6 +322,11 @@ func (c *TaskConfig) applyDefaults() error {
 	if c.BoxID == "" {
 		return fmt.Errorf("box_id is required")
 	}
+	// A bake and a publish run no VM, so the image, cpus, memory and disk of a box
+	// do not apply to them, and their own block is what has to be usable.
+	if c.Bake != nil || c.Publish != nil {
+		return c.validateImageWork()
+	}
 	if c.Image.URL == "" {
 		return fmt.Errorf("image.url is required")
 	}
@@ -283,6 +347,32 @@ func (c *TaskConfig) applyDefaults() error {
 		}
 		if _, err := box.NormalizeSHA256(p.SHA256); err != nil {
 			return fmt.Errorf("platform.sha256: %w", err)
+		}
+	}
+	return nil
+}
+
+// validateImageWork checks the block of a bake or a publish task.
+func (c *TaskConfig) validateImageWork() error {
+	if c.Bake != nil && c.Publish != nil {
+		return fmt.Errorf("a task bakes or publishes an image, not both")
+	}
+	if b := c.Bake; b != nil {
+		rec := box.BakedRecord{Version: b.Version, Arch: b.Arch, Name: b.Name}
+		if err := box.ValidateBakedRecord(rec); err != nil {
+			return fmt.Errorf("bake: %w", err)
+		}
+		if strings.TrimSpace(b.Name) == "" {
+			return fmt.Errorf("bake.name is required")
+		}
+	}
+	if p := c.Publish; p != nil {
+		rec := box.BakedRecord{Version: p.Version, Arch: p.Arch}
+		if err := box.ValidateBakedRecord(rec); err != nil {
+			return fmt.Errorf("publish: %w", err)
+		}
+		if _, err := box.NormalizeSHA256(p.SHA256); err != nil {
+			return fmt.Errorf("publish.sha256: %w", err)
 		}
 	}
 	return nil

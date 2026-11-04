@@ -159,6 +159,7 @@ func (d *Driver) SetConfig(cfg *base.Config) error {
 		LimaHome:          c.LimaHome,
 		ImageCacheDir:     c.ImageCacheDir,
 		FilesRoot:         c.FilesRoot,
+		QEMUImg:           c.QEMUImg,
 		MemoryOverheadMiB: c.MemoryOverheadMiB,
 		VMType:            c.VMType,
 		MemoryLimitOff:    c.MemoryLimit == box.MemoryLimitOff,
@@ -241,7 +242,7 @@ func (d *Driver) clearGoneKeys(fp *drivers.Fingerprint) {
 // isPerBoxKey reports whether an attribute names one box: its disk or its
 // instance, not a node-wide total.
 func isPerBoxKey(key string) bool {
-	if strings.HasPrefix(key, instanceAttributePrefix) {
+	if strings.HasPrefix(key, instanceAttributePrefix) || strings.HasPrefix(key, bakedAttributePrefix) {
 		return true
 	}
 	return strings.HasPrefix(key, diskAttributePrefix) && key != diskTotalUsed && key != diskTotalVirtual
@@ -328,6 +329,9 @@ func (d *Driver) fingerprintOnce(ctx context.Context) *drivers.Fingerprint {
 	// Every live VM with its size and whether a task owns it: `box capacity`
 	// counts the ones Nomad does not.
 	setInstanceAttributes(fp, instanceInfos(instances, d.tasks.BoxIDs()))
+	// The images this node baked: the drafts a coordinator can create a box from
+	// without a download.
+	setBakedImages(fp, d.boxm)
 	return fp
 }
 
@@ -432,17 +436,32 @@ func (d *Driver) orphans(instances []*limactl.Instance) []string {
 
 // emit records a task event so the Nomad UI shows what happened to the VM.
 func (d *Driver) emit(tc *drivers.TaskConfig, kind, message string) {
-	d.logger.Info(message, "task", tc.ID, "box_event", kind)
+	d.emitData(tc, kind, message, nil)
+}
+
+// emitData records a task event whose annotations carry machine-readable fields.
+//
+// Nomad puts a driver event's annotations into the task event's Details (the
+// alloc runner copies them), which is how a reader of the allocation — `box bake`,
+// for one — sees the result of a task without reading the node's files.
+func (d *Driver) emitData(tc *drivers.TaskConfig, kind, message string, data map[string]string) {
 	if tc == nil {
+		d.logger.Info(message, "box_event", kind)
 		return
 	}
+	d.logger.Info(message, "task", tc.ID, "box_event", kind)
+	annotations := make(map[string]string, len(data)+1)
+	for key, value := range data {
+		annotations[key] = value
+	}
+	annotations["kind"] = kind
 	err := d.EmitEvent(&drivers.TaskEvent{
 		TaskID:      tc.ID,
 		TaskName:    tc.Name,
 		AllocID:     tc.AllocID,
 		Timestamp:   time.Now(),
 		Message:     message,
-		Annotations: map[string]string{"kind": kind},
+		Annotations: annotations,
 	})
 	if err != nil {
 		d.logger.Debug("cannot emit task event", "task", tc.ID, "error", err)
@@ -466,6 +485,19 @@ func (d *Driver) StartTask(tc *drivers.TaskConfig) (*drivers.TaskHandle, *driver
 	}
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, nil, err
+	}
+	// A bake and a publish are tasks of this driver too, but they run no VM: the
+	// disk, not a guest, is what they work on.
+	if cfg.Bake != nil || cfg.Publish != nil {
+		if old := d.tasks.Get(tc.ID); old != nil {
+			d.stopImageWork(old)
+			d.tasks.Delete(tc.ID)
+		}
+		h, err := d.startImageWork(tc, cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		return h, nil, nil
 	}
 	volumeDir, err := diskVolumePath(tc)
 	if err != nil {
@@ -703,6 +735,23 @@ func (d *Driver) RecoverTask(handle *drivers.TaskHandle) error {
 	if d.boxm == nil {
 		return fmt.Errorf("driver is not configured")
 	}
+	if cfg.Bake != nil || cfg.Publish != nil {
+		// A bake and a publish are idempotent: the work is started again, so a
+		// client restart does not fail the task.
+		h := newTaskHandle(handle.Config, cfg)
+		if cfg.Bake != nil {
+			volumeDir, err := diskVolumePath(handle.Config)
+			if err != nil {
+				return err
+			}
+			h.setBoxDetails(boxState{VolumeDir: volumeDir, DiskPath: box.VolumeDiskPath(volumeDir, cfg.BoxID)})
+		}
+		h.markRunning(time.Now())
+		d.tasks.Add(h)
+		d.emit(handle.Config, "recover", fmt.Sprintf("Restarted the %s after a client restart", imageWorkName(h)))
+		d.startImageWorkGoroutine(h)
+		return nil
+	}
 
 	h := newTaskHandle(handle.Config, cfg)
 	h.setBoxDetails(boxState{
@@ -746,6 +795,12 @@ func (d *Driver) StopTask(taskID string, timeout time.Duration, signal string) e
 	if h == nil {
 		return fmt.Errorf("task %q is not running", taskID)
 	}
+	// A bake or a publish owns no VM: stopping it cancels its work and waits for
+	// it to end, so what it wrote temporarily is gone.
+	if h.cfg.Bake != nil || h.cfg.Publish != nil {
+		d.stopImageWork(h)
+		return nil
+	}
 	// Nomad uses the detach signal to hand the box to a replacement allocation:
 	// stop watching it, but leave the VM and its disk untouched.
 	if signal == drivers.DetachSignal {
@@ -780,6 +835,15 @@ func (d *Driver) StopTask(taskID string, timeout time.Duration, signal string) e
 func (d *Driver) DestroyTask(taskID string, force bool) error {
 	h := d.tasks.Get(taskID)
 	if h == nil {
+		return nil
+	}
+	if h.cfg.Bake != nil || h.cfg.Publish != nil {
+		// Nothing of a bake or a publish is on the host but what it wrote into the
+		// image cache, which is the point of it: the work is stopped and the handle
+		// is dropped.
+		defer d.tasks.Delete(taskID)
+		d.stopImageWork(h)
+		h.finish(&drivers.ExitResult{})
 		return nil
 	}
 	d.stopGuestLogs(h)
@@ -841,6 +905,16 @@ func (d *Driver) TaskStats(ctx context.Context, taskID string, interval time.Dur
 	h.mu.Unlock()
 	if first && h.tc != nil && h.tc.AllocID != "" {
 		d.emit(h.tc, "stats", fmt.Sprintf("Nomad asks for the resource usage of box %s every %s", h.boxID, interval))
+	}
+	if h.cfg.Bake != nil || h.cfg.Publish != nil {
+		// A bake and a publish run no VM, so there is no resource usage to report;
+		// the stream stays open until the task ends.
+		ch := make(chan *drivers.TaskResourceUsage)
+		go func() {
+			defer close(ch)
+			<-h.done
+		}()
+		return ch, nil
 	}
 	ch := make(chan *drivers.TaskResourceUsage, 1)
 	statsCtx, cancel := context.WithCancel(ctx)

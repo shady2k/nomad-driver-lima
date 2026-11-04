@@ -26,6 +26,7 @@
 #   bin/boxd             the binary given with --boxd
 #   bin/boxctl           symlink -> boxd
 #   bin/<tool>           symlink into ../tools/<tool>/...
+#   lib/no-secrets.sh    the check a seal runs in the guest (guest/no-secrets.sh)
 #   tools/prime-agent/   the release tarball's contents, package.json beside the binary
 #   tools/opencode/      the npm package's contents (an npm tree)
 #   addons/              --addons DIR, packed by images/addons-pack.sh (absent
@@ -347,6 +348,15 @@ PY
 else
   log "no addons: --addons is not set, the bundle has no addons/ directory"
 fi
+
+# --- the guest's own check -------------------------------------------------------
+# guest/no-secrets.sh is what a seal runs after it cleaned a box, and what an
+# operator runs on an image before publishing it. The bundle carries it because the
+# check belongs to the boxd that runs it: a seal refuses to finish when the bundle
+# it was started from has no copy, so the two travel together.
+log "guest/no-secrets.sh"
+install -d -m 0755 "$STAGE/lib"
+install -m 0755 "$ROOT/guest/no-secrets.sh" "$STAGE/lib/no-secrets.sh"
 
 # --- manifest -------------------------------------------------------------------
 log "manifest"

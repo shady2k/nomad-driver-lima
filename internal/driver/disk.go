@@ -1,13 +1,12 @@
 package driver
 
 import (
-	"encoding/binary"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"syscall"
 
+	"github.com/shady2k/nomad-driver-lima/internal/box"
 	"github.com/shady2k/nomad-driver-lima/internal/limactl"
 )
 
@@ -64,34 +63,9 @@ func diskUsageOf(path string) (used, virtual int64, ok bool) {
 	return used, virtual, true
 }
 
-// qcow2VirtualSize reads the virtual disk size out of a qcow2 header.
-//
-// Offset 0 is the magic "QFI\xfb", offset 24 is the virtual size as a 64 bit big
-// endian number (qcow2 format version 2 and 3). Reading 32 bytes is as cheap as
-// the stat this already does, and `qemu-img info` would not be: the fingerprint
-// runs every 30 seconds for every box on the node.
-func qcow2VirtualSize(path string) (int64, bool) {
-	file, err := os.Open(path)
-	if err != nil {
-		return 0, false
-	}
-	defer file.Close()
-	var header [32]byte
-	if _, err := io.ReadFull(file, header[:]); err != nil {
-		return 0, false
-	}
-	if string(header[0:4]) != "QFI\xfb" {
-		return 0, false
-	}
-	if version := binary.BigEndian.Uint32(header[4:8]); version < 2 {
-		return 0, false
-	}
-	size := binary.BigEndian.Uint64(header[24:32])
-	if size == 0 || size > 1<<50 {
-		return 0, false
-	}
-	return int64(size), true
-}
+// qcow2VirtualSize reads the virtual disk size out of a qcow2 header. The
+// reading itself is box.Qcow2VirtualSize, which a bake uses as well.
+func qcow2VirtualSize(path string) (int64, bool) { return box.Qcow2VirtualSize(path) }
 
 // boxDiskUsages returns the usage of every box disk lima knows about, sorted by
 // box id.

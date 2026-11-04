@@ -7,6 +7,7 @@ them against a real Nomad agent.
 | --- | --- |
 | `box-operator.policy.hcl` | the `box` CLI on the coordinator: jobs, host volumes, `alloc exec`, and the executors variable |
 | `box-workload.policy.hcl` | one box job's own workloads: read `nomad/jobs/box-executors` |
+| `box-store.policy.hcl` | one publish job (`box-publish-<version>`): read `nomad/jobs/box-store` |
 | `apply.sh` | applies both, creates the operator token, and probes a cluster |
 | `test.sh` | starts a throwaway agent with ACLs and checks both policies |
 
@@ -50,6 +51,7 @@ What it grants, and the command that needs it:
 | `host_volume "box-*"` `mount-readwrite` | `box create`, `start`, `resize`: a job that mounts its disk `box-<id>` is refused without it, whatever the namespace grants |
 | `node` `read` | `box capacity` |
 | `variables` `read`/`write`/`destroy` on `nomad/jobs/box-executors` | `box executors set`, `show`, `delete` |
+| `variables` `read`/`write`/`destroy` on `nomad/jobs/box-store` | `box store set`, `box store show` (the operator's image store) |
 
 Nothing else: no agent, operator or ACL access, no node write, no other
 namespace, no other variable path. A token with `box-operator` alone can run

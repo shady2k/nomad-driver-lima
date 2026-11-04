@@ -23,6 +23,15 @@ const (
 	boxDriverName = "box"
 	// boxVolumePrefix starts the dynamic host volume name: box-<id>.
 	boxVolumePrefix = "box-"
+	// boxBakeJobPrefix and boxPublishJobPrefix start the two batch jobs the CLI
+	// registers for an image: box-bake-<box-id> and box-publish-<version>. They
+	// are not boxes, and their names are not box ids.
+	boxBakeJobPrefix    = "box-bake-"
+	boxPublishJobPrefix = "box-publish-"
+	// boxWorkMarker is the meta key that marks a job as a step of an image's
+	// life (a bake or a publish) instead of a box: `box ls` and the capacity
+	// count skip it.
+	boxWorkMarker = "box_work"
 	// boxVolumePluginID is the dynamic host volume plugin that creates the disk.
 	boxVolumePluginID = "box-volume"
 	// boxDiskVolume is the group volume and volume_mount name of the disk.
@@ -102,6 +111,11 @@ type BoxSpec struct {
 	// VaultRole is the Vault role the task reads its secrets with. Empty means
 	// the cluster's default role and the job carries no role at all.
 	VaultRole string
+	// Recipe is the script that makes this image's environment from its parent
+	// image, base64. A box created from a project image carries it, so a box of
+	// that image that is baked again, or rebuilt on a newer parent, has the
+	// recipe it came from. Empty means the image has none.
+	Recipe string
 }
 
 // BoxJobName returns the Nomad job name of a box.
@@ -110,8 +124,22 @@ func BoxJobName(id string) string { return boxJobPrefix + id }
 // BoxVolumeName returns the dynamic host volume name of a box.
 func BoxVolumeName(id string) string { return boxVolumePrefix + id }
 
+// BoxBakeJobName returns the Nomad job name of a box's bake.
+func BoxBakeJobName(id string) string { return boxBakeJobPrefix + id }
+
+// BoxPublishJobName returns the Nomad job name of a version's publish.
+func BoxPublishJobName(version string) string { return boxPublishJobPrefix + version }
+
 // BoxIDFromJobName strips the job prefix from a job name.
+//
+// The batch jobs that make an image are not boxes: box-bake-<id> and
+// box-publish-<version> take a box id and a version as their suffix, and a
+// reader that took them for boxes would list an image as a box and count it
+// against the node.
 func BoxIDFromJobName(name string) (string, bool) {
+	if strings.HasPrefix(name, boxBakeJobPrefix) || strings.HasPrefix(name, boxPublishJobPrefix) {
+		return "", false
+	}
 	if !strings.HasPrefix(name, boxJobPrefix) {
 		return "", false
 	}
@@ -233,6 +261,12 @@ func RenderJob(spec BoxSpec) (*api.Job, error) {
 		"disk_gib":           spec.DiskGiB,
 		"guest_log_command":  spec.guestLogCommand(),
 		"files_dir_in_guest": spec.filesDir(),
+	}
+	// The recipe travels in the job's task config: it is what an image's record
+	// carries, and a box baked from this one passes it on (see `box bake
+	// --rebuild`).
+	if spec.Recipe != "" {
+		config["recipe"] = spec.Recipe
 	}
 	// A box made of an image that carries its own boxd has no platform block at
 	// all, so its job is exactly the job it was before bundles existed.
@@ -459,6 +493,9 @@ func SpecFromJob(job *api.Job) (BoxSpec, error) {
 	}
 	if v, ok := cfg["files_dir_in_guest"].(string); ok {
 		spec.FilesDirInGuest = v
+	}
+	if v, ok := cfg["recipe"].(string); ok {
+		spec.Recipe = v
 	}
 	// The role is read back so a start or a resize keeps the role the box was
 	// created with: re-rendering the job with another role would hand the box a

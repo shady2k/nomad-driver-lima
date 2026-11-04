@@ -36,6 +36,31 @@ type ImageArtifact struct {
 	// expects a platform bundle at /opt/box; any other value (or none) means it
 	// runs the boxd it carries.
 	Platform string `json:"platform,omitempty"`
+	// Kind is "project" for an image baked from a box; a base image has no kind,
+	// which is what `box images` and `latest` go by.
+	Kind string `json:"kind,omitempty"`
+	// Name is the project a project image belongs to.
+	Name string `json:"name,omitempty"`
+	// Parent is the image a project image was grown from.
+	Parent string `json:"parent,omitempty"`
+	// Recipe is the script that makes the image from its parent, base64.
+	Recipe string `json:"recipe,omitempty"`
+	// VirtualBytes is the size of the disk inside the image: the smallest disk a
+	// box made from it can have.
+	VirtualBytes int64 `json:"virtual_bytes,omitempty"`
+	// NodeID and NodeName are set for a draft, which exists on one node only.
+	NodeID   string `json:"node_id,omitempty"`
+	NodeName string `json:"node_name,omitempty"`
+}
+
+// IsProject reports whether the image was baked from a box.
+func (a *ImageArtifact) IsProject() bool {
+	return a != nil && (a.Kind == "project" || IsProjectImage(a.Version))
+}
+
+// IsDraft reports whether the image exists on one node only.
+func (a *ImageArtifact) IsDraft() bool {
+	return a != nil && strings.HasPrefix(a.URL, DraftURLPrefix)
 }
 
 // PlatformArtifact is one published platform bundle: one version for one
@@ -371,6 +396,12 @@ func (i *ImageIndex) Resolve(version, arch string) (*ImageArtifact, error) {
 	arch = NormalizeArch(arch)
 	if version == "latest" || version == "" {
 		for _, v := range i.Versions() {
+			// A project image is not a base image: the newest version is the
+			// newest base image, and a box created from a project image names the
+			// version it wants.
+			if IsProjectImage(v) {
+				continue
+			}
 			if a := i.Images[v][arch]; a != nil {
 				return a, nil
 			}

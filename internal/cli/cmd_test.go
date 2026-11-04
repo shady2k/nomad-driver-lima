@@ -116,8 +116,10 @@ func TestNoImageIndexConfigured(t *testing.T) {
 	ta.indexURL = ""
 	require.Equal(t, "", ta.ImageIndexURL())
 
+	// `box images` with no index still lists what the nodes baked: a draft is an
+	// image, and a cluster that bakes before it publishes has only those.
 	rc := ta.run(t, "images")
-	require.Equal(t, ExitError, rc)
+	require.Equal(t, ExitOK, rc)
 	require.Contains(t, ta.errOut.String(), "the image index is not configured")
 	require.Contains(t, ta.errOut.String(), "BOX_IMAGE_INDEX")
 

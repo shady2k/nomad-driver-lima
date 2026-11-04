@@ -55,3 +55,7 @@ func processUsage(pid int) (procUsage, error) {
 		rssBytes: uint64(rssPages) * uint64(os.Getpagesize()),
 	}, nil
 }
+
+// hypervisorPID is for a VM that runs outside Lima's pid files. On Linux qemu is
+// in them.
+func hypervisorPID(paths []string) int { return 0 }

@@ -210,8 +210,13 @@ UNPACKED=$WORK/unpacked
 mkdir -p "$UNPACKED"
 tar -xzf "$ARCHIVE" -C "$UNPACKED"
 TREE=$(cd "$UNPACKED" && find . ! -type d | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
-check "the archive's root is what the guest sees at /opt/box" "./bin/boxctl ./bin/boxd ./bin/opencode ./bin/prime-agent ./manifest.json ./tools/opencode/bin/opencode ./tools/opencode/package.json ./tools/prime-agent/package.json ./tools/prime-agent/prime-agent ./tools/prime-agent/runtime/README" "$TREE"
+check "the archive's root is what the guest sees at /opt/box" "./bin/boxctl ./bin/boxd ./bin/opencode ./bin/prime-agent ./lib/no-secrets.sh ./manifest.json ./tools/opencode/bin/opencode ./tools/opencode/package.json ./tools/prime-agent/package.json ./tools/prime-agent/prime-agent ./tools/prime-agent/runtime/README" "$TREE"
 check "bin/boxctl is a link to boxd" "boxd" "$(readlink "$UNPACKED/bin/boxctl")"
+# The seal runs the bundle's copy of guest/no-secrets.sh: a bundle without it is a
+# bundle whose boxes cannot be baked.
+check "the bundle carries the guest's no-secrets check" "$(sha256_of "$ROOT/guest/no-secrets.sh")" \
+  "$(sha256_of "$UNPACKED/lib/no-secrets.sh")"
+check "the check is executable" "-rwxr-xr-x" "$(stat -c '%A' "$UNPACKED/lib/no-secrets.sh")"
 check "bin/prime-agent links into the tool's directory" "../tools/prime-agent/prime-agent" "$(readlink "$UNPACKED/bin/prime-agent")"
 check "bin/opencode links into the tool's directory" "../tools/opencode/bin/opencode" "$(readlink "$UNPACKED/bin/opencode")"
 check "boxd is the binary that was given" "$(sha256_of "$WORK/fixtures/boxd-amd64")" "$(sha256_of "$UNPACKED/bin/boxd")"

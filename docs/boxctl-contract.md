@@ -16,8 +16,9 @@ nomad alloc exec -task box <alloc> /usr/local/bin/boxctl <args...>
 (the driver does the same through `limactl shell` when it needs the guest
 itself). Large payloads (prompt text, files) go over **stdin**.
 
-`boxctl` prints exactly one JSON document to **stdout** and exits 0. On failure
-it prints
+`boxctl` prints exactly one JSON document to **stdout** and exits 0. One command
+is the exception: `boxctl seal` streams one document per line, its steps first
+(below). On failure it prints
 
 ```json
 {"error":{"code":"<snake_case>","message":"<plain words>"}}
@@ -44,6 +45,8 @@ which is how the tests run it. If boxd is down, every command answers
 | `/var/lib/boxd/sessions/<id>/events.jsonl` | one session's event feed |
 | `/var/lib/boxd/homes/<executor>/` | the executor's `HOME`, on the box disk: caches, downloaded runtimes, virtual environments, logs. Programs run from there (the guest's `/run` is a small tmpfs mounted `noexec`) and it survives a reboot. No credential goes there |
 | `/etc/box/local/` | files the driver copied from the task's `local/` directory (not secrets) |
+| `/etc/box/image.json` | the record of the image this box is, written by `boxctl seal` (or by `images/build.sh` for a built image): `schema`, `version`, `name`, `arch`, `parent`, `platform`, `recipe`, `sealed_at` |
+| `/etc/box/recipe.sh` | the recipe a seal wrote: the script `box bake --rebuild` replays on a newer base image |
 | `/run/box/secrets/` | the task's `secrets/` directory, on the guest's tmpfs, root-only, mode 0700: one directory per executor, `/run/box/secrets/<executor>/` |
 | `/run/boxd/` | everything boxd derives for this boot, also a tmpfs: the executors' mutable copy of their secrets (`executors/<executor>/`) and their `XDG_CONFIG_HOME` (`executors/<executor>-config/`) |
 
@@ -115,6 +118,53 @@ timeout with the state as it is. `boxctl info` carries the same document as
 | `boxctl cancel <id>` | – | `Turn`, with `"state":"cancelled"` once the executor acknowledged it |
 | `boxctl session close <id>` | – | `{"session","state":"closed"}` — stops the executor process and keeps the history |
 | `boxctl reload` | – | re-reads the executor credentials without touching the sessions: it answers `{"configured":[...],"restarted":[...],"deferred":[...]}` — idle sessions restart their executor now, a session in a turn defers to the end of that turn |
+| `boxctl seal --name NAME [--version V] [--parent V] [--arch amd64\|arm64] [--recipe FILE\|-]` | – (the recipe, with `--recipe -`) | one `{"line":"..."}` per step, then `{"seal":SealResult}` or `{"error":ErrorBody}` — see below |
+
+### `boxctl seal --name NAME [--version V] [--parent V] [--arch amd64|arm64] [--recipe FILE|-]`
+
+Empties the box and makes it an image (`docs/guest-image.md`, "Project images").
+It closes every session, stops the executors, deletes the work, the sessions and
+the credentials, runs the two proofs and releases the free blocks. `box bake` is
+what runs it, inside the box.
+
+`--name` is required. `--arch` is `amd64` or `arm64`. The architecture, the
+version and the parent are recorded in `/etc/box/image.json` and used for nothing
+else here: a version number belongs to the host, which counts it from the images
+and the drafts it can see. `--recipe FILE` is the recipe script, or `-` for
+stdin, at most 64 KiB; it goes into the record in base64 and to
+`/etc/box/recipe.sh`.
+
+The answer is a stream, one JSON object per line on stdout:
+
+```json
+{"line": "closing the box's sessions and stopping its executors"}
+{"line": "closed 2 session(s); no executor runs in the box now"}
+{"line": "the workspace: deleted /work (1.2 GiB)"}
+...
+{"seal": {"image": {...}, "steps": ["..."], "files": 41867, "values": 6}}
+```
+
+or, when it stops,
+
+```json
+{"error": {"code": "internal",
+           "message": "the image would carry 1 credential value(s): /var/log/x.log (holds the credential from /run/box/secrets/prime/auth.json). The values themselves are not printed. Some of the box is already gone and cannot be brought back; the box still runs, so delete what is named there and bake it again (a credential that is in the image should be rotated as well)"}}
+```
+
+`seal.image` is the record it wrote to `/etc/box/image.json`: `schema`,
+`version`, `name`, `arch`, `parent`, `platform` (`"mount"`), `recipe` (base64)
+and `sealed_at`. `steps` are the lines it printed, in order, and `files` and
+`values` say how much the credential search read and what it looked for.
+
+A refusal is a document and exit 1, like every boxctl failure, because the steps
+before it are the useful part and they are what a person reads. The codes:
+
+| code | when |
+| --- | --- |
+| `busy` | a turn runs (`box cancel <box> <session>` stops it) or a preparation is in progress (`box prepare <box> --cancel` stops it) |
+| `invalid_argument` | the name, the version, the architecture or the recipe is not one a seal accepts |
+| `internal` | a step failed, a proof failed, or the bundle carries no `lib/no-secrets.sh` |
+| `boxd_unavailable` | nothing listens on the socket |
 
 ## Objects
 
@@ -146,6 +196,14 @@ with `kind` one of `turn_start`, `message`, `tool`, `tool_result`, `turn_end`,
 `error`, `executor_exit`, `executor_restart`, and `summary` one line in plain
 words. Sequence numbers are per session and monotonic, which is what makes
 `--since` a resumable cursor.
+
+`SealResult`: `{"image":ImageRecord,"steps":["..."],"files":N,"values":N}` -- what
+a seal wrote and what it did to get there. `ImageRecord` is
+`{"schema","version","name","arch","parent","platform","recipe","sealed_at"}`,
+the document at `/etc/box/image.json`; `recipe` is base64 and empty for an image
+without one. `steps` are the lines the seal printed, in order; `files` is how many
+files its credential search read, `values` how many credential values it looked
+for.
 
 Session ids are short and stable, generated by boxd (`s-7f3a2c`).
 

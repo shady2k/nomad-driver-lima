@@ -348,6 +348,44 @@ from what the box looked like from outside.
   keys, no passwords, no machine-id, no shell history, no journal: cloud-init
   generates them on the first boot of every box. `guest/no-secrets.sh` is the
   check an operator runs on an image before capturing it and inside a booted box.
+- **Baking a box into an image is a task of the driver, not a command of the
+  CLI.** An image is made from a disk, the disk is a qcow2 on one node's volume,
+  and the driver is the host-side code that owns that disk: it knows the volume
+  path, it runs as the runtime user, and it already writes the node's image cache.
+  The CLI on a coordinator can reach neither the disk nor the cache; all it can do
+  is register work and read what came of it. So the bake is a batch job of the box
+  driver that runs no VM -- a task, which is what Nomad schedules, reports and
+  stops, with a log when it fails -- and the CLI's part is the seal inside the
+  guest, the stop, the registration and the wait. A bake that is stopped removes
+  its temporary file before the task ends, so no half image stays in a cache; a
+  bake that ran leaves a record and a file, not an allocation to keep.
+- **A baked image is a draft first, and published second.** The two steps are the
+  two things an image's life needs: it is made on one node, and it is distributed
+  from one store. A draft is the file where the disk was, plus a record beside it,
+  and the driver publishes that record as node attributes so every coordinator can
+  see it without reading a node's disk: `box images` lists the drafts of the
+  whole cluster, and `box create` from one pins the box to the node that holds it.
+  Publishing is a second, deliberate act, because it is not the same kind of
+  change: it writes the operator's store and every node can create from it from
+  then on. So a draft costs no decision, and a publish costs the owner's -- the
+  command refuses without `--yes`, the store's url and token are the operator's
+  variable, and the publish job reads that variable with a policy of its own
+  rather than through a box's. A version is immutable in both steps: a published
+  version never changes, and a bake never reuses a number, because the number it
+  takes is one above every published version and every draft of that name.
+- **The seal searches the disk for the credential values themselves.** Deleting
+  the files a credential is written into is not the same as deleting the
+  credential, because a file named like a credential is not the only way a
+  credential reaches a disk: a tool writes its key into a log, a shell history
+  keeps the command that held it, a build artifact carries it, a database row has
+  it in a column nobody named. So after the deletions the seal reads the values
+  out of the secrets directory -- every JSON string and every whole line long
+  enough to be a value -- and looks for them on the guest's own filesystem,
+  skipping the tmpfs the credentials live on and the bundle. A hit names the path
+  and never the value: the message is what a person acts on, and repeating a
+  credential into a task log would be the leak the check exists to prevent. What
+  the check proves is narrow and the right thing to prove: no value that is in
+  this box's secrets directory is anywhere on the disk that becomes the image.
 
 ## The platform bundle
 

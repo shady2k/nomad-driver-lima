@@ -132,18 +132,43 @@ func (a *App) cmdRemove(ctx context.Context, args []string) error {
 	}
 	out := lifecycleOutput{Action: "rm", Box: box, Volume: BoxVolumeName(id), Deleted: true}
 
+	deleted, err := a.deleteBoxVolumes(ctx, box, *timeout)
+	if err != nil {
+		return err
+	}
+	if len(deleted) == 0 {
+		out.Warn = "the job was deleted; there was no volume left to delete"
+	}
+	box.State = "deleted"
+	out.Box = box
+	if len(deleted) > 0 {
+		out.Changes = append(out.Changes, "deleted volume "+strings.Join(deleted, ", "))
+	}
+	return a.printLifecycle(&out)
+}
+
+// deleteBox deletes a box and its disk: the job, its allocations and the volume.
+func (a *App) deleteBox(ctx context.Context, box BoxRecord, timeout time.Duration) error {
+	_, err := a.deleteBoxVolumes(ctx, box, timeout)
+	return err
+}
+
+// deleteBoxVolumes deletes the job and the disk of a box, and returns the volumes
+// it deleted.
+func (a *App) deleteBoxVolumes(ctx context.Context, box BoxRecord, timeout time.Duration) ([]string, error) {
+	id := box.ID
 	if err := a.Nomad.StopJob(ctx, BoxJobName(id), true); err != nil && !isNotFoundErr(err) {
-		return wrapf(err, "Nomad could not delete the job %s", BoxJobName(id))
+		return nil, wrapf(err, "Nomad could not delete the job %s", BoxJobName(id))
 	}
 	if box.AllocationID != "" {
-		if err := a.waitForNoLiveAllocs(ctx, BoxJobName(id), *timeout); err != nil {
-			return err
+		if err := a.waitForNoLiveAllocs(ctx, BoxJobName(id), timeout); err != nil {
+			return nil, err
 		}
 	}
 
 	volumes, err := a.Nomad.HostVolumes(ctx)
 	if err != nil {
-		return wrapf(err, "cannot list the volumes")
+		return nil, wrapf(err, "cannot list the volumes")
 	}
 	var deleted []string
 	for _, stub := range volumes {
@@ -154,27 +179,21 @@ func (a *App) cmdRemove(ctx context.Context, args []string) error {
 			// The volume may still carry a terminal allocation; force lets the
 			// plugin delete the disk anyway.
 			if err2 := a.Nomad.DeleteHostVolume(ctx, stub.ID, true); err2 != nil {
-				return wrapf(err2, "Nomad could not delete the volume %s, so the disk is still on node %s",
+				return nil, wrapf(err2, "Nomad could not delete the volume %s, so the disk is still on node %s",
 					stub.Name, stub.NodeID)
 			}
 		}
 		deleted = append(deleted, stub.Name)
 	}
-	if len(deleted) == 0 {
-		out.Warn = "the job was deleted; there was no volume left to delete"
-	}
-	box.State = "deleted"
-	out.Box = box
 	if len(deleted) > 0 {
-		out.Changes = append(out.Changes, "deleted volume "+strings.Join(deleted, ", "))
 		// Nomad answers the volume delete before every server has dropped the
 		// registration, and `box create` refuses a name that is still
 		// registered. Wait for it, so rm -> create with the same id works.
-		if err := a.waitForNoVolume(ctx, BoxVolumeName(id), *timeout); err != nil {
-			return err
+		if err := a.waitForNoVolume(ctx, BoxVolumeName(id), timeout); err != nil {
+			return deleted, err
 		}
 	}
-	return a.printLifecycle(&out)
+	return deleted, nil
 }
 
 // cmdResize changes the size of a box.

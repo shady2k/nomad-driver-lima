@@ -39,6 +39,13 @@ type DaemonConfig struct {
 	// PlatformDir is the platform bundle mounted read-only here (default
 	// /opt/box): a directory with a manifest.json and the executors in its bin/.
 	PlatformDir string
+	// Seal is where the seal cleans and where it proves the result. Nil means
+	// the guest's own layout (/work, every home, the one filesystem).
+	Seal *SealPaths
+	// Fstrim and Journalctl are the guest's own tools (default "fstrim" and
+	// "journalctl"); a test names its own, or a guest images without fstrim.
+	Fstrim     string
+	Journalctl string
 	// ProgressEvery is how long a running turn may be silent in the journal
 	// before it writes a progress line (default two minutes).
 	ProgressEvery time.Duration
@@ -91,6 +98,22 @@ func (c DaemonConfig) addonsDir() string {
 	return filepath.Join(c.platformDir(), "addons")
 }
 
+// fstrimBin is the binary the seal trims the free space with.
+func (c DaemonConfig) fstrimBin() string {
+	if c.Fstrim != "" {
+		return c.Fstrim
+	}
+	return "fstrim"
+}
+
+// journalctlBin is the binary the seal rotates and vacuums the journal with.
+func (c DaemonConfig) journalctlBin() string {
+	if c.Journalctl != "" {
+		return c.Journalctl
+	}
+	return "journalctl"
+}
+
 // Defaults fills in every unset field.
 func (c DaemonConfig) withDefaults() DaemonConfig {
 	if c.Socket == "" {
@@ -137,6 +160,12 @@ type Manager struct {
 
 	// prep is the box's preparation (prepare.go); sessions wait for it.
 	prep *preparer
+
+	// sealed is set by a seal: the box is an image now, so the daemon keeps no
+	// session and starts none. Without it, the shutdown that follows the seal
+	// would write the session list back into the state directory the seal just
+	// deleted.
+	sealed bool
 }
 
 // Prepare is the box's preparation.
@@ -218,6 +247,11 @@ func (m *Manager) load() error {
 // persist writes every session's metadata. Callers hold no lock: the snapshot is
 // taken under the manager lock and each session's own lock.
 func (m *Manager) persist(_ *session) {
+	if m.sealed {
+		// A sealed boxd has no session to keep: writing state.json back would put
+		// the sessions the seal deleted into the image.
+		return
+	}
 	m.mu.Lock()
 	st := &persistedState{}
 	for _, id := range m.order {
@@ -474,6 +508,10 @@ func (m *Manager) NewSession(executor, model, cwd, title string) (Session, error
 	// session is the first moment boxd can see them.
 	if err := prepareExecutorDirs(m.cfg); err != nil {
 		m.cfg.logf("executor secrets: %v", err)
+	}
+	if m.sealed {
+		return Session{}, Errorf(CodeClosed, "this box was sealed into an image: it starts no session any more. "+
+			"Start a new box from the image, or from the box's own image before it was baked")
 	}
 	if _, err := buildExecutor(executor, m.cfg); err != nil {
 		return Session{}, err

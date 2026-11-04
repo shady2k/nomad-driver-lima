@@ -31,8 +31,9 @@
 #                      submit-job, and refuses the job without it
 #   node read          box capacity: node list, node info and a node's
 #                      allocations (the last one also needs read-job)
-#   variables write    box executors set/show/delete, on the one path
-#                      nomad/jobs/box-executors (read/write/destroy)
+#   variables write    box executors set/show/delete, on nomad/jobs/box-executors;
+#                      box store set/show on nomad/jobs/box-store (both paths
+#                      read/write/destroy, and no other)
 #
 # Nothing else is granted: no agent, operator or ACL access, no other namespace,
 # no other variable path, no node write. The box workloads have their own
@@ -51,6 +52,12 @@ namespace "default" {
 
   variables {
     path "nomad/jobs/box-executors" {
+      capabilities = ["read", "write", "destroy"]
+    }
+    # The operator's image store: `box store set` writes it, `box store show`
+    # reads it. A publish job reads it with a workload policy of its own
+    # (box-store.policy.hcl), never through this one.
+    path "nomad/jobs/box-store" {
       capabilities = ["read", "write", "destroy"]
     }
   }

@@ -2,6 +2,7 @@ package boxd
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -29,6 +30,9 @@ const BoxctlUsage = `usage:
   boxctl prepare start --dest DIR [--repo URL [--ref REF] | --files] [--limit SEC]
                              (--files: a tar stream on stdin; neither: the recipe again)
   boxctl prepare get | wait [--timeout SEC] | cancel | skip
+  boxctl seal --name NAME [--version V] [--parent V] [--arch amd64|arm64] [--recipe FILE]
+                             (seals the box into an image; --recipe - reads it from stdin,
+                              and a seal prints one {"line":...} per step, then {"seal":...})
 
 global: --socket PATH (default $BOXD_SOCKET or ` + DefaultSocket + `)
 Every command prints one JSON document on stdout and exits 0, or prints
@@ -81,6 +85,8 @@ func RunBoxctl(args []string, in io.Reader, out, errw io.Writer) int {
 		return cmdReload(ctx, c, rest[1:], out, errw)
 	case "prepare":
 		return cmdPrepare(ctx, c, rest[1:], in, out, errw)
+	case "seal":
+		return cmdSeal(ctx, c, rest[1:], in, out, errw)
 	}
 	return printError(out, errw, Errorf(CodeInvalid, "unknown command %q", rest[0]))
 }
@@ -399,4 +405,55 @@ func cmdPrepare(ctx context.Context, c *Client, args []string, in io.Reader, out
 		return printJSON(out, st)
 	}
 	return printError(out, errw, Errorf(CodeInvalid, "unknown prepare subcommand %q", sub))
+}
+
+// cmdSeal seals the box into an image.
+//
+// The recipe is the script that makes this environment from the parent image, so
+// it takes the bytes of a script and not a JSON string: --recipe FILE reads a file
+// in the guest, --recipe - reads stdin (which is how the CLI on the host hands it
+// over without a second round trip).
+func cmdSeal(ctx context.Context, c *Client, args []string, in io.Reader, out, errw io.Writer) int {
+	fs := flag.NewFlagSet("seal", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	name := fs.String("name", "", "the image's name")
+	version := fs.String("version", "", "the image's version (recorded in /etc/box/image.json)")
+	parent := fs.String("parent", "", "the image the box came from")
+	arch := fs.String("arch", "", "the image's architecture: amd64 or arm64")
+	recipe := fs.String("recipe", "", "the recipe that makes this environment: a file, or - for stdin")
+	if err := fs.Parse(args); err != nil {
+		return printError(out, errw, Errorf(CodeInvalid, "seal: %v", err))
+	}
+	if fs.NArg() > 0 {
+		return printError(out, errw, Errorf(CodeInvalid, "unexpected argument %q", fs.Arg(0)))
+	}
+	if *name == "" {
+		return printError(out, errw, Errorf(CodeInvalid, "seal needs --name: the image is named after the box's project"))
+	}
+	req := SealRequest{Name: *name, Version: *version, Parent: *parent, Arch: *arch}
+	if *recipe != "" {
+		var data []byte
+		var err error
+		if *recipe == "-" {
+			data, err = io.ReadAll(io.LimitReader(in, RecipeLimit+1))
+		} else {
+			data, err = os.ReadFile(*recipe)
+		}
+		if err != nil {
+			return printError(out, errw, Errorf(CodeInvalid, "cannot read the recipe: %v", err))
+		}
+		if len(data) > RecipeLimit {
+			return printError(out, errw, Errorf(CodeInvalid, "the recipe is longer than the %d bytes an image carries", RecipeLimit))
+		}
+		if len(data) > 0 {
+			req.Recipe = base64.StdEncoding.EncodeToString(data)
+		}
+	}
+	res, err := c.Seal(ctx, req, func(line string) {
+		printJSON(out, map[string]string{"line": line})
+	})
+	if err != nil {
+		return printError(out, errw, err)
+	}
+	return printJSON(out, map[string]any{"seal": res})
 }

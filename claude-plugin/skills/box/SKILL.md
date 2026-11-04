@@ -45,13 +45,40 @@ box rm dev1 --yes                         # the disk is deleted
 Exit codes: `0` ok, `1` error, `2` usage, `3` not found, `4` timeout (still
 running). A non-zero exit is always a sentence you can act on.
 
+## Keeping an environment: project images
+
+When the same install work is about to happen in a second box, make the first
+box's environment an image instead of repeating it.
+
+1. `box images` -- take the closest image there is: a project image of this
+   project whose `BEHIND` column says its parent is the newest base image. A
+   published one is created from anywhere; a draft (`draft on node X`) only on
+   that node.
+2. Install what the project needs in the box, and only that: toolchains, package
+   sets, the caches a build fills. No code, no task data, no credential -- a seal
+   deletes them, and code belongs to a box.
+3. Write the recipe: the script that makes this environment from the parent
+   image, and that can run on a fresh box of it. It is what a later `box bake
+   --rebuild` replays on a newer base image.
+4. Propose the bake to the owner before you run it: the seal deletes `/work` and
+   every session in the box, and what it deletes does not come back.
+5. `box bake <id> --name <project> --recipe recipe.sh --yes`, then create with
+   `box create <id> --image <project>-N`. The box you baked stays stopped and
+   empty, so push the work out before step 5 and then `box rm <id> --yes`.
+6. Propose publishing, and let the owner decide: `box images publish <version>
+   --yes` puts the image in the operator's store, which is what makes it
+   available on every node. A published version never changes.
+
 ## Choosing where and what
 
 - **The architecture is yours to say.** Without `--arch` the box goes to any
   node that has room, Linux or Mac. A task that needs a platform says so:
   `--arch amd64` or `--arch arm64`. `box capacity` lists both, never add their
   free resources together.
-- **Take the newest image** from `box images`; an older one lacks fixes.
+- **Take the newest image** from `box images`; an older one lacks fixes. Then
+  look for a project image of your project: a `project` row whose parent is the
+  newest base image already holds the toolchain and the caches, and a box from it
+  starts ahead of one that installs them again.
 - **A box's `boxd` and executors come from a platform bundle, not from its
   image.** For an image built for bundles the driver mounts the newest bundle
   for the box's architecture read-only at `/opt/box` when the box starts;

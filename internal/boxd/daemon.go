@@ -306,6 +306,41 @@ func (d *Daemon) Handler() http.Handler {
 	// POST /v1/reload re-reads the executor credentials the driver put on the
 	// guest's tmpfs. It is how a running box is rolled to new credentials without
 	// being recreated.
+	// POST /v1/seal seals the box into an image. The answer is a stream of JSON
+	// lines -- one {"line": "..."} per step while it works, then {"seal": {...}}
+	// or {"error": {...}} -- because a seal takes minutes and its progress is
+	// what a person watches in the task log. The status is 200 either way: the
+	// lines are on the wire before the seal can fail.
+	mux.HandleFunc("POST /v1/seal", func(w http.ResponseWriter, r *http.Request) {
+		var req SealRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			fail(w, Errorf(CodeInvalid, "bad request body: %v", err))
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		enc := json.NewEncoder(w)
+		flusher, _ := w.(http.Flusher)
+		write := func(v any) {
+			if err := enc.Encode(v); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		d.cfg.logf("seal requested: image %s (%s)", req.Name, dashOr(req.Version, "no version"))
+		res, err := d.mgr.Seal(req, func(line string) {
+			write(map[string]string{"line": line})
+		})
+		if err != nil {
+			e := asError(err)
+			d.cfg.logf("seal failed: %s", e.Message)
+			write(ErrorResponse{Error: ErrorBody{Code: e.Code, Message: e.Message}})
+			return
+		}
+		write(map[string]any{"seal": res})
+	})
 	mux.HandleFunc("POST /v1/reload", func(w http.ResponseWriter, r *http.Request) {
 		res, err := d.mgr.Reload()
 		if err != nil {

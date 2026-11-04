@@ -74,10 +74,17 @@ manifest.json        {"schema": 1, "version": "<version>", "arch": "<arch>",
 bin/boxd             the boxd binary
 bin/boxctl           symlink -> boxd
 bin/<tool>           symlink into the tool's own directory
+lib/no-secrets.sh    guest/no-secrets.sh, the check a seal runs in the guest
 tools/<name>/...     each executor's full install directory (prime-agent needs
                      its package.json beside the binary; opencode is an npm tree)
 addons/...           the operator's add-ons, absent when there are none
 ```
+
+`lib/no-secrets.sh` is `guest/no-secrets.sh` (`images/platform.sh` copies it in).
+The check belongs to the `boxd` that runs it: a seal runs the copy of the bundle
+its box was started from, and refuses to finish when the bundle has none, so the
+daemon and its proof travel in one archive. A build host without
+`guest/no-secrets.sh` fails the bundle's build.
 
 Every symlink in the archive is relative and stays inside it: the guest mounts
 the tree read-only, and a link that escaped would point at something the operator
@@ -257,6 +264,157 @@ An image that carries its own `boxd` instead (no bundle) provides
 `/usr/local/bin/boxd` and `/usr/local/bin/boxctl` through
 `guest/boxd-install.sh`, and no `platform` field; `boxd` then finds its executors
 on the image's `PATH`.
+
+## Project images
+
+A base image is the machine a project starts from. A **project image** is that
+machine's environment, kept: an agent takes a box from a base image or from
+another project image, installs what its project needs -- a toolchain, a package
+set, the caches a build fills -- and the box is baked. Its disk becomes an
+immutable image with the dependencies and the caches and **without** the code, the
+task data or a credential. A new box is created from it and only brings its code
+in, so every box of that project starts minutes ahead instead of installing the
+same things again.
+
+An image starts as a **draft**. The bake writes it into the image cache of the
+node that holds the box's disk, and no other node has it; the driver publishes
+the draft's record as node attributes (`driver.box.baked.<version>.<field>`), so
+`box images` lists the drafts of every node. A draft is created from on its own
+node. **Publishing** it puts the file into the operator's store and names it in
+that store's `index.json`, and from then on every node creates a box from it. A
+version is immutable once published, as every image version is.
+
+**Only an image with `"platform": "mount"` can be baked.** `boxd` and the
+executors are not in an image: they come from the node's platform bundle at
+`/opt/box`. So a bake of a box whose image carries its own `boxd` is refused, and
+says so: that image is the older shape, and the image a bake makes is made for a
+bundle.
+
+### What a bake is
+
+A bake is one seal, one stop and one task of the driver:
+
+1. `boxctl seal` in the guest empties the box and proves the result (below). It
+   refuses while a turn runs or a preparation is in progress: both are work a seal
+   deletes out from under itself.
+2. The box is stopped. A sealed box is not started again: what it holds is the
+   image's files, not the work.
+3. A batch job `box-bake-<box id>` of the driver runs no VM. It mounts the box's
+   volume read-only -- which also places it on the node that holds the disk --
+   reads the qcow2, runs `qemu-img convert -c -O qcow2` into a temporary file in
+   the node's image cache as the runtime user, hashes the result and renames it to
+   `<image_cache_dir>/<sha256>.img`. That is the name and place `box.EnsureImage`
+   looks in, so a box on that node creates from the image without a download.
+4. Beside it, `<image_cache_dir>/baked/<version>.<arch>.json` records `version`,
+   `arch`, `sha256`, `size`, `virtual_bytes`, `parent`, `name`, `built_at`,
+   `recipe` and `platform`. That record is what `box create --image <version>` on
+   that node reads, and what a publish uploads.
+
+A stopped bake removes its temporary file, so a half image never stays in the
+cache. A node without `qemu-img` fails the task with a sentence: nothing is
+compressed without it. The record carries the image's virtual size, which is the
+smallest disk a box made from it may have.
+
+### What a seal removes
+
+The seal closes every session and stops the executors, and the daemon forgets
+both: a sealed `boxd` starts no session, and the next write of its state
+directory cannot put back what the seal deleted. Then it removes, on the guest
+disk:
+
+- `/work`, and the sources and the state of the last preparation
+  (`<state dir>/prepare.json` records the destination, and a `.partial` left
+  beside it goes too);
+- the session store, every session's directory, the transcripts and
+  `<state dir>/state.json`;
+- from the executor homes (`<state dir>/homes/<executor>`) and from every user
+  home: every file with the same base name as a file in the box's secrets
+  directories (`/run/box/secrets`, and boxd's copies under
+  `/run/boxd/executors`); the directories an executor keeps its own sessions and
+  transcripts in (`.prime`, `.claude`, `.config/opencode`, `.config/prime`,
+  `.local/share/opencode`, `.local/share/prime`, `.cache/opencode`); the shell
+  histories; `~/.ssh` keys and `authorized_keys`; `.git-credentials`; `.netrc`;
+  the token lines of `.npmrc`; and the `credential.helper` settings of a git
+  configuration -- a helper is a way to find the credential the seal just deleted;
+- the contents of `/tmp` and `/var/tmp`, keeping the directories;
+- the journal (`journalctl --rotate`, then `--vacuum-time=1s`) and the contents of
+  `/var/log`;
+- the SSH host keys, `/etc/ssh/ssh_host_*`: an image that carried them would let
+  anyone impersonate every box made from it;
+- cloud-init's state and the machine-id, exactly as the end of
+  `images/provision.sh` does it, so the next boot is the first boot of a new
+  machine;
+- what ties the node's mounts to the instance the box was built in: the lines of
+  `/etc/fstab` that mount them, and a systemd mount unit that names one of them.
+  The node writes the mounts of the new instance on the next boot, with its own
+  9p tag; a baked image that carried the old lines would come up with mounts that
+  cannot work, and `boxd` -- whose unit requires those mounts -- would be refused
+  before it ever ran.
+
+`/run` and the mounts are not on the disk, so they are left where they are.
+
+### What a seal keeps
+
+The homes stay, and so does everything installed in them: toolchains, package
+caches, language environments. That is most of what an image is for, and it is
+what makes a box from a project image fast. The installed packages, the image's
+own configuration and its `boxd.service` stay as they are, because the image still
+has to boot.
+
+`/work` does not stay: it is where the code was, and code belongs to a box, never
+to an image.
+
+### What a seal proves, and what it writes
+
+Two proofs run after the deletions, and either one can stop the seal:
+
+1. **the bundle's `lib/no-secrets.sh`** -- the same `guest/no-secrets.sh` the
+   image build runs, and the one an operator runs in a box. A bundle that carries
+   no copy is a seal that does not finish, and the error names the file it looked
+   for.
+2. **a search of the guest disk for the credential values themselves**: one
+   filesystem, skipping `/proc`, `/sys`, `/run`, `/dev` and `/opt/box`, looking
+   for every JSON string of 16 characters or more and every whole line of 16
+   characters or more of the files in the secrets directories. A hit names the
+   path, never the value.
+
+A file named like a credential is not the only way a credential reaches a disk. A
+log line, a shell history, a build artifact and a database row carry the value
+with no name that says so, and a search for the value is the only check that
+finds them.
+
+Then the seal releases the free blocks: `fstrim -a`, or a file of zeros written
+until the filesystem is full where `fstrim` is not available, and `sync`. A qcow2
+built from a disk whose freed blocks were never released carries the data the seal
+deleted, in clusters the image still holds.
+
+The seal writes two files, and reads the first back before it says it is done:
+
+- **`/etc/box/image.json`**: `schema`, `version`, `name`, `arch`, `parent`,
+  `platform` (`"mount"`), `recipe` (base64) and `sealed_at`. `images/build.sh`
+  writes the same file for a built image, so a booted box answers "which image am
+  I" without the manifest at hand.
+- **`/etc/box/recipe.sh`**: the recipe itself, mode 0755.
+
+A failed seal leaves the box running, names what is left to remove, and says that
+some of the box is already gone and cannot be brought back. Fixing what it names
+and baking again finishes the image; nothing it deleted returns.
+
+### The recipe
+
+The recipe is the script that makes this environment from the parent image: for
+the machine, what `.box/prepare.sh` is for the sources. It comes from `box bake
+--recipe FILE`, and a box created from the image carries it with the record.
+
+It travels in base64 (at most 64 KiB) in the image's record, in the task config of
+a box created from the image, in the baked record and in the index entry, and as a
+script at `/etc/box/recipe.sh` in the guest. It is what `box bake --rebuild NAME`
+replays: a temporary box from a newer base image, the recipe run in it, and the
+result baked as the next version of the same name. So a recipe has to start from
+the parent image and from nothing else.
+
+An image baked with `--no-recipe` carries none. It can be created from, and it is
+never rebuilt: a rebuild of an image without a recipe is refused.
 
 ## Model catalog
 

@@ -619,11 +619,24 @@ func (g *fakeGuest) Exec(ctx context.Context, opts ExecOpts) (int, error) {
 		dir := opts.Command[len(opts.Command)-1]
 		return 0, os.MkdirAll(g.path(dir), 0o755)
 	case g.block && opts.Command[0] == "setsid":
+		g.recordStdin(opts)
 		<-ctx.Done()
 		return -1, ctx.Err()
 	default:
+		// The stdin of a command that is not boxctl or tar is what the command
+		// would have read: a recipe, for one.
+		g.recordStdin(opts)
 		return g.runExit, nil
 	}
+}
+
+// recordStdin keeps what a command was given on stdin, so a test can assert on it.
+func (g *fakeGuest) recordStdin(opts ExecOpts) {
+	if opts.Stdin == nil {
+		return
+	}
+	data, _ := io.ReadAll(opts.Stdin)
+	g.stdin = append(g.stdin, string(data))
 }
 
 func (g *fakeGuest) boxctl(ctx context.Context, opts ExecOpts) (int, error) {
@@ -751,6 +764,10 @@ type testApp struct {
 	errOut  *bytes.Buffer
 	in      *bytes.Buffer
 	clock   *fakeClock
+	// workJob is the last bake or publish job the command registered. It is kept
+	// here because the command purges it when it is done: the fake cluster holds
+	// no record of it any more.
+	workJob *api.Job
 }
 
 // newTestApp returns an App with a node, an image index and a guest.

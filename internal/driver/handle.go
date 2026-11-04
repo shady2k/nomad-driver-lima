@@ -63,6 +63,9 @@ type taskHandle struct {
 	// first sample went out.
 	statsAsked, statsSent bool
 	watchStop             context.CancelFunc
+	// workCancel stops the work of a bake or a publish (nil for a box, whose
+	// work is its VM).
+	workCancel context.CancelFunc
 
 	stats *taskStats
 }
