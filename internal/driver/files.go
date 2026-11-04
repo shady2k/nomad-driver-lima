@@ -71,7 +71,7 @@ func (d *Driver) refreshTaskFiles(h *taskHandle, b *box.Box) {
 	if digest == "" || digest == h.filesDigest() {
 		return
 	}
-	n, err := b.StageTaskFiles(h.tc.TaskDir().LocalDir, h.tc.TaskDir().SecretsDir)
+	n, err := b.StageTaskFiles(h.tc.TaskDir().LocalDir, h.tc.TaskDir().SecretsDir, h.tc.TaskDir().PrivateDir)
 	if err != nil {
 		d.emit(h.tc, "files", fmt.Sprintf("Box %s: the task files changed, but they could not be put where the guest mounts them: %v", h.boxID, err))
 		return

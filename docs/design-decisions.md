@@ -161,7 +161,12 @@ and versions named in "What was measured".
   `/etc/box/local` and `/run/box/secrets` (9p without a cache on qemu, virtiofs
   on vz). The files are there from the guest's first second, after a reboot of
   its own, and a re-render is visible at once (then `boxctl reload`). A stopped
-  box keeps none of them on the host. Rejected: copying them into the guest
+  box keeps none of them on the host, and the driver's start removes those of
+  every box whose VM does not run, which is what a crash of the driver leaves.
+  macOS has no tmpfs: there the files go into the task's private directory,
+  where Nomad keeps its own copy of the secrets on that disk and which it
+  removes with the allocation, and `box-files/<box>` is a link to it, so a crash
+  leaves no copy anywhere Nomad does not clean up. Rejected: copying them into the guest
   after it booted, as a tar stream over `limactl shell` (up to v0.1.13): boxd
   started before they arrived, a guest that rebooted by itself lost them until
   the task restarted, and every fix of that was another mechanism. Also

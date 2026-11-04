@@ -19,13 +19,21 @@ import (
 //	<FilesRoot>/<box>/secrets  -> <SecretsDirInGuest>       (default /run/box/secrets)
 
 // DefaultFilesRoot is where the task files of every box are on the host: /run
-// is a tmpfs on Linux. macOS has none; its temporary directory is the nearest.
+// is a tmpfs on Linux. macOS has none (see stageInTaskDir); its temporary
+// directory holds only a link per box there.
 func DefaultFilesRoot() string {
 	if runtime.GOOS == "linux" {
 		return "/run/box-files"
 	}
 	return filepath.Join(os.TempDir(), "box-files")
 }
+
+// stageInTaskDir: on a host without a tmpfs (macOS) the files go into the
+// task's own private directory, which Nomad keeps on that disk anyway with its
+// own copy of the secrets and removes with the allocation, and the box's
+// directory is a link to it. A copy anywhere else would be one more place a
+// credential stays on the disk after a crash.
+var stageInTaskDir = runtime.GOOS != "linux"
 
 // defaultFilesDirInGuest is the root the local/ files are mounted below.
 const defaultFilesDirInGuest = "/etc/box"
@@ -53,7 +61,7 @@ func (m *Manager) guestMounts(spec Spec) []limaMount {
 // directory, which the guest mounts, and returns how many there are. Files
 // that are gone from the task are removed; each file is replaced whole, so the
 // guest never reads half of one.
-func (b *Box) StageTaskFiles(localDir, secretsDir string) (int, error) {
+func (b *Box) StageTaskFiles(localDir, secretsDir, privateDir string) (int, error) {
 	root := b.m.opts.FilesRoot
 	// The root is the driver's; only the runtime user, which runs qemu, reads
 	// a box's directory.
@@ -64,7 +72,20 @@ func (b *Box) StageTaskFiles(localDir, secretsDir string) (int, error) {
 		return 0, fmt.Errorf("set the mode of %s: %w", root, err)
 	}
 	dir := b.m.FilesDir(b.spec.BoxID)
-	if err := b.m.opts.Identity.EnsureDir(dir, 0o700); err != nil {
+	if stageInTaskDir && privateDir != "" {
+		real := filepath.Join(privateDir, "box-files")
+		if err := b.m.opts.Identity.EnsureDir(real, 0o700); err != nil {
+			return 0, err
+		}
+		if target, err := os.Readlink(dir); err != nil || target != real {
+			_ = os.RemoveAll(dir)
+			if err := os.Symlink(real, dir); err != nil {
+				return 0, fmt.Errorf("link %s to the task's directory: %w", dir, err)
+			}
+			_ = b.m.opts.Identity.Chown(dir)
+		}
+		dir = real
+	} else if err := b.m.opts.Identity.EnsureDir(dir, 0o700); err != nil {
 		return 0, err
 	}
 	count := 0
@@ -135,6 +156,32 @@ func (b *Box) syncFiles(dst string, files []taskFile) (int, error) {
 
 // RemoveTaskFiles removes the box's host directory: a stopped box keeps no
 // credential on the host.
-func (b *Box) RemoveTaskFiles() error {
-	return os.RemoveAll(b.m.FilesDir(b.spec.BoxID))
+func (b *Box) RemoveTaskFiles() error { return b.m.removeFilesDir(b.spec.BoxID) }
+
+// removeFilesDir removes a box's files, and what its link points at.
+func (m *Manager) removeFilesDir(boxID string) error {
+	dir := m.FilesDir(boxID)
+	if target, err := os.Readlink(dir); err == nil {
+		_ = os.RemoveAll(target)
+	}
+	return os.RemoveAll(dir)
+}
+
+// PruneTaskFiles removes the files of every box that has no running VM: after
+// a crash of the driver nothing else would, and they hold credentials.
+func (m *Manager) PruneTaskFiles(running map[string]bool) []string {
+	ents, err := os.ReadDir(m.opts.FilesRoot)
+	if err != nil {
+		return nil
+	}
+	var removed []string
+	for _, e := range ents {
+		if running[e.Name()] {
+			continue
+		}
+		if m.removeFilesDir(e.Name()) == nil {
+			removed = append(removed, e.Name())
+		}
+	}
+	return removed
 }

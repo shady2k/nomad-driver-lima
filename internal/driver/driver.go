@@ -168,6 +168,8 @@ func (d *Driver) SetConfig(cfg *base.Config) error {
 		return err
 	}
 	d.boxm = m
+	// Before any task starts: a box being started must not lose its files.
+	d.pruneTaskFiles()
 	d.logger.Info("box driver configured",
 		"limactl", c.LimactlPath, "lima_home", c.LimaHome, "image_cache_dir", c.ImageCacheDir,
 		"memory_overhead_mib", c.MemoryOverheadMiB, "memory_limit", c.MemoryLimit, "vm_type", c.VMType,
@@ -487,7 +489,7 @@ func (d *Driver) StartTask(tc *drivers.TaskConfig) (*drivers.TaskHandle, *driver
 	// The task files are on the host before the VM boots: the guest mounts
 	// them read-only, so they are there from its first second and after any
 	// reboot of its own.
-	n, err := b.StageTaskFiles(tc.TaskDir().LocalDir, tc.TaskDir().SecretsDir)
+	n, err := b.StageTaskFiles(tc.TaskDir().LocalDir, tc.TaskDir().SecretsDir, tc.TaskDir().PrivateDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("put the task files of box %s where the guest mounts them: %w", cfg.BoxID, err)
 	}
@@ -918,4 +920,24 @@ func (d *Driver) watchMemory(h *taskHandle, qemuPID int) {
 			h.boxID, kills-h.oomKills, h.cfg.MemoryMiB+d.config.MemoryOverheadMiB, d.config.MemoryOverheadMiB))
 	}
 	h.oomKills = kills
+}
+
+// pruneTaskFiles removes the task files of boxes whose VM does not run: what a
+// crash of the driver left behind. A running box keeps its own.
+func (d *Driver) pruneTaskFiles() {
+	ctx, cancel := context.WithTimeout(d.ctx, 30*time.Second)
+	defer cancel()
+	insts, err := d.boxm.List(ctx)
+	if err != nil {
+		return
+	}
+	running := map[string]bool{}
+	for _, inst := range insts {
+		if inst.IsRunning() {
+			running[inst.Name] = true
+		}
+	}
+	if removed := d.boxm.PruneTaskFiles(running); len(removed) > 0 {
+		d.logger.Info("removed the task files of boxes that do not run", "boxes", removed)
+	}
 }

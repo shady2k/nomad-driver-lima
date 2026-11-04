@@ -384,7 +384,7 @@ func TestStageTaskFiles(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(secrets, "prime", "auth.json"), []byte("k1"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(secrets, nomadSecretsMarker), nil, 0o600))
 
-	n, err := b.StageTaskFiles(local, secrets)
+	n, err := b.StageTaskFiles(local, secrets, "")
 	require.NoError(t, err)
 	require.Equal(t, 2, n)
 	dir := m.FilesDir("box1")
@@ -399,7 +399,7 @@ func TestStageTaskFiles(t *testing.T) {
 	// A re-render replaces a file and drops one the task no longer has.
 	require.NoError(t, os.WriteFile(filepath.Join(secrets, "prime", "auth.json"), []byte("k2"), 0o600))
 	require.NoError(t, os.Remove(filepath.Join(local, "job.conf")))
-	_, err = b.StageTaskFiles(local, secrets)
+	_, err = b.StageTaskFiles(local, secrets, "")
 	require.NoError(t, err)
 	got, _ = os.ReadFile(filepath.Join(dir, "secrets", "prime", "auth.json"))
 	require.Equal(t, "k2", string(got))
@@ -603,4 +603,33 @@ func TestLivenessReadsThePIDFileOfItsVMType(t *testing.T) {
 			require.True(t, live.HostAgentAlive)
 		})
 	}
+}
+
+// TestStageTaskFilesInTheTaskDir is the macOS way: no tmpfs, so the files go
+// into the task's private directory and the box's directory links to it; a
+// crash leaves no copy outside what Nomad removes with the allocation, and the
+// driver's start removes the link of a box that does not run.
+func TestStageTaskFilesInTheTaskDir(t *testing.T) {
+	old := stageInTaskDir
+	stageInTaskDir = true
+	t.Cleanup(func() { stageInTaskDir = old })
+	m := newTestManager(t, fakelima.New(t))
+	b, err := m.Box(Spec{BoxID: "box1", VolumeDir: t.TempDir(), ImageURL: "http://x/i.img", ImageSHA256: "00",
+		CPUs: 1, MemoryMiB: 512, DiskGiB: 1}, nil)
+	require.NoError(t, err)
+	secrets, private := t.TempDir(), t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(secrets, "key"), []byte("k"), 0o600))
+	_, err = b.StageTaskFiles("", secrets, private)
+	require.NoError(t, err)
+	target, err := os.Readlink(m.FilesDir("box1"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(private, "box-files"), target)
+	got, err := os.ReadFile(filepath.Join(m.FilesDir("box1"), "secrets", "key"))
+	require.NoError(t, err)
+	require.Equal(t, "k", string(got))
+
+	require.Equal(t, []string{"box1"}, m.PruneTaskFiles(map[string]bool{}))
+	require.NoFileExists(t, filepath.Join(private, "box-files", "secrets", "key"))
+	_, err = os.Lstat(m.FilesDir("box1"))
+	require.True(t, os.IsNotExist(err))
 }
