@@ -8,14 +8,16 @@ where one is known, what would close it. Nothing here is a promise to fix it.
 - **The measurements come from one host.** lima 2.2.0, qemu 11.1.2, Nomad 2.0.7,
   systemd 262 with cgroup v2 and `/dev/kvm` on one Linux machine. A different lima
   or qemu version can change the process model, the pid files or the guest agent's
-  behaviour. Only the Linux/qemu path is measured end to end.
-- **macOS and Apple Virtualization are rendered, not run.** The launchd plist,
-  the arm64 configuration and the `vz` block are validated as files on Linux, and
-  the two role fixtures run on a GitHub `macos-15` runner - but with a recording
-  `launchctl` and a stub `limactl`, so they prove the files and the launchd argv,
-  not the daemon. A real `launchctl bootstrap`, a `kickstart -k` that leaves a box
-  alive, `plutil -lint` and `vz` itself have never been exercised. Closing it needs
-  a Mac running the real client.
+  behaviour. Only the Linux/qemu path is measured by the test suites.
+- **macOS and Apple Virtualization run on one Mac, by hand, not in a test.** One
+  Mac (an M4, arm64) runs the real Nomad client under launchd with `vz` boxes:
+  boxes were created and deleted on it through Nomad, read their executor key
+  from Vault, and ran a prime session whose Python tool worked (driver v0.1.6,
+  an image built from the recipe). In CI the launchd plist and the arm64
+  configuration are still checked as files, and the two role fixtures run on a
+  GitHub `macos-15` runner with a recording `launchctl` and a stub `limactl`. A
+  client restart (`kickstart -k`) with a box running has not been measured, and
+  nothing reruns the Mac path when the code changes: a Mac in CI would.
 - **A rare hang of Lima's readiness checks on a Mac, cause unknown.** Once, in a
   direct `limactl start` under `vz` (no Nomad, no driver), the first SSH check
   passed and the second stayed on an open connection until it was stopped; 20
@@ -23,8 +25,12 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   start fails after Lima's own wait (10 minutes) and the task's restart policy
   starts it again. The guest's own logs of that run were lost, so nothing here says
   why; a repeat with the instance kept would.
-- **arm64 has no end-to-end test.** `box-driver`, `box-volume` and `boxd` cross-build for `linux/arm64` in
-  every release, but no driver or CLI suite has run a box on arm64.
+- **arm64 has no automated end-to-end test.** `box-driver`, `box-volume` and
+  `boxd` cross-build for `linux/arm64` in every release, and arm64 boxes run on
+  the Mac above, but no driver or CLI suite runs a box on arm64.
+- **A guest is Linux only.** A box on a Mac is an arm64 Linux VM; nothing here
+  boots a macOS guest, so a macOS build is checked by CI on a macOS runner, not
+  in a box.
 - **NixOS is refused by the client role.** The role writes `/etc/nomad.d`, which
   on NixOS is lost at the next `nixos-rebuild switch`, so the play stops unless
   `nomad_allow_nixos` is set. A NixOS node needs a hand-written configuration.

@@ -23,8 +23,8 @@ polling loop**: `box wait` and `box events` report progress.
 ```bash
 box capacity                      # 1. where can a box go, and how much is free
 box images                        # 2. which base images exist: take the newest
-box executors show                # 3. which executors have credentials in this cluster
-box create dev1 --image <newest> --arch amd64 --cpus 2 --memory-mib 2048 --disk-gib 16
+box executors show                # 3. which executors have credentials, and their models
+box create dev1 --image <newest> --arch amd64 --disk-gib 16   # 2 vCPU, 2048 MiB by default
 box session new dev1 --executor prime --model <provider>/<model> --title "fix the tests"
 box send dev1 s-7f3a2c --file prompt.md   # or the prompt as one argument
 box wait dev1 s-7f3a2c --timeout 15m      # blocks until the turn ends, prints the answer
@@ -50,10 +50,12 @@ running). A non-zero exit is always a sentence you can act on.
   `--arch amd64` or `--arch arm64`. `box capacity` lists both, never add their
   free resources together.
 - **Take the newest image** from `box images`; an older one lacks fixes.
-- **2048 MiB for an agent session.** The 1024 MiB default boots, but an agent
-  with its tools (prime's Python kernel installs pandas) needs more. Ask for
-  more only for a real build or test run, and leave room for the other agents
-  on the node.
+- **The defaults (2 vCPU, 2048 MiB, 8 GiB) fit an agent session.** Ask for more
+  only for a real build or test run, and leave room for the other agents on
+  the node.
+- **The model is one `box executors show` lists**, as `<provider>/<model>`: a
+  box can reach no other.
+- **`box <command> --help`** prints a command's arguments and every flag.
 
 ## Rules
 

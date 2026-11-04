@@ -10,7 +10,9 @@ box [--json] <command> [arguments]
 - `--json` may come before or after the command name and gives one JSON document.
 - `--image-index URL` (or `--image-index=URL`) is the image index of this one
   command; it outranks `BOX_IMAGE_INDEX`.
-- `--help` (or `box help`) prints the command list.
+- `--help` (or `box help`) prints the command list; `box <command> --help`
+  (or `box help <command>`, `box session new --help`) prints that command's
+  arguments and every flag with its default, and runs nothing.
 - A `--` ends the flags: everything after it belongs to the command that
   follows (`box run dev1 -- df -h /` gives `df` its own `-h`).
 - Exit codes: `0` ok, `1` error, `2` usage, `3` not found, `4` timeout (the
@@ -49,7 +51,7 @@ waits until the box is running.
 | `--image V` | – (required) | base image version from the index |
 | `--arch amd64\|arm64` | the node's | architecture |
 | `--cpus N` | 2 | guest vCPUs |
-| `--memory-mib N` | 1024 | guest RAM |
+| `--memory-mib N` | 2048 | guest RAM: an agent session with its tools needs it |
 | `--disk-gib N` | 8 | disk size (it can only grow later) |
 | `--node NAME` | – | pin the box to this node |
 | `--vault-role ROLE` | `BOX_VAULT_ROLE`, else the cluster's default role | the Vault role the box reads its secrets with, used when the executors hold a template item (see "Executor credentials") |
@@ -189,6 +191,9 @@ File names, sizes and executors, never a value. A template item is shown with
 `(template)` next to its name, and as `template: Nomad reads the secret at render
 time`, so what the variable holds is visible as a path. A required file counts as
 present in either form: `prime/auth.json.tmpl` is the `auth.json` of `prime`.
+A provider definition is shown with its models as `--model` takes them
+(`prime/models.json provider myprovider, models: myprovider/model-a`); `--json`
+has them as `models` of that key.
 
 ### `box executors delete [--yes]`
 

@@ -489,6 +489,38 @@ func TestExecutorsShowJSON(t *testing.T) {
 	require.Empty(t, doc.Missing)
 }
 
+// TestExecutorsShowListsTheModels: a session needs --model <provider>/<model>,
+// and the provider definitions are where the models are; prime keeps a list of
+// objects with an id, opencode an object keyed by id.
+func TestExecutorsShowListsTheModels(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.cluster.setExecutors(map[string]string{
+		"prime/settings.json": "{}",
+		"prime/auth.json":     "{}",
+		"prime/models.json": `{"providers":{"gateway":{"baseUrl":"https://one.example/v1",` +
+			`"models":[{"id":"model-b"},{"id":"model-a","name":"A"}]}}}`,
+		"opencode/opencode.json": `{"providers":{"gateway":{"models":{"model-c":{}}}}}`,
+	})
+	rc := ta.run(t, "executors", "show")
+	require.Equal(t, ExitOK, rc, ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "prime/models.json provider gateway, models: gateway/model-a, gateway/model-b")
+	require.Contains(t, ta.errOut.String(), "opencode/opencode.json provider gateway, models: gateway/model-c")
+
+	ta.JSON = true
+	ta.out.Reset()
+	rc = ta.run(t, "executors", "show")
+	require.Equal(t, ExitOK, rc, ta.errOut.String())
+	var doc executorsShowOutput
+	require.NoError(t, json.Unmarshal(ta.out.Bytes(), &doc))
+	var models []string
+	for _, key := range doc.Keys {
+		if key.File == "prime/models.json" {
+			models = key.Models
+		}
+	}
+	require.Equal(t, []string{"model-a", "model-b"}, models)
+}
+
 func TestExecutorsDelete(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	ta.cluster.setExecutors(map[string]string{"prime/auth.json": "{}"})

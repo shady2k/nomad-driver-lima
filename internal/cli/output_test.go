@@ -61,6 +61,41 @@ func TestCapacityNamesOrphans(t *testing.T) {
 	require.NotContains(t, notes, "node-1/", "a node without orphans names none")
 }
 
+// TestCommandHelp: --help of a command prints its arguments and every flag
+// and runs nothing; a guest command line after "--" keeps its own -h.
+func TestCommandHelp(t *testing.T) {
+	for _, args := range [][]string{
+		{"create", "--help"}, {"create", "dev1", "-h"}, {"help", "create"},
+	} {
+		ta := newTestApp(t, indexJSON)
+		require.Equal(t, ExitOK, ta.run(t, args...), ta.errOut.String())
+		help := ta.errOut.String()
+		require.Contains(t, help, "box create <id> --image")
+		require.Contains(t, help, "--arch VALUE")
+		require.Contains(t, help, "--memory-mib N")
+		require.Contains(t, help, "(default 2048)")
+		require.Empty(t, ta.cluster.jobs, "help registers nothing")
+	}
+
+	ta := newTestApp(t, indexJSON)
+	require.Equal(t, ExitOK, ta.run(t, "session", "new", "--help"))
+	require.Contains(t, ta.errOut.String(), "flags of box session new")
+	require.Contains(t, ta.errOut.String(), "--model VALUE")
+
+	ta = newTestApp(t, indexJSON)
+	require.Equal(t, ExitOK, ta.run(t, "session", "--help"))
+	require.Contains(t, ta.errOut.String(), "box session close <id> <session>")
+
+	ta = newTestApp(t, indexJSON)
+	require.Equal(t, ExitOK, ta.run(t, "cp", "--help"))
+	require.Contains(t, ta.errOut.String(), "box cp <src> <dst>")
+
+	// A missing argument names the help that says which.
+	ta = newTestApp(t, indexJSON)
+	require.Equal(t, ExitUsage, ta.run(t, "create"))
+	require.Contains(t, ta.errOut.String(), "`box create --help`")
+}
+
 func TestCapacityWithoutNodes(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	ta.cluster.nodes = map[string]*api.Node{}
@@ -76,6 +111,7 @@ func TestImagesOutput(t *testing.T) {
 	require.Contains(t, table, "1.0.0")
 	require.Contains(t, table, "amd64")
 	require.Contains(t, table, "arm64")
+	require.Contains(t, ta.errOut.String(), "--memory-mib 2048", "the hint is the default create takes")
 
 	ta.out.Reset()
 	ta.errOut.Reset()

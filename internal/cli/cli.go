@@ -33,6 +33,9 @@ type App struct {
 	In io.Reader
 	// JSON switches the output to one JSON document.
 	JSON bool
+	// help is a --help or -h before any "--": the command prints its help
+	// instead of running.
+	help bool
 	// Now and Sleep are injectable for the tests.
 	Now   func() time.Time
 	Sleep func(ctx context.Context, d time.Duration) error
@@ -156,12 +159,24 @@ type command struct {
 	run func(ctx context.Context, args []string) error
 	// usage is the one-line help shown by `box help`.
 	usage string
+	// noFlags marks a command that takes no flags of its own (its arguments
+	// are paths or a guest command line): its help is the usage line alone, and
+	// it is never run to ask for it.
+	noFlags bool
+	// subcommands marks a command whose first argument is a subcommand with
+	// flags of its own (box session new, box executors set).
+	subcommands bool
 }
 
 // Run executes one command line and returns the process exit code.
 func (a *App) Run(ctx context.Context, args []string) int {
 	err := a.run(ctx, args)
 	if err == nil {
+		return ExitOK
+	}
+	var help *helpError
+	if errors.As(err, &help) {
+		printFlags(a.ErrOut, help.fs)
 		return ExitOK
 	}
 	// An Error without a message is a guest exit code that passed straight
@@ -178,18 +193,20 @@ func (a *App) Run(ctx context.Context, args []string) int {
 
 func (a *App) run(ctx context.Context, args []string) error {
 	// Global flags may come before or after the command name.
+	a.help = false
 	args, err := a.takeGlobalFlags(args)
 	if err != nil {
 		return err
 	}
+	if a.help || (len(args) > 0 && args[0] == "help") {
+		if len(args) > 0 && args[0] == "help" {
+			args = args[1:]
+		}
+		return a.commandHelp(ctx, args)
+	}
 	if len(args) == 0 {
 		a.printUsage()
 		return usagef("no command given")
-	}
-	switch args[0] {
-	case "help", "-h", "--help":
-		a.printUsage()
-		return nil
 	}
 	cmd, ok := a.commands()[args[0]]
 	if !ok {
@@ -218,7 +235,7 @@ func (a *App) takeGlobalFlags(args []string) ([]string, error) {
 		case arg == "--json" || arg == "-json":
 			a.JSON = true
 		case arg == "--help" || arg == "-h":
-			out = append(out, "help")
+			a.help = true
 		case arg == "--image-index":
 			if i+1 >= len(args) {
 				return nil, usagef("--image-index needs a URL")
@@ -236,6 +253,32 @@ func (a *App) takeGlobalFlags(args []string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// commandHelp prints the help of the command (and subcommand) args name, or
+// the list of commands when they name none.
+//
+// A command that takes flags is run with -h alone: parseFlags answers it
+// before the command does anything, and Run prints the flags.
+func (a *App) commandHelp(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		a.printUsage()
+		return nil
+	}
+	cmd, ok := a.commands()[args[0]]
+	if !ok {
+		a.printUsage()
+		return usagef("unknown command %q", args[0])
+	}
+	fmt.Fprintf(a.ErrOut, "box %s: %s\n", args[0], cmd.usage)
+	if cmd.noFlags {
+		return nil
+	}
+	call := []string{"-h"}
+	if len(args) > 1 && !strings.HasPrefix(args[1], "-") && cmd.subcommands {
+		call = []string{args[1], "-h"}
+	}
+	return cmd.run(ctx, call)
 }
 
 func (a *App) printUsage() {
@@ -256,9 +299,9 @@ func (a *App) printUsage() {
 func (a *App) commands() map[string]command {
 	return map[string]command{
 		"capacity":  {usage: "nodes that can run boxes, with their free CPU, memory and disk", run: a.cmdCapacity},
-		"executors": {usage: "executor credentials of the boxes: box executors set --from-dir DIR --provider NAME | show | delete", run: a.cmdExecutors},
+		"executors": {usage: "executor credentials of the boxes: box executors set --from-dir DIR --provider NAME | show | delete", run: a.cmdExecutors, subcommands: true},
 		"images":    {usage: "base images published for boxes", run: a.cmdImages},
-		"create":    {usage: "create a box: box create <id> --image <version> --cpus N --memory-mib N --disk-gib N", run: a.cmdCreate},
+		"create":    {usage: "create a box: box create <id> --image <version> [--arch amd64|arm64] [--cpus N] [--memory-mib N] [--disk-gib N]", run: a.cmdCreate},
 		"ls":        {usage: "list boxes", run: a.cmdList},
 		"status":    {usage: "details of one box, its recent task events, the guest and its sessions: box status <id>", run: a.cmdStatus},
 		"stop":      {usage: "stop a box, keeping its disk: box stop <id>", run: a.cmdStop},
@@ -266,10 +309,10 @@ func (a *App) commands() map[string]command {
 		"rm":        {usage: "delete a box and its disk: box rm <id> [--yes]", run: a.cmdRemove},
 		"resize":    {usage: "change cpus, memory or disk: box resize <id> [--cpus N] [--memory-mib N] [--disk-gib N]", run: a.cmdResize},
 		"ssh":       {usage: "interactive shell in a box: box ssh <id>", run: a.cmdSSH},
-		"run":       {usage: "run a command in a box: box run <id> -- cmd...", run: a.cmdRun},
-		"cp":        {usage: "copy files or directories in and out: box cp <src> <dst>", run: a.cmdCP},
+		"run":       {usage: "run a command in a box: box run <id> -- cmd...", run: a.cmdRun, noFlags: true},
+		"cp":        {usage: "copy files or directories in and out: box cp <src> <dst>", run: a.cmdCP, noFlags: true},
 		"logs":      {usage: "task logs of a box (the boxd event stream): box logs <id> [-f]", run: a.cmdLogs},
-		"session":   {usage: "sessions in a box: box session new|ls|close <id> ...", run: a.cmdSession},
+		"session":   {usage: "sessions in a box: box session new|ls|close <id> ...", run: a.cmdSession, subcommands: true},
 		"send":      {usage: "send a prompt to a session: box send <id> <session> [--file F | text]", run: a.cmdSend},
 		"wait":      {usage: "wait for a session turn to finish: box wait <id> <session> [--timeout D]", run: a.cmdWait},
 		"events":    {usage: "session events: box events <id> <session> [--since N] [-f]", run: a.cmdEvents},

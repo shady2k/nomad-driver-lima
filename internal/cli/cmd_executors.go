@@ -240,7 +240,11 @@ func (a *App) cmdExecutorsShow(ctx context.Context, args []string) error {
 		case "credential":
 			a.note("  %-9s provider %s (%s)", key.File, key.Name, orNone(key.Fields))
 		case "provider":
-			a.note("  %-9s provider %s", key.File, key.Name)
+			models := "none listed"
+			if len(key.Models) > 0 {
+				models = strings.Join(prefixed(key.Name, key.Models), ", ")
+			}
+			a.note("  %-9s provider %s, models: %s", key.File, key.Name, models)
 		case "template":
 			a.note("  %-9s template: Nomad reads the secret at render time", key.File)
 		default:
@@ -342,4 +346,13 @@ func hasExecutorFiles(items map[string]string, executor string) bool {
 		}
 	}
 	return false
+}
+
+// prefixed names models the way --model takes them: <provider>/<model>.
+func prefixed(provider string, models []string) []string {
+	out := make([]string, 0, len(models))
+	for _, m := range models {
+		out = append(out, provider+"/"+m)
+	}
+	return out
 }

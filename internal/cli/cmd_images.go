@@ -60,7 +60,8 @@ func (a *App) cmdImages(ctx context.Context, args []string) error {
 	}
 	a.printTable([]string{"VERSION", "ARCH", "SIZE", "SHA256", "BUILT"}, rows)
 	a.note("%s from %s", describeCount(len(images), "image"), url)
-	a.note("create a box with: box create <id> --image %s --cpus 2 --memory-mib 1024 --disk-gib 8", images[0].Version)
+	a.note("create a box with: box create <id> --image %s --arch %s --cpus %d --memory-mib %d --disk-gib %d",
+		images[0].Version, images[0].Arch, defaultCPUs, defaultMemoryMiB, defaultDiskGiB)
 	return nil
 }
 

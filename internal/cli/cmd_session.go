@@ -36,6 +36,12 @@ func (a *App) cmdSession(ctx context.Context, args []string) error {
 		return a.cmdSessionList(ctx, args[1:])
 	case "close":
 		return a.cmdSessionClose(ctx, args[1:])
+	case "help", "-h", "--help":
+		fmt.Fprintf(a.ErrOut, "usage: box session new <id> --executor NAME --model PROVIDER/MODEL [--title T] [--cwd DIR]\n"+
+			"       box session ls <id>\n"+
+			"       box session close <id> <session>\n"+
+			"`box session new --help` lists its flags; `box executors show` the executors and their models.\n")
+		return nil
 	default:
 		return usagef("unknown session subcommand %q: use new, ls or close", args[0])
 	}

@@ -396,6 +396,9 @@ type ExecutorKey struct {
 	// Fields are the fields of a credential, for example access, refresh and
 	// expires. Never their values.
 	Fields []string `json:"fields,omitempty"`
+	// Models are the model ids a provider definition offers: what
+	// `box session new --model <provider>/<model>` accepts.
+	Models []string `json:"models,omitempty"`
 }
 
 // providerScoped finds the provider-scoped files of a staged set.
@@ -528,11 +531,33 @@ func storedKeys(items map[string]string) []ExecutorKey {
 		default:
 			providers, _ := doc["providers"].(map[string]any)
 			for _, provider := range jsonKeys(providers) {
-				report = append(report, ExecutorKey{File: key, Kind: "provider", Name: provider})
+				report = append(report, ExecutorKey{File: key, Kind: "provider", Name: provider,
+					Models: modelIDs(providers[provider])})
 			}
 		}
 	}
 	return report
+}
+
+// modelIDs lists the models of one provider definition, sorted: prime keeps
+// them as a list of objects with an id, opencode as an object keyed by id.
+func modelIDs(definition any) []string {
+	def, _ := definition.(map[string]any)
+	var out []string
+	switch models := def["models"].(type) {
+	case []any:
+		for _, m := range models {
+			if model, ok := m.(map[string]any); ok {
+				if id, ok := model["id"].(string); ok && id != "" {
+					out = append(out, id)
+				}
+			}
+		}
+		sort.Strings(out)
+	case map[string]any:
+		out = jsonKeys(models)
+	}
+	return out
 }
 
 // parseJSONObject decodes one staged file as a JSON object.

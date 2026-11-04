@@ -19,15 +19,24 @@ type createOutput struct {
 	Warn   string         `json:"warning,omitempty"`
 }
 
+// Defaults of `box create`, also what `box images` suggests. 2048 MiB because
+// an agent session with its tools needs it: prime's Python kernel installs
+// pandas into a venv, which 1024 MiB boots but does not comfortably hold.
+const (
+	defaultCPUs      = 2
+	defaultMemoryMiB = 2048
+	defaultDiskGiB   = 8
+)
+
 // cmdCreate creates a box: a dynamic host volume holding the disk plus the job
 // that runs the VM on it.
 func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	fs := newFlagSet("create")
 	imageVersion := fs.String("image", "", "base image version from the index (required)")
 	arch := fs.String("arch", "", "architecture: amd64 or arm64 (default: the node's)")
-	cpus := fs.Int("cpus", 2, "number of guest vCPUs")
-	memoryMiB := fs.Int("memory-mib", 1024, "guest RAM in MiB")
-	diskGiB := fs.Int("disk-gib", 8, "box disk size in GiB (on a dynamic host volume)")
+	cpus := fs.Int("cpus", defaultCPUs, "number of guest vCPUs")
+	memoryMiB := fs.Int("memory-mib", defaultMemoryMiB, "guest RAM in MiB")
+	diskGiB := fs.Int("disk-gib", defaultDiskGiB, "box disk size in GiB (on a dynamic host volume)")
 	nodeName := fs.String("node", "", "pin the box to this node")
 	vaultRole := fs.String("vault-role", a.VaultRole(), "the Vault role the box reads its secrets with "+
 		"(default: $BOX_VAULT_ROLE, else the cluster's default role)")

@@ -1,11 +1,59 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"strings"
 )
+
+// helpError is a command's -h: Run prints the command's flags and exits 0.
+type helpError struct{ fs *flag.FlagSet }
+
+func (e *helpError) Error() string { return e.fs.Name() + ": help requested" }
+
+// parseError turns a parse failure into the command's usage error, or into its
+// help when -h was asked for.
+func parseError(fs *flag.FlagSet, err error) error {
+	if errors.Is(err, flag.ErrHelp) {
+		return &helpError{fs: fs}
+	}
+	return usagef("%s: %v; `%s --help` lists its flags", fs.Name(), err, fs.Name())
+}
+
+// printFlags writes a flag set's flags, one per line, with their defaults.
+func printFlags(w io.Writer, fs *flag.FlagSet) {
+	var lines []string
+	fs.VisitAll(func(f *flag.Flag) {
+		name := "--" + f.Name
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); !ok || !b.IsBoolFlag() {
+			name += " " + flagPlaceholder(f)
+		}
+		line := fmt.Sprintf("  %-22s %s", name, f.Usage)
+		if f.DefValue != "" && f.DefValue != "0" && f.DefValue != "false" {
+			line += fmt.Sprintf(" (default %s)", f.DefValue)
+		}
+		lines = append(lines, line)
+	})
+	if len(lines) == 0 {
+		fmt.Fprintf(w, "%s takes no flags\n", fs.Name())
+		return
+	}
+	fmt.Fprintf(w, "flags of %s:\n%s\n", fs.Name(), strings.Join(lines, "\n"))
+}
+
+// flagPlaceholder names the value a flag takes, from its type.
+func flagPlaceholder(f *flag.Flag) string {
+	switch fmt.Sprintf("%T", f.Value) {
+	case "*flag.intValue", "*flag.int64Value", "*flag.uintValue":
+		return "N"
+	case "*flag.durationValue":
+		return "DURATION"
+	default:
+		return "VALUE"
+	}
+}
 
 // newFlagSet returns a flag set that reports nothing itself; the command turns
 // a parse failure into a usage error with the command's own words.
@@ -57,11 +105,16 @@ func splitInterspersed(fs *flag.FlagSet, args []string) []string {
 func parseFlags(fs *flag.FlagSet, args []string, want int) error {
 	args = splitInterspersed(fs, args)
 	if err := fs.Parse(args); err != nil {
-		return usagef("%s: %v (see `box help`)", fs.Name(), err)
+		return parseError(fs, err)
 	}
 	rest := fs.Args()
 	if want >= 0 && len(rest) != want {
-		return usagef("%s: expected %d argument(s), got %d: %s", fs.Name(), want, len(rest), strings.Join(rest, " "))
+		got := ""
+		if len(rest) > 0 {
+			got = " (" + strings.Join(rest, " ") + ")"
+		}
+		return usagef("%s: expected %d argument(s), got %d%s; `%s --help` says which, and lists the flags",
+			fs.Name(), want, len(rest), got, fs.Name())
 	}
 	return nil
 }
@@ -71,10 +124,11 @@ func parseFlags(fs *flag.FlagSet, args []string, want int) error {
 func parseFlagsMin(fs *flag.FlagSet, args []string, min int) error {
 	args = splitInterspersed(fs, args)
 	if err := fs.Parse(args); err != nil {
-		return usagef("%s: %v (see `box help`)", fs.Name(), err)
+		return parseError(fs, err)
 	}
 	if len(fs.Args()) < min {
-		return usagef("%s: expected at least %d argument(s), got %d", fs.Name(), min, len(fs.Args()))
+		return usagef("%s: expected at least %d argument(s), got %d; `%s --help` says which, and lists the flags",
+			fs.Name(), min, len(fs.Args()), fs.Name())
 	}
 	return nil
 }
