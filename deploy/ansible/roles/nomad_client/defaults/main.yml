@@ -117,6 +117,8 @@ nomad_client_extra: {}
 # configuration reference); merged as it is.
 nomad_extra: {}
 # Telemetry, for example {prometheus_metrics: true, disable_hostname: true}.
+# publish_allocation_metrics is always on: without it the Nomad client never
+# asks a driver for a task's resource usage, so the UI has no graphs of a box.
 nomad_telemetry: {}
 nomad_log_level: INFO
 

@@ -118,6 +118,9 @@ GO_DIST_URL=${BOX_MIRROR_GO_DIST:-https://go.dev/dl}
 GITHUB_URL=${BOX_MIRROR_GITHUB:-https://github.com}
 NODE_DIST_URL=${BOX_MIRROR_NODE:-https://nodejs.org/dist}
 DOCKER_MIRROR=${BOX_MIRROR_DOCKER:-}
+# uv downloads CPython from python-build-standalone's GitHub releases, so a
+# GitHub mirror serves those too.
+UV_PYTHON_MIRROR=$GITHUB_URL/astral-sh/python-build-standalone/releases/download
 
 NODE_URL=$NODE_DIST_URL/v$NODE_VERSION/node-v$NODE_VERSION-linux-$NODE_ARCH.tar.xz
 GO_URL=$GO_DIST_URL/go$GO_VERSION.linux-$BOX_ARCH.tar.gz
@@ -171,10 +174,11 @@ download() {
 
 # --- apt: the two sources this image uses, and the suites they serve ---------
 log "apt sources"
-# Two suites, noble and noble-security: one configured source set that answers
-# 'apt-get update' as shipped. (A mirror is not guaranteed to carry
-# noble-updates/noble-backports, and one missing suite fails the whole update,
-# so the image does not ask for them.)
+# Three suites, noble, noble-updates and noble-security. The cloud image ships
+# packages from noble-updates, so without that suite a -dev package of an
+# installed library has no candidate of the same version and cannot install
+# (libdbus-1-3 from -updates, libdbus-1-dev only from noble). A mirror that
+# carries the archive carries -updates; backports stay out.
 rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources
 cat > /etc/apt/sources.list.d/box-apt.sources <<EOF
 # Written by images/provision.sh: the apt sources of this image, the public
@@ -182,7 +186,7 @@ cat > /etc/apt/sources.list.d/box-apt.sources <<EOF
 # be added: 'apt-get update' must not reach another host.
 Types: deb
 URIs: $APT_ARCHIVE_URL
-Suites: noble
+Suites: noble noble-updates
 Components: main restricted universe multiverse
 Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 
@@ -344,6 +348,8 @@ cat > /etc/uv/uv.toml <<EOF
 # Written by images/provision.sh: the system-wide uv configuration. The box has
 # no per-user virtual environment, so uv installs into the system Python the way
 # /etc/pip.conf lets pip do it (Ubuntu marks its Python externally managed).
+python-install-mirror = "$UV_PYTHON_MIRROR"
+
 [[index]]
 url = "$PIP_INDEX"
 default = true

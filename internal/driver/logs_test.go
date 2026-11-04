@@ -47,3 +47,12 @@ func TestQuietExecIsOnlyTheReadingBoxctlCalls(t *testing.T) {
 		}
 	}
 }
+
+// TestExecLabelOfABoxRun: the log names the command a `box run` ran, not the
+// wrapper around it.
+func TestExecLabelOfABoxRun(t *testing.T) {
+	got := execLabel([]string{"setsid", "-w", "sh", "-c", `echo $$ > "$0"; "$@"`, "/tmp/box-run-1-2.pid", "go", "test", "./..."})
+	if got != "go test ./..." {
+		t.Fatalf("label = %q", got)
+	}
+}

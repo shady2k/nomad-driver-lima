@@ -43,7 +43,7 @@
           'client': nomad_client_block}
          | combine({'server': nomad_server_block} if nomad_server_block | length > 0 else {})
          | combine({'acl': {'enabled': true}} if nomad_acl_enabled | bool else {})
-         | combine({'telemetry': nomad_telemetry} if nomad_telemetry | length > 0 else {})
+         | combine({'telemetry': ({'publish_allocation_metrics': true} | combine(nomad_telemetry))})
          | combine(nomad_tls_config if nomad_tls_enabled | bool else {})
          | combine(nomad_extra | default({})) }}
 

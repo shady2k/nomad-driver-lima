@@ -172,8 +172,13 @@ func (h *taskHandle) noteExec(format string, args ...any) {
 	_, _ = io.WriteString(w, line)
 }
 
-// execLabel is a command line as noteExec shows it.
+// execLabel is a command line as noteExec shows it. A `box run` command comes
+// wrapped (setsid -w sh -c <wrapper> <pid file> cmd...); the label is cmd.
 func execLabel(command []string) string {
+	if len(command) > 6 && command[0] == "setsid" && command[1] == "-w" && command[2] == "sh" && command[3] == "-c" &&
+		strings.HasPrefix(command[5], "/tmp/box-run-") {
+		command = command[6:]
+	}
 	s := strings.Join(command, " ")
 	s = strings.Join(strings.Fields(s), " ")
 	if len(s) > 200 {

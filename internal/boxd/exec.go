@@ -178,6 +178,11 @@ func executorEnv(envFile string, dirs executorDirs, extra map[string]string) ([]
 	env := os.Environ()
 	if dirs.home != "" && dirExists(dirs.home) {
 		env = appendFiltered(env, "HOME", "HOME="+dirs.home)
+		// What an agent installs for itself lands in its HOME: `go install` in
+		// ~/go/bin, `uv tool` and pip --user in ~/.local/bin. Without them on
+		// PATH a tool it has just installed is "command not found".
+		env = appendFiltered(env, "PATH", "PATH="+withPath(pathOf(env),
+			filepath.Join(dirs.home, "go", "bin"), filepath.Join(dirs.home, ".local", "bin")))
 	}
 	if dirs.config != "" && dirExists(dirs.config) {
 		env = appendFiltered(env, "XDG_CONFIG_HOME", "XDG_CONFIG_HOME="+dirs.config)
@@ -614,4 +619,32 @@ func modelOption(configOptions []configOption, model string) (configID, value st
 		}
 	}
 	return "", "", false
+}
+
+// pathOf is PATH in env, "" when it is not set.
+func pathOf(env []string) string {
+	for i := len(env) - 1; i >= 0; i-- {
+		if v, ok := strings.CutPrefix(env[i], "PATH="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// withPath appends dirs to a PATH that does not have them yet.
+func withPath(path string, dirs ...string) string {
+	if path == "" {
+		path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	}
+	have := map[string]bool{}
+	for _, d := range filepath.SplitList(path) {
+		have[d] = true
+	}
+	for _, d := range dirs {
+		if !have[d] {
+			path += string(filepath.ListSeparator) + d
+			have[d] = true
+		}
+	}
+	return path
 }
