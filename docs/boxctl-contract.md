@@ -49,7 +49,21 @@ the driver writes them after boot, boxd reads them, and a reboot removes them.
 
 The driver streams `journalctl -f -o cat -u boxd` into the Nomad task log, so
 `nomad alloc logs` (and `box logs`) shows the guest's activity. boxd writes every
-event to that journal **and** to the session's `events.jsonl`.
+event to that journal as one line for a person, and to the session's
+`events.jsonl` as the structured event:
+
+```
+2026-11-04 12:36:07 UTC session s-9123db turn 1: started: You are a worker in a Linux VM...
+2026-11-04 12:36:09 UTC session s-9123db turn 1: tool: Run go test ./...
+2026-11-04 12:38:10 UTC session s-9123db turn 1: still working: running for 2m3s; last, 2m1s ago, tool: Run go test ./...
+2026-11-04 12:39:02 UTC session s-9123db turn 1: finished: All 214 tests pass.
+```
+
+A running turn that has been silent for two minutes writes a `still working`
+line with its last event. The driver adds its own lines to the task's stderr:
+every command run in the box through `alloc exec` (`box run`, `box cp`, the
+CLI's `boxctl` calls), when it started, every two minutes while it runs, and
+its exit code, with the command cut to 200 characters.
 
 ## Commands
 

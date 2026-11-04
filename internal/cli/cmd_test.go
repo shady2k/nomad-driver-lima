@@ -660,6 +660,37 @@ func TestWaitTimesOutWhileRunning(t *testing.T) {
 	require.Contains(t, ta.errOut.String(), "still running")
 }
 
+// TestWaitFailsOnAFailedTurn: a turn that ended in an error is exit 1, so a
+// script cannot take it for a good one.
+func TestWaitFailsOnAFailedTurn(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.addBox(t, "dev1")
+	ta.guest.responses["wait s-1 --timeout 9"] = `{"session":"s-1","turn":1,"state":"error","error":"Model gw/nope not found"}`
+	rc := ta.run(t, "wait", "dev1", "s-1", "--timeout", "10s")
+	require.Equal(t, ExitError, rc)
+	require.Contains(t, ta.errOut.String(), "ended error")
+	require.Contains(t, ta.errOut.String(), "Model gw/nope not found")
+
+	ta.guest.responses["wait s-1 --timeout 9"] = `{"session":"s-1","turn":2,"state":"done","text":"ok"}`
+	require.Equal(t, ExitOK, ta.run(t, "wait", "dev1", "s-1", "--timeout", "10s"))
+}
+
+// TestSessionNewRefusesAModelTheClusterDoesNotHave: the model is checked
+// against the provider definition before a session is started on it.
+func TestSessionNewRefusesAModelTheClusterDoesNotHave(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.addBox(t, "dev1")
+	ta.cluster.setExecutors(map[string]string{
+		"prime/models.json": `{"providers":{"gw":{"models":[{"id":"good"}]}}}`,
+	})
+	rc := ta.run(t, "session", "new", "dev1", "--executor", "prime", "--model", "gw/missing")
+	require.Equal(t, ExitUsage, rc)
+	require.Contains(t, ta.errOut.String(), "the models are: gw/good")
+	for _, call := range ta.guest.calls {
+		require.NotContains(t, call, "session new", "no session is started on a missing model")
+	}
+}
+
 func TestSendReadsAFile(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	ta.addBox(t, "dev1")

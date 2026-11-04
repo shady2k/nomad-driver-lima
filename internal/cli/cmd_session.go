@@ -64,6 +64,9 @@ func (a *App) cmdSessionNew(ctx context.Context, args []string) error {
 	if strings.TrimSpace(*model) == "" {
 		return usagef("box session new %s: --model is required, as <provider>/<model> (for example --model myprovider/mymodel)", id)
 	}
+	if err := a.checkModel(ctx, *executor, *model); err != nil {
+		return err
+	}
 	client, _, err := a.boxctlFor(ctx, id)
 	if err != nil {
 		return err
@@ -242,12 +245,20 @@ func (a *App) cmdWait(ctx context.Context, args []string) error {
 			turn.Turn, sessionID, *timeout, id, sessionID)
 	}
 	if a.JSON {
-		return a.printJSON(turn)
+		if err := a.printJSON(turn); err != nil {
+			return err
+		}
+	} else {
+		if turn.Text != "" {
+			fmt.Fprintln(a.Out, turn.Text)
+		}
+		a.note("session %s turn %d finished: %s%s", sessionID, turn.Turn, dash(turn.State), turnSuffix(turn))
 	}
-	if turn.Text != "" {
-		fmt.Fprintln(a.Out, turn.Text)
+	// A script tells a failed turn from a good one by the exit code alone.
+	if turn.State != "done" {
+		return errorf("the turn %d of session %s ended %s%s; `box events %s %s` shows what happened",
+			turn.Turn, sessionID, dash(turn.State), turnSuffix(turn), id, sessionID)
 	}
-	a.note("session %s turn %d finished: %s%s", sessionID, turn.Turn, dash(turn.State), turnSuffix(turn))
 	return nil
 }
 
@@ -361,4 +372,42 @@ func readAllStdin(a *App) (string, error) {
 		return "", wrapf(err, "cannot read the prompt from stdin")
 	}
 	return string(data), nil
+}
+
+// modelFiles is the provider definition each executor reads its models from.
+var modelFiles = map[string]string{
+	"prime":    "prime/models.json",
+	"opencode": "opencode/opencode.json",
+}
+
+// checkModel refuses a model the cluster's provider definition does not list,
+// before a session is started on it: the executor would accept the session
+// and fail its first turn. A variable this CLI cannot read, or an executor
+// without a definition, is not a refusal; the box is the judge then.
+func (a *App) checkModel(ctx context.Context, executor, model string) error {
+	file, ok := modelFiles[executor]
+	if !ok {
+		return nil
+	}
+	variable, err := a.executorsVariable(ctx)
+	if err != nil || variable == nil {
+		return nil
+	}
+	var known []string
+	for _, key := range storedKeys(variable.Items) {
+		if key.File != file || key.Kind != "provider" {
+			continue
+		}
+		known = append(known, prefixed(key.Name, key.Models)...)
+	}
+	if len(known) == 0 {
+		return nil
+	}
+	for _, m := range known {
+		if m == model {
+			return nil
+		}
+	}
+	return usagef("model %s is not in the cluster's %s, so %s cannot use it; the models are: %s "+
+		"(an operator adds one with `box executors set`)", model, file, executor, strings.Join(known, ", "))
 }

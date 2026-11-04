@@ -20,8 +20,10 @@ import (
 )
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.LUTC)
-	log.SetPrefix("boxd: ")
+	// The journal (and so the box's task log in Nomad) is read by people: every
+	// line starts with the same UTC time, the session lines included.
+	log.SetFlags(0)
+	log.SetOutput(boxd.NewStampedWriter(os.Stderr))
 
 	name := filepath.Base(os.Args[0])
 	args := os.Args[1:]
@@ -72,9 +74,10 @@ func runDaemon(args []string) int {
 		PrimeAgent: *primeAgent,
 		OpenCode:   *opencode,
 		ClaudeACP:  *claudeACP,
-		// Events go to stdout as JSON lines: under systemd that is the journal,
-		// which is exactly what the driver streams into the Nomad task log.
-		Journal: os.Stdout,
+		// Events go to stdout as one readable line each: under systemd that is
+		// the journal, which is what the driver streams into the Nomad task
+		// log. The structured events stay in each session's events.jsonl.
+		Journal: boxd.NewStampedWriter(os.Stdout),
 		Logf:    log.Printf,
 	}
 	d, err := boxd.NewDaemon(cfg)

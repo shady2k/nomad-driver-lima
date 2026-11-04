@@ -67,10 +67,10 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	// reaches boxd. The box is a single-tenant VM for one coordinator, so there
 	// is no other local user to keep out.
 	if err := os.Chmod(d.cfg.Socket, 0o666); err != nil {
-		d.cfg.logf("boxd: chmod socket: %v", err)
+		d.cfg.logf("chmod socket: %v", err)
 	}
 	d.ln = ln
-	d.cfg.logf("boxd: listening on %s (state %s)", d.cfg.Socket, d.cfg.StateDir)
+	d.cfg.logf("listening on %s (state %s)", d.cfg.Socket, d.cfg.StateDir)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- d.srv.Serve(ln) }()
@@ -95,7 +95,7 @@ func (d *Daemon) shutdown() {
 		if d.ln != nil {
 			_ = os.Remove(d.ln.Addr().String())
 		}
-		d.cfg.logf("boxd: stopped")
+		d.cfg.logf("stopped")
 	})
 }
 
@@ -127,7 +127,7 @@ func (d *Daemon) Handler() http.Handler {
 			fail(w, err)
 			return
 		}
-		d.cfg.logf("boxd: new session %s (%s %s)", s.ID, s.Executor, s.Model)
+		d.cfg.logf("new session %s (%s %s)", s.ID, s.Executor, s.Model)
 		writeJSON(w, 200, map[string]any{"session": s.ID})
 	})
 	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
@@ -241,7 +241,7 @@ func (d *Daemon) Handler() http.Handler {
 			fail(w, err)
 			return
 		}
-		d.cfg.logf("boxd: reloaded the executor credentials (configured %v, restarted %v, deferred %v)",
+		d.cfg.logf("reloaded the executor credentials (configured %v, restarted %v, deferred %v)",
 			res.Configured, res.Restarted, res.Deferred)
 		writeJSON(w, 200, res)
 	})

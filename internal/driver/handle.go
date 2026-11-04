@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -49,6 +50,9 @@ type taskHandle struct {
 	doneOnce sync.Once
 
 	logCancel context.CancelFunc
+	// logErr is the task's stderr stream while the guest logs run; exec
+	// commands are noted there (see noteExec).
+	logErr    io.Writer
 	watchStop context.CancelFunc
 
 	stats *taskStats

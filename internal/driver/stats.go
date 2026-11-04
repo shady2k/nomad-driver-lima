@@ -2,6 +2,7 @@ package driver
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -96,12 +97,17 @@ func vmPIDs(instanceDir string) []int {
 }
 
 // streamStats sends a usage sample every interval until ctx ends.
+//
+// A sample that cannot be taken is said once, as a task event and a warning,
+// with its reason: Nomad's graphs stay empty otherwise, and nothing on the
+// cluster says why.
 func (d *Driver) streamStats(ctx context.Context, h *taskHandle, interval time.Duration, out chan *drivers.TaskResourceUsage) {
 	if interval <= 0 {
 		interval = time.Second
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var said string
 	for {
 		select {
 		case <-ctx.Done():
@@ -109,14 +115,20 @@ func (d *Driver) streamStats(ctx context.Context, h *taskHandle, interval time.D
 		case <-h.done:
 			return
 		case <-ticker.C:
-			inst := h.currentInstanceDir()
-			if inst == "" {
+			usage, err := d.sampleBox(ctx, h)
+			if err != nil {
+				if msg := err.Error(); msg != said {
+					said = msg
+					// emit logs it as well.
+					if h.tc != nil && h.tc.AllocID != "" {
+						d.emit(h.tc, "stats", fmt.Sprintf("Cannot read the resource usage of box %s, so Nomad shows no graphs: %v", h.boxID, err))
+					}
+				}
 				continue
 			}
-			usage, err := h.stats.sample(d.compute, vmPIDs(inst))
-			if err != nil {
-				d.logger.Debug("collect box stats", "task", h.tc.ID, "error", err)
-				continue
+			if said != "" {
+				said = ""
+				d.logger.Info("reading the box's resource usage again", "task", h.tc.ID, "box", h.boxID)
 			}
 			select {
 			case out <- usage:
@@ -127,4 +139,44 @@ func (d *Driver) streamStats(ctx context.Context, h *taskHandle, interval time.D
 			}
 		}
 	}
+}
+
+// sampleBox takes one sample of the box's VM processes. They are found by
+// Lima's pid files in the instance directory, and by `limactl list` when the
+// files name none.
+func (d *Driver) sampleBox(ctx context.Context, h *taskHandle) (*drivers.TaskResourceUsage, error) {
+	inst := h.currentInstanceDir()
+	if inst == "" {
+		return nil, fmt.Errorf("the task does not know its Lima instance directory")
+	}
+	pids := vmPIDs(inst)
+	if len(pids) == 0 && d.boxm != nil {
+		pids = d.limaPIDs(ctx, h.boxID)
+	}
+	if len(pids) == 0 {
+		return nil, fmt.Errorf("no VM process found: no %s, %s or ha.pid in %s, and limactl lists none",
+			box.DriverPIDFile(box.VMTypeQEMU), box.DriverPIDFile(box.VMTypeVZ), inst)
+	}
+	usage, err := h.stats.sample(d.compute, pids)
+	if err != nil {
+		return nil, fmt.Errorf("read the VM processes %v: %w", pids, err)
+	}
+	return usage, nil
+}
+
+// limaPIDs asks limactl for the driver and host agent pids of one box.
+func (d *Driver) limaPIDs(ctx context.Context, boxID string) []int {
+	listCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	inst, err := d.boxm.Lima().Get(listCtx, boxID)
+	if err != nil || inst == nil {
+		return nil
+	}
+	var pids []int
+	for _, pid := range []int{inst.DriverPID, inst.HostAgentPID} {
+		if pid > 0 && (len(pids) == 0 || pids[0] != pid) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }

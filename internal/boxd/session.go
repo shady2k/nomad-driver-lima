@@ -27,17 +27,20 @@ type DaemonConfig struct {
 	RuntimeDir string // executor configuration for this boot (default /run/boxd)
 	// SecretsDir is where the Nomad driver puts the executor credentials. The
 	// driver copies them onto the guest's tmpfs, never onto its disk.
-	SecretsDir   string    // (default /run/box/secrets)
-	LocalDir     string    // files the driver copies in (default /etc/box/local)
-	PrimeAgent   string    // prime-agent binary (default: PATH)
-	OpenCode     string    // opencode binary (default: PATH)
-	ClaudeACP    string    // claude-code-acp binary (default: PATH)
-	Journal      io.Writer // event feed destination (stdout in the guest)
-	Logf         func(string, ...any)
-	Now          func() time.Time
-	CancelGrace  time.Duration // how long a cancel waits for the executor to agree
-	StartTimeout time.Duration // initialize + session/new budget
-	TurnLimit    time.Duration // hard ceiling on one turn (0 = none)
+	SecretsDir string    // (default /run/box/secrets)
+	LocalDir   string    // files the driver copies in (default /etc/box/local)
+	PrimeAgent string    // prime-agent binary (default: PATH)
+	OpenCode   string    // opencode binary (default: PATH)
+	ClaudeACP  string    // claude-code-acp binary (default: PATH)
+	Journal    io.Writer // event feed destination (stdout in the guest)
+	// ProgressEvery is how long a running turn may be silent in the journal
+	// before it writes a progress line (default two minutes).
+	ProgressEvery time.Duration
+	Logf          func(string, ...any)
+	Now           func() time.Time
+	CancelGrace   time.Duration // how long a cancel waits for the executor to agree
+	StartTimeout  time.Duration // initialize + session/new budget
+	TurnLimit     time.Duration // hard ceiling on one turn (0 = none)
 }
 
 func (c DaemonConfig) logf(format string, args ...any) {
@@ -118,7 +121,7 @@ type Manager struct {
 func NewManager(cfg DaemonConfig) (*Manager, error) {
 	cfg = cfg.withDefaults()
 	if err := prepareExecutorDirs(cfg); err != nil {
-		cfg.logf("boxd: executor secrets: %v", err)
+		cfg.logf("executor secrets: %v", err)
 	}
 	store, err := NewStore(cfg.StateDir)
 	if err != nil {
@@ -182,7 +185,7 @@ func (m *Manager) load() error {
 		m.order = append(m.order, s.meta.ID)
 	}
 	if len(st.Sessions) > 0 {
-		m.cfg.logf("boxd: loaded %d session(s) from %s", len(st.Sessions), m.cfg.StateDir)
+		m.cfg.logf("loaded %d session(s) from %s", len(st.Sessions), m.cfg.StateDir)
 	}
 	return nil
 }
@@ -209,7 +212,7 @@ func (m *Manager) persist(_ *session) {
 	}
 	m.mu.Unlock()
 	if err := m.store.Save(st); err != nil {
-		m.cfg.logf("boxd: save state: %v", err)
+		m.cfg.logf("save state: %v", err)
 	}
 }
 
@@ -306,6 +309,10 @@ type eventLog struct {
 	session string
 	seq     int64
 	now     func() time.Time
+	// last is the latest event, which the progress line of a running turn
+	// names; saidAt is when the journal last heard of the session.
+	last   Event
+	saidAt time.Time
 }
 
 func (l *eventLog) emit(kind string, turn int, summary string, data map[string]any) {
@@ -320,19 +327,86 @@ func (l *eventLog) emit(kind string, turn int, summary string, data map[string]a
 		Summary: oneLine(summary, 300),
 		Data:    data,
 	}
+	l.last = ev
+	l.saidAt = ev.TS
 	l.mu.Unlock()
 	// The feed file is best effort: an event that cannot be appended must not
 	// fail the call, and the journal line below still goes out.
 	if l.store != nil {
 		_ = l.store.AppendEvent(l.session, ev)
 	}
-	if l.journal != nil {
-		b, err := json.Marshal(ev)
-		if err == nil {
-			// The journal is a debug log next to the feed file, best effort
-			// like it: a line that cannot be written is dropped.
-			_, _ = l.journal.Write(append(b, '\n'))
-		}
+	l.journalLine(turn, kindLabel(kind), ev.Summary)
+}
+
+// journalLine writes one line for a person to the journal, which is what the
+// box's task log in Nomad shows: the session, the turn and what happened. The
+// feed file keeps the structured event; the journal is for reading, best effort
+// like the feed: a line that cannot be written is dropped.
+func (l *eventLog) journalLine(turn int, what, summary string) {
+	if l.journal == nil {
+		return
+	}
+	line := fmt.Sprintf("session %s", l.session)
+	if turn > 0 {
+		line += fmt.Sprintf(" turn %d", turn)
+	}
+	// A summary that names the turn already ("turn 3 started: ...") needs no
+	// label in front of it.
+	switch {
+	case summary == "":
+		line += ": " + what
+	case strings.HasPrefix(summary, "turn "):
+		line += ": " + strings.TrimPrefix(summary, fmt.Sprintf("turn %d ", turn))
+	default:
+		line += ": " + what + ": " + summary
+	}
+	_, _ = io.WriteString(l.journal, line+"\n")
+}
+
+// progress writes the line that says a turn is still running, how long it has
+// run and what it did last, when the session has been silent for quiet: a turn
+// whose agent is busy calling tools says enough by itself.
+func (l *eventLog) progress(turn int, started time.Time, quiet time.Duration) {
+	l.mu.Lock()
+	last := l.last
+	said := l.saidAt
+	l.mu.Unlock()
+	now := l.now()
+	if now.Sub(said) < quiet {
+		return
+	}
+	l.mu.Lock()
+	l.saidAt = now
+	l.mu.Unlock()
+	summary := fmt.Sprintf("running for %s", now.Sub(started).Round(time.Second))
+	if last.Turn == turn && last.Kind != KindTurnStart && last.Summary != "" {
+		summary += fmt.Sprintf("; last, %s ago, %s: %s", now.Sub(last.TS).Round(time.Second),
+			kindLabel(last.Kind), oneLine(last.Summary, 160))
+	} else {
+		summary += "; waiting for the model's first answer"
+	}
+	l.journalLine(turn, "still working", summary)
+}
+
+// kindLabel is an event kind in the words of a journal line.
+func kindLabel(kind string) string {
+	switch kind {
+	case KindTurnStart:
+		return "started"
+	case KindMessage:
+		return "the agent says"
+	case KindTool:
+		return "tool"
+	case KindToolResult:
+		return "tool finished"
+	case KindTurnEnd:
+		return "finished"
+	case KindExecutorExit:
+		return "executor exited"
+	case KindExecutorRestart:
+		return "executor restarted"
+	default:
+		return kind
 	}
 }
 
@@ -369,7 +443,7 @@ func (m *Manager) NewSession(executor, model, cwd, title string) (Session, error
 	// boxd has started, so the executor directories are checked again here: a
 	// session is the first moment boxd can see them.
 	if err := prepareExecutorDirs(m.cfg); err != nil {
-		m.cfg.logf("boxd: executor secrets: %v", err)
+		m.cfg.logf("executor secrets: %v", err)
 	}
 	if _, err := buildExecutor(executor, m.cfg); err != nil {
 		return Session{}, err
@@ -578,6 +652,7 @@ func (s *session) runTurn(ts *turnState, prompt string) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	go s.reportProgress(ctx, ts.Turn.Turn)
 	if m.cfg.TurnLimit > 0 {
 		var stop context.CancelFunc
 		ctx, stop = context.WithTimeout(ctx, m.cfg.TurnLimit)
@@ -601,6 +676,27 @@ func (s *session) runTurn(ts *turnState, prompt string) {
 		state = TurnCancelled
 	}
 	s.finishTurn(ts, state, stop, text, "")
+}
+
+// reportProgress writes a progress line whenever the session has been silent
+// for ProgressEvery, until ctx ends, so the task log says a long turn is alive
+// and what it last did.
+func (s *session) reportProgress(ctx context.Context, turn int) {
+	every := s.m.cfg.ProgressEvery
+	if every <= 0 {
+		every = 2 * time.Minute
+	}
+	started := s.m.cfg.now()
+	ticker := time.NewTicker(every / 4)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.log.progress(turn, started, every)
+		}
+	}
 }
 
 func promptErrorSentence(err error, p *proc) string {
@@ -975,7 +1071,7 @@ func (s *session) ensureExecutor() (*proc, bool, error) {
 		logFile.Close()
 		return nil, false, Errorf(CodeExecutor, "start %s: %v", meta.Executor, err)
 	}
-	s.m.cfg.logf("boxd: session %s: started %s pid %d", meta.ID, argv[0], client.Pid())
+	s.m.cfg.logf("session %s: started %s pid %d", meta.ID, argv[0], client.Pid())
 
 	startCtx, cancel := context.WithTimeout(context.Background(), s.m.cfg.StartTimeout)
 	defer cancel()

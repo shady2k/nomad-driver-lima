@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/nomad/plugins/drivers"
@@ -36,6 +37,16 @@ func (d *Driver) startGuestLogs(parent context.Context, h *taskHandle) {
 		defer closeWriter(stderr)
 		if stdout == nil && stderr == nil {
 			return
+		}
+		if stderr != nil {
+			h.mu.Lock()
+			h.logErr = stderr
+			h.mu.Unlock()
+			defer func() {
+				h.mu.Lock()
+				h.logErr = nil
+				h.mu.Unlock()
+			}()
 		}
 		for {
 			if ctx.Err() != nil {
@@ -131,4 +142,52 @@ func writerOrDiscard(w io.WriteCloser) io.Writer {
 		return io.Discard
 	}
 	return w
+}
+
+// logTimeLayout is the time a line of the task log starts with; boxd's journal
+// lines use the same (boxd.TimeLayout), so the two read as one log.
+const logTimeLayout = "2006-01-02 15:04:05 UTC"
+
+// noteExec writes one line about a command run in the guest to the task's
+// stderr, so `nomad alloc logs -stderr` and the UI show what was done in the
+// box besides its sessions. The command is cut short: the line says what ran,
+// not what it carried.
+func (h *taskHandle) noteExec(format string, args ...any) {
+	h.mu.RLock()
+	w := h.logErr
+	h.mu.RUnlock()
+	if w == nil {
+		return
+	}
+	line := fmt.Sprintf("%s box exec: %s\n", time.Now().UTC().Format(logTimeLayout), fmt.Sprintf(format, args...))
+	_, _ = io.WriteString(w, line)
+}
+
+// execLabel is a command line as noteExec shows it.
+func execLabel(command []string) string {
+	s := strings.Join(command, " ")
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 200 {
+		s = s[:200] + "..."
+	}
+	return s
+}
+
+// execProgressEvery is how often a guest command that is still running is
+// noted, so a long build or test run is not silence in the task log.
+const execProgressEvery = 2 * time.Minute
+
+// noteExecProgress notes a running guest command every execProgressEvery until
+// done is closed.
+func (h *taskHandle) noteExecProgress(label string, started time.Time, done <-chan struct{}) {
+	ticker := time.NewTicker(execProgressEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			h.noteExec("still running after %s: %s", time.Since(started).Round(time.Second), label)
+		}
+	}
 }

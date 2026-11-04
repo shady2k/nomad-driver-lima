@@ -1,11 +1,14 @@
 package driver
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -603,4 +606,72 @@ func TestTaskConfigCannotSetNodeSettings(t *testing.T) {
 	for _, key := range []string{"limactl", "lima_home", "image_cache_dir", "runtime_user", "memory_limit"} {
 		require.Contains(t, plugin.Object.Attributes, key)
 	}
+}
+
+// TestExecReturnsWhenStdinStaysOpen: a caller whose stdin never ends (an
+// agent's shell) still gets the exit of a command that does not read it.
+func TestExecReturnsWhenStdinStaysOpen(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	vol := filepath.Join(t.TempDir(), "volume")
+	require.NoError(t, os.MkdirAll(vol, 0o755))
+	url := fakelima.ImageServer(t, "IMAGE")
+	tc := taskConfig(t, vol)
+	require.NoError(t, tc.EncodeConcreteDriverConfig(startConfig(t, url, sha256Hex("IMAGE"))))
+	_, _, err := d.StartTask(tc)
+	require.NoError(t, err)
+
+	// The exec is noted in the task's stderr, which the guest logs hold open.
+	var notes syncBuffer
+	h := d.tasks.Get(tc.ID)
+	h.mu.Lock()
+	h.logErr = &notes
+	h.mu.Unlock()
+
+	stdin, keepOpen := io.Pipe()
+	defer keepOpen.Close()
+	var out bytes.Buffer
+	done := make(chan *drivers.ExitResult, 1)
+	go func() {
+		res, err := d.ExecTaskStreaming(context.Background(), tc.ID, &drivers.ExecOptions{
+			Command: []string{"true"},
+			Stdin:   stdin,
+			Stdout:  nopWriteCloser{&out},
+			Stderr:  nopWriteCloser{io.Discard},
+		})
+		require.NoError(t, err)
+		done <- res
+	}()
+	select {
+	case res := <-done:
+		require.Equal(t, 0, res.ExitCode)
+		require.Nil(t, res.Err, "an exec whose stdin is still open is not a failure")
+		require.Contains(t, out.String(), "fake shell ok")
+		require.Contains(t, notes.String(), "started: true")
+		require.Contains(t, notes.String(), "exit 0 after")
+	case <-time.After(execWaitDelay + 10*time.Second):
+		t.Fatal("exec did not return while its stdin stayed open")
+	}
+}
+
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
+
+// syncBuffer is a bytes.Buffer safe for the writer goroutines of an exec.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

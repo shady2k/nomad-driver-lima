@@ -407,22 +407,29 @@ func TestEndToEnd(t *testing.T) {
 	if len(lines) < 10 {
 		t.Fatalf("journal has %d lines", len(lines))
 	}
+	// The journal is for people: one line per event, naming its session; the
+	// structured events are in events.jsonl.
 	parsed := 0
 	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		var ev map[string]any
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Fatalf("journal line is not JSON: %q", line)
+		stamp, rest, ok := strings.Cut(line, " UTC ")
+		if _, err := time.Parse("2006-01-02 15:04:05", stamp); !ok || err != nil {
+			t.Fatalf("journal line does not start with its time: %q", line)
 		}
-		if ev["kind"] == nil || ev["seq"] == nil || ev["session"] == nil {
-			t.Fatalf("journal event lacks contract fields: %v", ev)
+		if !strings.HasPrefix(rest, "session s-") {
+			t.Fatalf("journal line does not name its session: %q", line)
 		}
 		parsed++
 	}
 	if parsed < 10 {
 		t.Fatalf("only %d journal events", parsed)
+	}
+	for _, want := range []string{" turn 1: started: ", " turn 1: finished", ": tool: "} {
+		if !strings.Contains(journal, want) {
+			t.Fatalf("journal lacks %q:\n%s", want, journal)
+		}
 	}
 
 	// --- unknown ids and usage errors ---------------------------------------
