@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -155,4 +156,50 @@ func TestEnsureDirCreatesWithMode(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, st.IsDir())
 	require.Equal(t, os.FileMode(0o700), st.Mode().Perm(), "the umask must not narrow the mode")
+}
+
+// TestEnsureDirSetsEveryLevelsMode checks the levels EnsureDir makes on the way
+// to the leaf, not only the leaf: a directory the driver creates as the parent of
+// a Lima home is walked by limactl, and the umask of the client (077 on a
+// hardened node) must not narrow it.
+func TestEnsureDirSetsEveryLevelsMode(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+
+	id := &Identity{Name: "box", UID: os.Geteuid(), GID: os.Getegid()}
+	root := t.TempDir()
+	dir := filepath.Join(root, "a", "b", "c")
+	require.NoError(t, id.EnsureDir(dir, 0o711))
+	for _, level := range []string{"a", filepath.Join("a", "b"), filepath.Join("a", "b", "c")} {
+		st, err := os.Stat(filepath.Join(root, level))
+		require.NoError(t, err, "%s must exist", level)
+		require.Equal(t, os.FileMode(0o711), st.Mode().Perm(),
+			"%s is a level the runtime user walks, so the umask must not narrow it either", level)
+	}
+}
+
+// TestEnsureDirGivesEveryLevelToTheIdentity checks the owner of each level. Only
+// a root driver hands a directory to another user (without root the identity is
+// the caller's own, and Chown does nothing), so this test needs root.
+func TestEnsureDirGivesEveryLevelToTheIdentity(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("giving a directory to another user needs a root driver")
+	}
+	u, err := user.Lookup("nobody")
+	require.NoError(t, err)
+	uid, err := strconv.Atoi(u.Uid)
+	require.NoError(t, err)
+	gid, err := strconv.Atoi(u.Gid)
+	require.NoError(t, err)
+	id := &Identity{Name: u.Username, UID: uid, GID: gid, Home: u.HomeDir}
+	// A parent of the Lima home that does not exist yet: the driver makes it, and
+	// it is the level that stopped limactl when it stayed root's.
+	root := filepath.Join(t.TempDir(), "box")
+	dir := filepath.Join(root, "lima")
+	require.NoError(t, id.EnsureDir(dir, 0o700))
+	for _, level := range []string{root, dir} {
+		owned, err := id.Owns(level)
+		require.NoError(t, err)
+		require.True(t, owned, "%s must belong to %s: limactl enters every level of its Lima home", level, id.Name)
+	}
 }

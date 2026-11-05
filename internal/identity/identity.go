@@ -228,15 +228,69 @@ func (i *Identity) Owns(path string) (bool, error) {
 	return uid == i.UID, nil
 }
 
-// EnsureDir creates dir and its parents with mode and gives it to the identity.
-// An existing directory keeps its content and gets the same owner and mode, so a
-// Lima home or an image cache created before the driver was configured is
-// usable as soon as the driver starts.
+// EnsureDir creates dir and its parents with mode and gives every level it
+// creates to the identity. An existing directory keeps its content and gets the
+// same owner and mode, so a Lima home or an image cache created before the
+// driver was configured is usable as soon as the driver starts.
+//
+// Each new level belongs to the runtime user, not only the last one: a parent of
+// a Lima home is a directory limactl walks as that user, and one left to the
+// driver stops every limactl call. Measured with a lima_home of
+// <dir>/lima whose parent did not exist yet: os.MkdirAll made the parent 0700
+// and root's, and the fingerprint failed with "cannot evaluate symlinks in
+// <dir>/lima: permission denied". A level that is already there keeps its owner:
+// /var/lib is not the driver's to give away.
 func (i *Identity) EnsureDir(dir string, mode os.FileMode) error {
-	if err := os.MkdirAll(dir, mode); err != nil {
+	dir = filepath.Clean(dir)
+	levels, err := missingDirs(dir)
+	if err != nil {
+		return err
+	}
+	// From the nearest existing level down, so every parent is in place and
+	// belongs to the user the next level is for.
+	for k := len(levels) - 1; k >= 0; k-- {
+		if err := i.makeDir(levels[k], mode); err != nil {
+			return err
+		}
+	}
+	// The leaf is set even when it existed already. Mkdir applies the umask, so
+	// the mode is set explicitly.
+	if err := os.Chmod(dir, mode); err != nil {
+		return fmt.Errorf("set the mode of %s: %w", dir, err)
+	}
+	return i.Chown(dir)
+}
+
+// missingDirs returns the levels of dir that do not exist, deepest first, down to
+// the nearest one that does.
+func missingDirs(dir string) ([]string, error) {
+	var levels []string
+	for path := dir; ; {
+		_, err := os.Lstat(path)
+		if err == nil {
+			return levels, nil
+		}
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("look at %s: %w", path, err)
+		}
+		levels = append(levels, path)
+		parent := filepath.Dir(path)
+		if parent == path {
+			return levels, nil
+		}
+		path = parent
+	}
+}
+
+// makeDir creates one level, gives it its mode and hands it to the identity.
+//
+// A level that appeared between the Lstat of missingDirs and this call is one
+// another part of the driver made, and it is given the same owner and mode as if
+// this call had made it.
+func (i *Identity) makeDir(dir string, mode os.FileMode) error {
+	if err := os.Mkdir(dir, mode); err != nil && !os.IsExist(err) {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
-	// MkdirAll applies the umask, so set the mode explicitly.
 	if err := os.Chmod(dir, mode); err != nil {
 		return fmt.Errorf("set the mode of %s: %w", dir, err)
 	}
