@@ -223,6 +223,10 @@ starts, so no key lands on a disk.
   appear as `prime log ...` lines, a failed download names its URL. Retrying
   blind repeats the same wait; a closed session's background setup may still
   be running.
+- **`box run` returns when its command exits, and takes the command's output
+  with it.** A background process left writing to that output dies of SIGPIPE, so
+  start a daemon detached, with its output in a file:
+  `setsid nohup server </dev/null >/tmp/server.log 2>&1 &`.
 - **Inside the box everything is yours to fix.** Install what is missing, fix
   apt, rebuild a cache: `box run <id> -- sudo ...`. Report to the operator only
   what you cannot reach from inside: the VM, its credentials, the node.

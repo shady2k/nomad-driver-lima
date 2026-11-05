@@ -29,7 +29,11 @@ func (d *Driver) ExecTaskStreaming(ctx context.Context, taskID string, execOptio
 	if execOptions == nil || len(execOptions.Command) == 0 {
 		return nil, fmt.Errorf("exec needs a command")
 	}
-	cmd := d.boxm.Lima().ShellCmd(ctx, h.boxID, execOptions.Command)
+	command := execOptions.Command
+	if !execOptions.Tty {
+		command = relayedCommand(command)
+	}
+	cmd := d.boxm.Lima().ShellCmd(ctx, h.boxID, command)
 	if quietExec(execOptions.Command) {
 		if execOptions.Tty {
 			return d.execWithTTY(ctx, cmd, execOptions)
@@ -51,6 +55,32 @@ func (d *Driver) ExecTaskStreaming(ctx context.Context, taskID string, execOptio
 	res, err := d.execPipes(cmd, execOptions)
 	h.noteExecEnd(label, started, res, err)
 	return res, err
+}
+
+// guestRelay runs a command in the guest with its output going through two cats
+// that end with it. ssh keeps a session open while anything holds its stdout or
+// stderr, so a daemon a command left in the background would hold the exec until
+// it exits, however long after the command itself. The daemon holds a fifo here
+// instead. Without a place for the fifos (a full disk is when `df` matters most)
+// the command runs as it is.
+const guestRelay = `d=$(mktemp -d 2>/dev/null) && mkfifo "$d/o" "$d/e" 2>/dev/null || exec "$@"
+cat "$d/o" & o=$!
+cat "$d/e" >&2 & e=$!
+"$@" >"$d/o" 2>"$d/e"
+c=$?
+(sleep ` + guestRelayGrace + `; kill $o $e) </dev/null >/dev/null 2>&1 & t=$!
+wait $o $e 2>/dev/null
+kill $t 2>/dev/null
+rm -rf "$d"
+exit $c`
+
+// guestRelayGrace is how long the relay reads what is left once the command has
+// exited, for a stream a background process keeps open.
+const guestRelayGrace = "2"
+
+// relayedCommand wraps a guest command in guestRelay.
+func relayedCommand(command []string) []string {
+	return append([]string{"sh", "-c", guestRelay, "box-exec"}, command...)
 }
 
 // quietExec reports whether a command only reads boxd's state: the CLI's
@@ -104,8 +134,8 @@ func (d *Driver) execPipes(cmd *exec.Cmd, execOptions *drivers.ExecOptions) (*dr
 			_ = in.Close()
 		}()
 	}
-	// A child in the guest that keeps stdout open after the command exits must
-	// not hold the exec either.
+	// guestRelay is what ends a stream a child in the guest keeps open; this is
+	// the bound for the host's own side.
 	cmd.WaitDelay = execWaitDelay
 	err := cmd.Run()
 	if errors.Is(err, exec.ErrWaitDelay) {
