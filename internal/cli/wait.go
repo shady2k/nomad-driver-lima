@@ -287,6 +287,23 @@ func allocFailureText(alloc *api.Allocation) string {
 	if task == nil {
 		return oneLine(alloc.ClientDescription, 300)
 	}
+	// The driver's own words first: a task that fails ends with Nomad's "Not
+	// Restarting: Policy allows no restarts", which says what Nomad did and not
+	// why the work stopped. The driver's event is the one that names the cause
+	// ("proj-1 amd64 is published in this store, and a published version never
+	// changes"), so it wins over anything Nomad adds after it.
+	for i := len(task.Events) - 1; i >= 0; i-- {
+		event := task.Events[i]
+		if event == nil || event.Type != "Driver" {
+			continue
+		}
+		if v := strings.TrimSpace(event.Details["message"]); v != "" {
+			return oneLine(v, 300)
+		}
+		if event.DisplayMessage != "" {
+			return oneLine(event.DisplayMessage, 300)
+		}
+	}
 	for i := len(task.Events) - 1; i >= 0; i-- {
 		event := task.Events[i]
 		if event == nil {

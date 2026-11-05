@@ -116,12 +116,22 @@ func RenderBakeJob(spec BakeJobSpec) (*api.Job, error) {
 				Attempts: intPtr(0),
 				Mode:     strPtr("fail"),
 			},
+			// The disk is mounted read-write, and the task only reads it: the
+			// driver converts it with `qemu-img convert`, which opens its source
+			// read-only, and writes the image into the node's cache.
+			//
+			// It cannot be asked for read-only, although that is what it is: Nomad
+			// schedules a read-only request of a dynamic host volume only when the
+			// volume offers a read-only access mode (a request with an unknown mode
+			// becomes single-node-reader-only), and the box-volume plugin registers
+			// single-node-writer. Such a job is never placed -- "missing compatible
+			// host volumes" -- and a bake would wait until its timeout.
 			Volumes: map[string]*api.VolumeRequest{
 				boxDiskVolume: {
 					Name:     boxDiskVolume,
 					Type:     "host",
 					Source:   BoxVolumeName(spec.BoxID),
-					ReadOnly: true,
+					ReadOnly: false,
 				},
 			},
 			Tasks: []*api.Task{task},
@@ -209,8 +219,10 @@ func RenderPublishJob(spec PublishJobSpec) (*api.Job, error) {
 	}, nil
 }
 
-// storeDirInTask is where the store's files land in the task directory. The driver
-// reads them from the task's secrets directory; nothing is in the job but names.
+// storeDirInTask is where the store's files land below the task's secrets
+// directory. The driver reads them from there, and Nomad puts a file below the
+// secrets directory only when the template's destination names it; nothing is in
+// the job but names.
 const storeDirInTask = "store"
 
 // storeTemplateKeys are the items of the store Variable a publish renders, in the
@@ -235,7 +247,12 @@ func storeTemplates(items []ExecutorItem) []*api.Template {
 		if !ok {
 			continue
 		}
-		dest := storeDirInTask + "/" + templateDestKey(key)
+		// "secrets/" is not decoration: a template destination is relative to the
+		// task's local directory, so a file without it lands outside the secrets
+		// directory, where the driver does not look (measured: every publish job
+		// failed with "this node has no image store configured: the task's secrets
+		// carry no store/url").
+		dest := boxSecretsDirInTask + "/" + storeDirInTask + "/" + templateDestKey(key)
 		if seen[dest] {
 			// A plain token and a token template both render to store/token: the
 			// template item wins, because it is the one that holds no value.

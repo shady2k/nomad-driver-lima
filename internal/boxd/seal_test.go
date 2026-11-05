@@ -142,6 +142,13 @@ func (g *sealGuest) fill(t *testing.T) {
 	g.write(t, "home/user/notes.txt", "keep me\n")
 	// The credential itself, in the secrets directory on the tmpfs.
 	g.write(t, "run/box/secrets/prime/auth.json", `{"acme":{"type":"api_key","key":"`+sealCredential+`"}}`)
+	// boxd's own copies, derived from the secrets directory into the runtime
+	// directory (a tmpfs) so an executor can write its settings: they are boxd's,
+	// and a seal forgets them.
+	g.write(t, "run/boxd/executors/prime/auth.json", `{"acme":{"type":"api_key","key":"`+sealCredential+`"}}`)
+	g.write(t, "run/boxd/executors/prime/settings.json", `{"model":"acme/large"}`)
+	g.write(t, "run/boxd/executors/prime/logs/executor.log", "log line\n")
+	g.write(t, "run/boxd/executors/opencode-config/opencode.json", `{"model":"acme/large"}`)
 	// The state a boot leaves behind.
 	g.write(t, "tmp/build.log", "log\n")
 	g.write(t, "var/tmp/scratch", "x\n")
@@ -260,6 +267,11 @@ func TestSealRemovesTheWorkAndKeepsTheCaches(t *testing.T) {
 		"etc/systemd/system/etc-box-local.mount",
 		"etc/systemd/system/opt-box.mount",
 		"etc/systemd/system/multi-user.target.wants/etc-box-local.mount",
+		// boxd's own copies of the credentials, on the tmpfs: the seal forgets
+		// them, and guest/no-secrets.sh asks a sealed box for them.
+		"run/boxd/executors/prime/auth.json",
+		"run/boxd/executors/prime/settings.json",
+		"run/boxd/executors/opencode-config",
 	} {
 		if g.exists(gone) {
 			t.Errorf("%s is still in the image", gone)
@@ -272,6 +284,9 @@ func TestSealRemovesTheWorkAndKeepsTheCaches(t *testing.T) {
 		"home/user/notes.txt",
 		"etc/ssh/sshd_config",
 		"opt/box/lib/no-secrets.sh",
+		// The driver's copy is the read-only mount of the host's tmpfs; the seal
+		// does not touch it.
+		"run/box/secrets/prime/auth.json",
 	} {
 		if !g.exists(kept) {
 			t.Errorf("%s was deleted; an image keeps it", kept)

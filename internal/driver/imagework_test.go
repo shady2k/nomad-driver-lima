@@ -278,6 +278,10 @@ type fakeStore struct {
 	// with HTTP 413, the way a proxy in front of a store applies a body-size
 	// limit: the publisher has to send the same bytes in chunked form.
 	refuseDeclaredSize bool
+	// closeOnDeclaredRefusal closes the connection right after the 413, which is
+	// what a proxy does: the body is still being written, so the client sees a
+	// write error and never the status.
+	closeOnDeclaredRefusal bool
 	// declaredRefusals counts the PUTs refused for their declared size, and
 	// chunkedUploads the PUTs that arrived without a size.
 	declaredRefusals int
@@ -317,6 +321,13 @@ func (s *fakeStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} else if s.refuseDeclaredSize {
 				s.declaredRefusals++
 				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				if s.closeOnDeclaredRefusal {
+					if hj, ok := w.(http.Hijacker); ok {
+						if conn, _, err := hj.Hijack(); err == nil {
+							_ = conn.Close()
+						}
+					}
+				}
 				return
 			}
 		}

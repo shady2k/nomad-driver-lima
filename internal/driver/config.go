@@ -213,12 +213,16 @@ type PublishConfig struct {
 
 // TaskConfig is the driver configuration of one box task.
 type TaskConfig struct {
-	BoxID           string      `codec:"box_id"`
-	Image           ImageConfig `codec:"image"`
-	CPUs            int         `codec:"cpus"`
-	MemoryMiB       int         `codec:"memory_mib"`
-	DiskGiB         int         `codec:"disk_gib"`
-	GuestLogCommand []string    `codec:"guest_log_command"`
+	BoxID string      `codec:"box_id"`
+	Image ImageConfig `codec:"image"`
+	// Recipe is the base64 recipe the box's image carries, as the job holds it.
+	// A box created from a project image passes it on, so a bake of that box
+	// records the recipe it came from; the driver itself does not use it.
+	Recipe          string   `codec:"recipe"`
+	CPUs            int      `codec:"cpus"`
+	MemoryMiB       int      `codec:"memory_mib"`
+	DiskGiB         int      `codec:"disk_gib"`
+	GuestLogCommand []string `codec:"guest_log_command"`
 	// FilesDirInGuest is the root of the task's local/ directory in the guest:
 	// its files land in <FilesDirInGuest>/local. Job files are not secrets, so
 	// they live on the box disk.
@@ -241,8 +245,14 @@ type TaskConfig struct {
 
 // taskConfigSpec is the HCL schema of the task's driver block.
 var taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
-	"box_id": hclspec.NewAttr("box_id", "string", true),
-	"image": hclspec.NewBlock("image", true, hclspec.NewObject(map[string]*hclspec.Spec{
+	// Optional, and required of a box task by applyDefaults: a publish job is not a
+	// box and carries no id.
+	"box_id": hclspec.NewAttr("box_id", "string", false),
+	// Optional, because a bake and a publish run no VM: a box task is the one that
+	// must carry it, and applyDefaults refuses one that does not (`image.url is
+	// required`). A required block here refused the bake and publish jobs of every
+	// build with "Missing image block" before the driver ever ran one.
+	"image": hclspec.NewBlock("image", false, hclspec.NewObject(map[string]*hclspec.Spec{
 		"url":    hclspec.NewAttr("url", "string", true),
 		"sha256": hclspec.NewAttr("sha256", "string", true),
 	})),
@@ -291,6 +301,10 @@ var taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 		"arch":    hclspec.NewAttr("arch", "string", true),
 		"sha256":  hclspec.NewAttr("sha256", "string", true),
 	})),
+	// The recipe the box's image carries, base64: the job is where a box keeps
+	// it, so a box baked again, or rebuilt on a newer parent, replays the script
+	// it came from. The driver passes it through and never reads it.
+	"recipe": hclspec.NewAttr("recipe", "string", false),
 })
 
 // applyDefaults fills the optional fields and validates the required ones.
@@ -319,13 +333,14 @@ func (c *TaskConfig) applyDefaults() error {
 	if !strings.HasPrefix(filepath.Clean(c.SecretsDirInGuest), "/run/") {
 		return fmt.Errorf("secrets_dir_in_guest %q must be below /run: the executor credentials live on the guest's tmpfs and must never reach the box disk", c.SecretsDirInGuest)
 	}
-	if c.BoxID == "" {
-		return fmt.Errorf("box_id is required")
-	}
 	// A bake and a publish run no VM, so the image, cpus, memory and disk of a box
-	// do not apply to them, and their own block is what has to be usable.
+	// do not apply to them, and their own block is what has to be usable. Neither
+	// has a box id either: a publish is not a box at all.
 	if c.Bake != nil || c.Publish != nil {
 		return c.validateImageWork()
+	}
+	if c.BoxID == "" {
+		return fmt.Errorf("box_id is required")
 	}
 	if c.Image.URL == "" {
 		return fmt.Errorf("image.url is required")

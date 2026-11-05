@@ -98,7 +98,8 @@ func TestUnitFile(t *testing.T) {
 		"--runtime-dir /run/boxd",
 		"--secrets-dir /run/box/secrets",
 		"--local-dir /etc/box/local",
-		"RequiresMountsFor=/opt/box /run/box/secrets /etc/box/local",
+		"ExecStartPre=/bin/sh -c 'for i in $$(seq 1 300); do mountpoint -q /opt/box && mountpoint -q /run/box/secrets && mountpoint -q /etc/box/local",
+		"TimeoutStartSec=330",
 		"Environment=PATH=/opt/box/bin:",
 		"Restart=always",
 		"StateDirectory=boxd",
@@ -119,7 +120,8 @@ func TestUnitFile(t *testing.T) {
 	installed := []string{
 		"ExecStart=/usr/local/bin/boxd",
 		"--state-dir /var/lib/boxd",
-		"RequiresMountsFor=/run/box/secrets /etc/box/local",
+		"ExecStartPre=/bin/sh -c 'for i in $$(seq 1 300); do mountpoint -q /run/box/secrets && mountpoint -q /etc/box/local",
+		"TimeoutStartSec=330",
 		"Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"Restart=always",
 		"StateDirectory=boxd",
@@ -135,5 +137,16 @@ func TestUnitFile(t *testing.T) {
 	}
 	if strings.Contains(InstalledUnitFile, "/opt/box") {
 		t.Errorf("the installed unit belongs to an image without a bundle, so it must not name /opt/box:\n%s", InstalledUnitFile)
+	}
+	// The mounts of a box arrive after the boot: Lima writes the fstab lines of an
+	// instance and mounts the shares once the guest answers, a baked image
+	// carries no line for them at all, and a box whose bundle moved carries the
+	// lines of the instance before it. A unit that required those mount units was
+	// refused at local-fs time and never ran at all (measured after `box
+	// upgrade`: the box came up with no daemon).
+	for _, unit := range []string{UnitFile, InstalledUnitFile} {
+		if strings.Contains(unit, "RequiresMountsFor=") || strings.Contains(unit, "WantsMountsFor=") {
+			t.Errorf("a unit must wait for its mounts instead of requiring them, because they arrive after the boot:\n%s", unit)
+		}
 	}
 }

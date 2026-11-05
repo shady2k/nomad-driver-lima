@@ -113,7 +113,14 @@ func TestBakeSealsStopsAndBakes(t *testing.T) {
 	require.Equal(t, "bake", job.Meta[boxWorkMarker])
 	group := job.TaskGroups[0]
 	require.Equal(t, BoxVolumeName("dev1"), group.Volumes[boxDiskVolume].Source)
-	require.True(t, group.Volumes[boxDiskVolume].ReadOnly, "a bake only reads the disk")
+	// Read-write, although the task only reads: Nomad places a read-only request
+	// of a dynamic host volume only when the volume offers a read-only access
+	// mode, and this volume is single-node-writer -- a read-only bake job is
+	// never placed at all.
+	require.False(t, group.Volumes[boxDiskVolume].ReadOnly,
+		"Nomad cannot mount a single-node-writer host volume read-only")
+	require.Empty(t, group.Volumes[boxDiskVolume].AccessMode,
+		"a host volume request leaves the mode to the scheduler")
 	task, err := boxTask(ta.workJob)
 	require.NoError(t, err)
 	bake, ok := task.Config["bake"].(map[string]any)

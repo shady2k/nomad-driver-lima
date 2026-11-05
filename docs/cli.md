@@ -167,8 +167,10 @@ The steps, in this order:
    message.
 2. `box stop` the box. A sealed box is not started again: it is an empty, clean
    machine with the image's files, not the work.
-3. The batch job `box-bake-<id>`, which mounts the box's volume read-only -- the
-   volume also places the job on the node that holds the disk. It runs no VM: it
+3. The batch job `box-bake-<id>`, which mounts the box's volume -- the volume also
+   places the job on the node that holds the disk. The mount is read-write because
+   Nomad does not place a read-only request on a `single-node-writer` host volume;
+   the task reads the disk and writes only the image in the cache. It runs no VM: it
    compresses the disk with `qemu-img` and records the image. A node without
    `qemu-img` fails it with a sentence.
 4. The job is purged, and the result is printed: version, sha256, size, node, and

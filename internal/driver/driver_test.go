@@ -616,6 +616,47 @@ func TestTaskConfigCannotSetNodeSettings(t *testing.T) {
 	}
 }
 
+// TestTaskConfigImageBlockIsOptional: a bake and a publish run no VM, so they
+// carry no image block, and a required one refused every bake and publish job
+// with "Missing image block" before the driver ran it. A box task still cannot
+// start without one (TestTaskConfigValidate).
+func TestTaskConfigImageBlockIsOptional(t *testing.T) {
+	obj, ok := taskConfigSpec.Block.(*hclspec.Spec_Object)
+	require.True(t, ok, "the task config is an object spec")
+	image, ok := obj.Object.Attributes["image"]
+	require.True(t, ok, "the task config has an image block")
+	block, ok := image.Block.(*hclspec.Spec_BlockValue)
+	require.True(t, ok, "image is a block")
+	require.False(t, block.BlockValue.Required,
+		"a bake and a publish carry no image, so the block must be optional")
+	// The recipe a box's image carries travels in the same task config, and the
+	// spec must accept it: a box created from a project image carries it, and a
+	// driver without the attribute refused the whole job with
+	// `No argument or block type is named "recipe"`.
+	recipe, ok := obj.Object.Attributes["recipe"]
+	require.True(t, ok, "the task config carries the image's recipe")
+	attr, ok := recipe.Block.(*hclspec.Spec_Attr)
+	require.True(t, ok, "recipe is an attribute")
+	require.False(t, attr.Attr.Required, "an image without a recipe has none to carry")
+
+	err := (&TaskConfig{BoxID: "box1", CPUs: 1, MemoryMiB: 1, DiskGiB: 1}).applyDefaults()
+	require.EqualError(t, err, "image.url is required", "a box task still needs its image")
+	require.NoError(t, (&TaskConfig{BoxID: "box1", Bake: &BakeConfig{
+		Name: "proj", Version: "proj-1", Arch: "amd64"}}).applyDefaults())
+	// A publish is not a box: no box id, and the schema must not demand one (the
+	// real driver refused every publish job with `The argument "box_id" is
+	// required`).
+	boxID, ok := obj.Object.Attributes["box_id"]
+	require.True(t, ok)
+	boxIDAttr, ok := boxID.Block.(*hclspec.Spec_Attr)
+	require.True(t, ok, "box_id is an attribute")
+	require.False(t, boxIDAttr.Attr.Required, "a publish job carries no box id")
+	require.NoError(t, (&TaskConfig{Publish: &PublishConfig{
+		Version: "proj-1", Arch: "amd64", SHA256: strings.Repeat("a", 64)}}).applyDefaults())
+	require.EqualError(t, (&TaskConfig{}).applyDefaults(), "box_id is required",
+		"a box task still needs its box id")
+}
+
 // TestExecReturnsWhenStdinStaysOpen: a caller whose stdin never ends (an
 // agent's shell) still gets the exit of a command that does not read it.
 func TestExecReturnsWhenStdinStaysOpen(t *testing.T) {

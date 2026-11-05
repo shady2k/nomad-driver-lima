@@ -471,7 +471,20 @@ func (p *publisher) authorize(req *http.Request) {
 // what proves the store kept exactly the bytes it was sent.
 func (p *publisher) putFile(ctx context.Context, url, path string, size int64) error {
 	status, body, err := p.put(ctx, url, path, size)
-	if err != nil {
+	if err != nil && size > 0 {
+		// A proxy that applies a body-size limit answers 413 and closes the
+		// connection while the body is still being written, so the upload ends
+		// in a write error ("sendfile: broken pipe") and no status at all. The
+		// same bytes in chunked form carry no size to refuse, so one retry is
+		// what tells a refused size from a broken store. Measured against a
+		// store that closes on a declared size: without the retry every publish
+		// of a real image (847 MiB) stopped here.
+		p.emit("publish", fmt.Sprintf("The store closed the connection while %d bytes were being sent: uploading in chunked form", size))
+		status, body, err = p.put(ctx, url, path, -1)
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
 		return err
 	}
 	if status == http.StatusRequestEntityTooLarge && size > 0 {

@@ -318,7 +318,12 @@ func (s *sealer) run(req SealRequest) (SealResult, error) {
 	}
 	s.line("closing the box's sessions and stopping its executors")
 	closed := s.m.closeAllForSeal()
-	s.line("closed %d session(s); no executor runs in the box now", closed)
+	derived, err := s.m.forgetExecutorConfig()
+	if err != nil {
+		return s.fail("removing the executor configuration boxd derived", err)
+	}
+	s.line("closed %d session(s); no executor runs in the box now; removed %d file(s) of the executor "+
+		"configuration boxd derived from the credentials", closed, derived)
 
 	for _, step := range []struct {
 		what string
@@ -411,6 +416,50 @@ func (m *Manager) closeAllForSeal() int {
 	m.sealed = true
 	m.mu.Unlock()
 	return closed
+}
+
+// forgetExecutorConfig removes the copies boxd derived from the credentials: the
+// executor directories in the runtime directory (a tmpfs), where an agent's own
+// settings and the credentials it was started with live.
+//
+// The driver's own copies are the read-only mount of /run/box/secrets and stay
+// where they are; these are boxd's, and a sealed box keeps neither. They are on
+// the tmpfs, so no image carries them -- but guest/no-secrets.sh asks a sealed box
+// for them and fails the seal when it finds one, which is what makes the proof
+// mean something: boxd forgot the credential, and did not just leave it in a
+// place the image happens not to cover.
+func (m *Manager) forgetExecutorConfig() (int, error) {
+	dir := m.cfg.executorsDir()
+	if dir == "" {
+		return 0, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	removed := 0
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		err := filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() {
+				removed++
+			}
+			return nil
+		})
+		if err != nil {
+			return removed, err
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return removed, err
+		}
+	}
+	return removed, nil
 }
 
 // sealRecord builds the image record a seal writes, from the request.

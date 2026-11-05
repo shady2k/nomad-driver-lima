@@ -6,10 +6,20 @@ Wants=local-fs.target
 # The platform bundle, the task files and the executor credentials are
 # read-only mounts of the host (the box driver's files.go); boxd reads them as
 # it starts.
-RequiresMountsFor=/opt/box /run/box/secrets /etc/box/local
-
+#
+# They do not exist when local-fs runs, so this unit does not require their mount
+# units: Lima writes the fstab lines of an instance and mounts the shares only
+# once the guest answers, a baked image carries no line for them at all (the seal
+# removes it), and a box whose bundle moved carries the lines of the instance
+# before it -- the mount fails, and a unit that required it is refused before it
+# ever runs, which is a box that boots with no daemon and nothing in its log
+# saying why. The wait below is the same condition, held until it is true, and it
+# names what is still missing.
 [Service]
 Type=simple
+# The wait below needs more than the default 90s start timeout.
+TimeoutStartSec=330
+ExecStartPre=/bin/sh -c 'for i in $$(seq 1 300); do mountpoint -q /opt/box && mountpoint -q /run/box/secrets && mountpoint -q /etc/box/local && exit 0; sleep 1; done; echo "boxd: the node did not mount /opt/box, /run/box/secrets and /etc/box/local in 300s" >&2; exit 1'
 # Sessions and transcripts live on the box disk (/var/lib/boxd). Nothing secret
 # does: the executor credentials are /run/box/secrets, a read-only mount of the
 # box's files on the host's tmpfs, and everything boxd derives from them lives

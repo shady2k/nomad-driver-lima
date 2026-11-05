@@ -117,11 +117,14 @@ UNIT=$(systemctl cat boxd.service 2>/dev/null || true)
 if [[ $IMAGE_PLATFORM == mount ]]; then
   check "the stub unit runs the daemon of the platform bundle" "present" \
     "$(grep -q '^ExecStart=/opt/box/bin/boxd' <<<"$UNIT" && echo present || echo missing)"
-  # The unit's RequiresMountsFor names /opt/box among its mounts; the list is
-  # space-separated, so it is read as one, not matched with a word boundary.
-  UNIT_REQ=$(sed -n 's/^RequiresMountsFor=//p' <<<"$UNIT" | tr -s '[:space:]' ' ')
-  check "the stub unit requires the bundle's mount" "present" \
-    "$([[ $UNIT_REQ == *"/opt/box "* || $UNIT_REQ == *"/opt/box" ]] && echo present || echo missing)"
+  # The unit waits for /opt/box instead of requiring its mount unit: the mounts
+  # of a box arrive after the boot, and a unit that required them is refused at
+  # local-fs time (see internal/boxd/boxd.service).
+  UNIT_WAIT=$(sed -n 's/^ExecStartPre=//p' <<<"$UNIT")
+  check "the stub unit waits for the bundle's mount" "present" \
+    "$([[ $UNIT_WAIT == *"/opt/box"* ]] && echo present || echo missing)"
+  check "the stub unit requires no mount that arrives after the boot" "absent" \
+    "$(grep -qE '^(Requires|Wants)MountsFor=' <<<"$UNIT" && echo present || echo absent)"
   check "the image carries no boxd of its own" "absent" \
     "$([[ -e /usr/local/bin/boxd ]] && echo present || echo absent)"
   check "boxctl answers at the path box and the driver call" "/opt/box/bin/boxctl" \

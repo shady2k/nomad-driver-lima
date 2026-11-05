@@ -164,7 +164,7 @@ func TestImagesPublishRegistersTheJob(t *testing.T) {
 	templates := job.TaskGroups[0].Tasks[0].Templates
 	require.Len(t, templates, 2)
 	dests := []string{derefStr(templates[0].DestPath, ""), derefStr(templates[1].DestPath, "")}
-	require.Equal(t, []string{"store/url", "store/token"}, dests)
+	require.Equal(t, []string{"secrets/store/url", "secrets/store/token"}, dests)
 	for _, template := range templates {
 		require.NotContains(t, derefStr(template.EmbeddedTmpl, ""), "the-store-token")
 	}
@@ -201,7 +201,7 @@ func TestImagesPublishRendersTheTokenPlace(t *testing.T) {
 	for _, template := range templates {
 		dests = append(dests, derefStr(template.DestPath, ""))
 	}
-	require.Equal(t, []string{"store/url", "store/token", "store/header", "store/scheme"}, dests)
+	require.Equal(t, []string{"secrets/store/url", "secrets/store/token", "secrets/store/header", "secrets/store/scheme"}, dests)
 	require.Nil(t, ta.workJob.TaskGroups[0].Tasks[0].Vault, "a plain token needs no Vault block")
 }
 

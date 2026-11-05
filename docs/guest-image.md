@@ -300,10 +300,15 @@ A bake is one seal, one stop and one task of the driver:
 2. The box is stopped. A sealed box is not started again: what it holds is the
    image's files, not the work.
 3. A batch job `box-bake-<box id>` of the driver runs no VM. It mounts the box's
-   volume read-only -- which also places it on the node that holds the disk --
-   reads the qcow2, runs `qemu-img convert -c -O qcow2` into a temporary file in
-   the node's image cache as the runtime user, hashes the result and renames it to
-   `<image_cache_dir>/<sha256>.img`. That is the name and place `box.EnsureImage`
+   volume -- which also places it on the node that holds the disk -- reads the
+   qcow2, runs `qemu-img convert -c -O qcow2` into a temporary file in the node's
+   image cache as the runtime user, hashes the result and renames it to
+   `<image_cache_dir>/<sha256>.img`. The mount is read-write, although the task only
+   reads: Nomad places a read-only request of a dynamic host volume only when the
+   volume offers a read-only access mode, and a box's volume is
+   `single-node-writer`, so a read-only bake job is never placed at all. `qemu-img
+   convert` opens its source read-only, and the task writes nothing but the image
+   in the cache. That is the name and place `box.EnsureImage`
    looks in, so a box on that node creates from the image without a download.
 4. Beside it, `<image_cache_dir>/baked/<version>.<arch>.json` records `version`,
    `arch`, `sha256`, `size`, `virtual_bytes`, `parent`, `name`, `built_at`,

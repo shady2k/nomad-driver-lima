@@ -75,6 +75,37 @@ func TestPublishRetriesAChunkedUpload(t *testing.T) {
 	require.Equal(t, rec.SHA256, entry["sha256"])
 }
 
+// TestPublishRetriesWhenTheStoreClosesOnTheRefusal: a proxy answers 413 and
+// closes the connection while the image is still being written, so the upload
+// ends in a write error and no status at all. The publish must still take the
+// chunked form -- measured against a real store, this is the case that stopped
+// every publish of an 847 MiB image.
+func TestPublishRetriesWhenTheStoreClosesOnTheRefusal(t *testing.T) {
+	store := newFakeStore()
+	store.refuseDeclaredSize = true
+	store.closeOnDeclaredRefusal = true
+
+	srv := httptest.NewServer(store)
+	t.Cleanup(srv.Close)
+	d, cache := driverWithQEMUImg(t, fakeQEMUImg(t, okQEMUImg))
+	// Large enough to fill a socket buffer, so the closed connection is seen
+	// while the body is still going out: a few bytes fit and the status arrives.
+	image := make([]byte, 4<<20)
+	copy(image, "QFI\xfb the image\n")
+	rec := putBakedImage(t, cache, box.BakedRecord{
+		Version: "project-1", Arch: "amd64", Name: "project", Parent: "1.0.0",
+		BuiltAt: "2026-11-02T12:00:00Z", Platform: "mount",
+	}, image)
+	tc := storeTaskConfigFiles(t, "project-1", "amd64", rec.SHA256, srv.URL, nil)
+	_, _, err := d.StartTask(tc)
+	require.NoError(t, err)
+	res := waitExit(t, d, "task1", 30*time.Second)
+	require.True(t, res.Successful(), "the publish exited %+v", res)
+	require.Equal(t, 1, store.declaredRefusals)
+	require.Equal(t, 1, store.chunkedUploads, "the image went up again without a Content-Length")
+	require.Len(t, store.files["/box-base/project-1/amd64/box-base-project-1-amd64.qcow2"], len(image))
+}
+
 // TestPublishSendsTheTokenTheStoreAsksFor: the header and the scheme of the
 // credential are the store's, not hard-coded, and an empty scheme is a bare key.
 func TestPublishSendsTheTokenTheStoreAsksFor(t *testing.T) {
