@@ -279,7 +279,7 @@ lock_acquire() {
         now=$(date -u +%s)
         held_for=$((now - since))
         if ((held_for < LOCK_STALE_SECONDS)); then
-          die "$REPO_URL/$LOCK_PATH is held by $(lock_field owner "$current") since $(date -u -d "@$since" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$since") ($((held_for / 60)) min ago): another publisher is running. Wait for it, or delete the lock once you know that run is gone."
+          die "$REPO_URL/$LOCK_PATH is held by $(lock_field owner "$current") since $(date_of "$since" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$since") ($((held_for / 60)) min ago): another publisher is running. Wait for it, or delete the lock once you know that run is gone."
         fi
         log "taking over a stale lock: held by $(lock_field owner "$current") for $((held_for / 60)) min (stale after $((LOCK_STALE_SECONDS / 60)) min)"
       fi
