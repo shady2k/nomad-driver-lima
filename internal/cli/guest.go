@@ -258,6 +258,65 @@ type Turn struct {
 	StopReason string `json:"stop_reason,omitempty"`
 	Text       string `json:"text,omitempty"`
 	Error      string `json:"error,omitempty"`
+	// StillRunning is what the turn left running in the guest; nil, and left out
+	// of the JSON, when there was nothing.
+	StillRunning *StillRunning `json:"still_running,omitempty"`
+}
+
+// StillRunning is what a finished turn left running in the box: one entry per
+// process at the top of its own tree or process group, and how many more there
+// were than the lines it holds.
+type StillRunning struct {
+	Processes []StillRunningProcess `json:"processes"`
+	More      int                   `json:"more,omitempty"`
+}
+
+// StillRunningProcess is one process a finished turn left running.
+type StillRunningProcess struct {
+	Pid        int     `json:"pid"`
+	Command    string  `json:"command"`
+	AgeSeconds int     `json:"age_seconds"`
+	CPUSeconds float64 `json:"cpu_seconds"`
+	Children   int     `json:"children"`
+}
+
+// Count is how many processes a turn left running.
+func (s *StillRunning) Count() int {
+	if s == nil {
+		return 0
+	}
+	return len(s.Processes) + s.More
+}
+
+// Line is one process the way a person reads it: what it runs, how long it has
+// run, how much CPU it used and how many processes are in its tree.
+func (p StillRunningProcess) Line() string {
+	parts := []string{
+		fmt.Sprintf("pid %d", p.Pid),
+		(time.Duration(p.AgeSeconds) * time.Second).String(),
+	}
+	if p.Children == 1 {
+		parts = append(parts, "1 child")
+	} else if p.Children > 1 {
+		parts = append(parts, fmt.Sprintf("%d children", p.Children))
+	}
+	parts = append(parts, fmt.Sprintf("%.1fs CPU", p.CPUSeconds))
+	return fmt.Sprintf("%s (%s)", p.Command, strings.Join(parts, ", "))
+}
+
+// Lines are the lines of a report, ending with "and N more" when it was cut.
+func (s *StillRunning) Lines() []string {
+	if s == nil {
+		return nil
+	}
+	out := make([]string, 0, len(s.Processes)+1)
+	for _, p := range s.Processes {
+		out = append(out, p.Line())
+	}
+	if s.More > 0 {
+		out = append(out, fmt.Sprintf("and %d more", s.More))
+	}
+	return out
 }
 
 // Event is one line of a session's activity stream.

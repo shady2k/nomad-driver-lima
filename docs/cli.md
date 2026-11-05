@@ -476,10 +476,29 @@ Stops the executor process and keeps the history.
 Starts one turn and returns at once. A second send while a turn runs answers
 `busy`.
 
-### `box wait <id> <session> [--timeout D] [--turn N]`
+### `box wait <id> <session> [--timeout D] [--turn N] [--json]`
 
 Waits for the turn and prints its final text. On timeout it exits 4 and the turn
 keeps running. `--turn N` waits for an older turn instead of the running one.
+
+When the turn ends with processes still running in the box, the warning comes
+after the text, on stderr, and the exit code stays the turn's:
+
+```
+the turn ended, but these processes it may have started are still running in the box:
+  go build ./... (pid 123, 4m10s, 4 children, 12.5s CPU)
+  and 2 more
+`box top dev1` shows what the guest is doing and `box run dev1 -- ps -ef` lists the processes;
+when they are done, `box send dev1 s-7f3a2c` starts the next turn, or ask the session to wait for them.
+```
+
+**A done turn with processes still running is not finished work.** The executor
+ended its turn (ACP `end_turn`) and the command a tool started did not: taking
+the answer as the result of a build, a test run or a server start that is still
+going is how a coordinator reports work that was never done. Look before you go
+on, and say what you saw. `--json` carries the same list as `still_running`
+(`docs/boxctl-contract.md`, `Turn`); nothing is printed on stderr then, and the
+field is missing when the turn left nothing running.
 
 ### `box events <id> <session> [--since N] [--limit N] [-f]`
 

@@ -62,6 +62,11 @@ type Turn struct {
 	StopReason string     `json:"stop_reason,omitempty"`
 	Text       string     `json:"text"`
 	Error      string     `json:"error,omitempty"`
+	// StillRunning is what the turn left running in the guest (stillrunning.go).
+	// It is omitted when there was nothing, and it never changes the turn's
+	// state, its stop reason or an exit code: when a turn ends is the
+	// executor's decision.
+	StillRunning *StillRunning `json:"still_running,omitempty"`
 }
 
 // Event is the contract Event object: one line of the activity feed.

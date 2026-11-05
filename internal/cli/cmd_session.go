@@ -270,12 +270,36 @@ func (a *App) cmdWait(ctx context.Context, args []string) error {
 			a.note("the agent ended the turn without a final message; `box events %s %s` shows what it did", id, sessionID)
 		}
 	}
+	// What the turn left running is said after the turn's own words, and it
+	// changes neither the turn's state nor the exit code below: when the turn
+	// ended is the executor's decision.
+	a.noteStillRunning(turn.StillRunning, id, sessionID)
 	// A script tells a failed turn from a good one by the exit code alone.
 	if turn.State != "done" {
 		return errorf("the turn %d of session %s ended %s%s; `box events %s %s` shows what happened",
 			turn.Turn, sessionID, dash(turn.State), turnSuffix(turn), id, sessionID)
 	}
 	return nil
+}
+
+// noteStillRunning says what a finished turn left running in the box, how to
+// look at it and how to go on.
+//
+// A done turn with processes still running is not finished work: the executor
+// ended its turn, and the build or the server it started did not. The wording
+// is boxd's -- these are processes it saw, not a verdict on the work -- and
+// the exit code stays the turn's.
+func (a *App) noteStillRunning(still *StillRunning, box, sessionID string) {
+	if still == nil || still.Count() == 0 {
+		return
+	}
+	a.note("the turn ended, but these processes it may have started are still running in the box:")
+	for _, line := range still.Lines() {
+		a.note("  %s", line)
+	}
+	a.note("`box top %s` shows what the guest is doing and `box run %s -- ps -ef` lists the processes;", box, box)
+	a.note("when they are done, `box send %s %s` starts the next turn, or ask the session to wait for them.",
+		box, sessionID)
 }
 
 func turnSuffix(turn *Turn) string {

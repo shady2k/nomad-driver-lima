@@ -130,6 +130,11 @@ box's environment an image instead of repeating it.
   scripts around a box, and do not poll `box status` in a loop.
 - **`box wait` exits 1 when the turn ended in an error or was cancelled**, with
   the turn's error; 0 means the turn is done.
+- **A done turn with processes still running is not finished work.** `box wait`
+  says so on stderr when the turn left a command running in the box (a build, a
+  test run, a server); the exit code stays 0, because when its turn ends is the
+  executor's decision. Look before you take the result or start the next step:
+  `box top <id>`, `box run <id> -- ps -ef`, and wait for them.
 - **One turn at a time per session.** A `busy` answer means a turn is running:
   `box wait` for it, or `box cancel` to stop it; do not send a second prompt and
   do not restart the box.

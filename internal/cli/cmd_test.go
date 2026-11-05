@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/nomad/api"
@@ -874,4 +875,63 @@ func TestTopShowsTheMemoryStall(t *testing.T) {
 	require.NoError(t, json.Unmarshal(ta.out.Bytes(), &doc))
 	require.NotNil(t, doc.Usage.MemoryPressure)
 	require.Equal(t, 31.0, doc.Usage.MemoryPressure.FullAvg10)
+}
+
+// TestWaitWarnsAboutWhatTheTurnLeftRunning: a done turn with processes still
+// running is said on stderr, after the turn's own text, with how to look at
+// them and how to go on -- and the exit code stays the turn's, because when the
+// turn ended is the executor's decision and boxd reports it as given.
+func TestWaitWarnsAboutWhatTheTurnLeftRunning(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.addBox(t, "dev1")
+	ta.guest.responses["wait s-1 --timeout 59"] = `{"session":"s-1","turn":1,"state":"done",
+		"text":"the build failed, fixing it",
+		"stop_reason":"end_turn",
+		"still_running":{"processes":[
+			{"pid":123,"command":"go build ./...","age_seconds":250,"cpu_seconds":12.5,"children":4},
+			{"pid":456,"command":"python3 -m http.server","age_seconds":30,"cpu_seconds":0.2,"children":0}
+		],"more":2}}`
+	require.Equal(t, ExitOK, ta.run(t, "wait", "dev1", "s-1", "--timeout", "1m"), ta.errOut.String())
+	// The turn's own words are on stdout, as without a report.
+	require.Contains(t, ta.out.String(), "the build failed, fixing it")
+	// The warning is on stderr, after them.
+	err := ta.errOut.String()
+	require.Contains(t, err, "the turn ended, but these processes it may have started are still running in the box:")
+	require.Contains(t, err, "go build ./... (pid 123, 4m10s, 4 children, 12.5s CPU)")
+	require.Contains(t, err, "python3 -m http.server (pid 456, 30s, 0.2s CPU)")
+	require.Contains(t, err, "and 2 more")
+	require.Contains(t, err, "`box top dev1`")
+	require.Contains(t, err, "`box run dev1 -- ps -ef`")
+	require.Contains(t, err, "`box send dev1 s-1`")
+	require.Contains(t, err, "wait for them")
+	require.Less(t, strings.Index(err, "finished: done"), strings.Index(err, "still running in the box"),
+		"the warning comes after the turn's own line")
+	require.NotContains(t, ta.out.String(), "still running", "the warning is not part of the answer")
+
+	// --json carries the field and prints nothing on stderr: the document is
+	// the whole answer, and the exit code is unchanged.
+	ta.out.Reset()
+	ta.errOut.Reset()
+	require.Equal(t, ExitOK, ta.run(t, "wait", "dev1", "s-1", "--timeout", "1m", "--json"))
+	require.Contains(t, ta.out.String(), `"still_running"`)
+	require.Contains(t, ta.out.String(), `"command": "go build ./..."`)
+	require.Empty(t, strings.TrimSpace(ta.errOut.String()), "a JSON answer says it in the document")
+}
+
+// TestWaitWithoutLeftoversSaysNothingExtra: a turn that left nothing running is
+// the turn and nothing else, so the warning is never noise.
+func TestWaitWithoutLeftoversSaysNothingExtra(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.addBox(t, "dev1")
+	ta.guest.responses["wait s-1 --timeout 59"] = `{"session":"s-1","turn":1,"state":"done","text":"all done","stop_reason":"end_turn"}`
+	require.Equal(t, ExitOK, ta.run(t, "wait", "dev1", "s-1", "--timeout", "1m"), ta.errOut.String())
+	require.NotContains(t, ta.errOut.String(), "still running")
+	require.NotContains(t, ta.out.String(), "still_running")
+
+	// An empty report is the same as none: boxd leaves the field out, and a
+	// boxd that sends an empty list says nothing either.
+	ta.guest.responses["wait s-1 --timeout 59"] = `{"session":"s-1","turn":1,"state":"done","text":"all done","still_running":{"processes":[]}}`
+	ta.errOut.Reset()
+	require.Equal(t, ExitOK, ta.run(t, "wait", "dev1", "s-1", "--timeout", "1m"), ta.errOut.String())
+	require.NotContains(t, ta.errOut.String(), "still running")
 }

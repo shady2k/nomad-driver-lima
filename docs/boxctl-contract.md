@@ -187,9 +187,29 @@ with `state` one of `idle`, `running`, `starting`, `dead`, `closed`.
 `executor_session` is the executor's own transcript id, the one a resumed
 session reopens.
 
-`Turn`: `{"session","turn","state","started_at","ended_at","stop_reason","text","error"}`
+`Turn`: `{"session","turn","state","started_at","ended_at","stop_reason","text","error","still_running"}`
 with `state` one of `running`, `done`, `cancelled`, `error`. `text` is the final
 assistant text of the turn.
+
+`still_running` is what the turn left running in the guest: boxd scans `/proc`
+at the moment the turn ends and reports the processes that started after the
+turn did and that are not the box's own machinery (the bundle's `boxd` and
+executors, an executor's home) and not another systemd service's. It is
+`{"processes":[{"pid","command","age_seconds","cpu_seconds","children"}],
+"more":N}`: one entry per process **at the top of its own tree or process
+group**, with everything else in that tree counted in `children`, at most ten of
+them and `more` for the rest. `command` is the program and its first few
+arguments, cut to about 80 characters -- an argument can hold a token, so a
+process list never shows one. The field is omitted when the turn left nothing
+running, and a scan that fails leaves it out and says so once in the log.
+
+**It changes nothing about the turn.** When a turn ends is the executor's
+decision (the ACP answer's stop reason), so the turn's `state`, its
+`stop_reason`, `ended_at` and the exit code of `boxctl wait` are what the
+executor said they are. `still_running` says what boxd saw, not that the work
+is unfinished: a program an executor installed in `/usr/local/bin` and left
+running is indistinguishable from the work, and a build that is about to finish
+looks like one that is stuck. `box wait` prints it as a warning on stderr.
 
 `Event`: `{"seq","ts","session","turn","kind","summary","data"}`
 with `kind` one of `turn_start`, `message`, `tool`, `tool_result`, `turn_end`,
