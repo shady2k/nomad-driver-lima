@@ -400,7 +400,7 @@ func TestProjectVersionsOrderByNumber(t *testing.T) {
 func TestWorkJobPurgesTheLastRun(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	job := &api.Job{ID: strPtr("box-bake-a")}
-	_, _, err := ta.App.registerWorkJob(context.Background(), job)
+	_, _, err := ta.registerWorkJob(context.Background(), job)
 	if err != nil {
 		t.Fatal(err)
 	}
