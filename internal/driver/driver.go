@@ -546,10 +546,6 @@ func (d *Driver) StartTask(tc *drivers.TaskConfig) (*drivers.TaskHandle, *driver
 	})
 	h.markRunning(time.Now())
 
-	// The guest sees these files; a later re-render (a rotated credential)
-	// changes this digest and the watcher puts them in place again.
-	h.setFilesDigest(taskFilesDigest(tc))
-
 	d.startGuestLogs(d.ctx, h, true)
 	d.startWatcher(h, b)
 	d.tasks.Add(h)

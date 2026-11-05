@@ -14,6 +14,8 @@
 //	"hang"          never finish until cancelled
 //	"crash"         emit a tool call, then exit 3 mid-turn
 //	"fail"          answer the prompt with a JSON-RPC error
+//	"fail-work"     answer with an error, then keep sending tool updates for
+//	                400ms: the executor that goes on working after its turn
 //	"leave-bg"      start "sh -c 'sleep 300 & wait'" in the background, answer,
 //	                and leave it running: the tool that outlives its turn
 //	"say:<text>"    answer with <text>
@@ -229,6 +231,7 @@ func (a *agent) handle(m rpcMsg) {
 	case "session/prompt":
 		go a.turn(m)
 	case "session/cancel":
+		a.writeTranscript(`{"type":"cancel"}`)
 		a.mu.Lock()
 		if !a.deaf {
 			a.cancelled = true
@@ -275,6 +278,19 @@ func (a *agent) turn(m rpcMsg) {
 	a.update(map[string]any{"sessionUpdate": "user_message_chunk", "content": map[string]any{"type": "text", "text": text}})
 
 	switch {
+	case strings.Contains(text, "fail-work"):
+		// The turn ends in an error, and the tool it was in the middle of is
+		// still going: its updates arrive with no turn running, which is what a
+		// second writer in the same working copy looked like.
+		a.replyErr(m.ID, -32000, "fake failure for testing")
+		for i := 0; i < 8; i++ {
+			a.update(map[string]any{
+				"sessionUpdate": "tool_call", "toolCallId": fmt.Sprintf("tc-late-%d", i),
+				"title": "Bash: make test", "kind": "execute", "status": "in_progress",
+			})
+			time.Sleep(50 * time.Millisecond)
+		}
+		return
 	case strings.Contains(text, "fail"):
 		a.replyErr(m.ID, -32000, "fake failure for testing")
 		return

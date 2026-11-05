@@ -50,6 +50,11 @@ type Session struct {
 	LastTurn        int       `json:"last_turn"`
 	ExecutorSession string    `json:"executor_session"`
 	Pid             int       `json:"pid"`
+	// ExecutorActive is set while the executor keeps sending updates with no
+	// turn running -- the turn it was in ended in an error and boxd asked it to
+	// cancel, and it has not stopped yet. It is the number of seconds since its
+	// last update, and it is absent when there is nothing of the kind.
+	ExecutorActive *int `json:"executor_active,omitempty"`
 }
 
 // Turn is the contract Turn object: one prompt turn of a session.

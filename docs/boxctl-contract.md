@@ -122,7 +122,7 @@ timeout with the state as it is. `boxctl info` carries the same document as
 | `boxctl events <id> [--since SEQ] [--limit N]` | – | `{"events":[Event],"next":SEQ,"total":N,"more":BOOL}` |
 | `boxctl cancel <id>` | – | `Turn`, with `"state":"cancelled"` once the executor acknowledged it |
 | `boxctl session close <id>` | – | `{"session","state":"closed"}` — stops the executor process and keeps the history |
-| `boxctl reload` | – | re-reads the executor credentials without touching the sessions: it answers `{"configured":[...],"restarted":[...],"deferred":[...]}` — idle sessions restart their executor now, a session in a turn defers to the end of that turn |
+| `boxctl reload` | – | re-reads the executor credentials without touching the sessions: it answers `{"configured":[...],"restarted":[...],"deferred":[...]}` — idle sessions restart their executor now, a session in a turn defers to the end of that turn, and a reload whose credential files hold the same **content** restarts nothing at all |
 | `boxctl seal --name NAME [--version V] [--parent V] [--arch amd64\|arm64] [--recipe FILE\|-]` | – (the recipe, with `--recipe -`) | one `{"line":"..."}` per step, then `{"seal":SealResult}` or `{"error":ErrorBody}` — see below |
 
 ### `boxctl seal --name NAME [--version V] [--parent V] [--arch amd64|arm64] [--recipe FILE|-]`
@@ -214,14 +214,31 @@ the seal itself, when it runs (`invalid_argument` above). `box bake` reads this
 before it stops anything, because the question is about this box and the clone the
 seal runs in has a `boxd` of its own that knows nothing of the box's turn.
 
-`Session`: `{"id","executor","model","cwd","title","state","created_at","last_turn","executor_session","pid"}`
+`Session`: `{"id","executor","model","cwd","title","state","created_at","last_turn","executor_session","pid","executor_active"}`
 with `state` one of `idle`, `running`, `starting`, `dead`, `closed`.
 `executor_session` is the executor's own transcript id, the one a resumed
 session reopens.
 
+`executor_active` is present only while the session's executor keeps sending
+updates with **no turn running**, and it is the number of seconds since the last
+of them. That is a turn that ended in an error while the executor went on
+working: boxd asked it to cancel (`session/cancel`), it has not stopped, and what
+it sends is recorded in the feed with `turn` 0 rather than in the turn that
+ended. boxd writes one journal line when it starts and one when the executor has
+been quiet for a minute; the field goes away with it. A `dead` session has no
+executor, so it has no `executor_active` either.
+
 `Turn`: `{"session","turn","state","started_at","ended_at","stop_reason","text","error","still_running"}`
 with `state` one of `running`, `done`, `cancelled`, `error`. `text` is the final
 assistant text of the turn.
+
+An `error` turn that came from the executor (`session/prompt` answered an error)
+while the executor process is alive is followed by one `session/cancel` to that
+executor: a turn that ended is not a turn the agent goes on writing in. The turn
+keeps its own state and its own error, and what the executor still sends is
+`executor_active` above.
+
+`still_running` is what the turn left running in the guest: boxd scans `/proc`
 
 `still_running` is what the turn left running in the guest: boxd scans `/proc`
 at the moment the turn ends and reports the processes that started after the
@@ -248,6 +265,10 @@ with `kind` one of `turn_start`, `message`, `tool`, `tool_result`, `turn_end`,
 `error`, `executor_exit`, `executor_restart`, and `summary` one line in plain
 words. Sequence numbers are per session and monotonic, which is what makes
 `--since` a resumable cursor.
+
+`turn` is 0 for an event that belongs to no turn: an executor's exit or restart,
+and what an executor still sends after its turn ended in an error
+(`executor_active`).
 
 `--since` is the sequence number to resume from and it is **read again**: a page
 of a feed loses no event at its boundary, so reading with `--limit` and continuing

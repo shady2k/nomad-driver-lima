@@ -61,8 +61,9 @@ type Nomad interface {
 	// Exec runs a command inside a task and returns its exit code.
 	Exec(ctx context.Context, alloc *api.Allocation, task string, cmd []string,
 		stdin io.Reader, stdout, stderr io.Writer, tty bool, termSize <-chan api.TerminalSize) (int, error)
-	// Logs streams one task log file ("stdout" or "stderr") of an allocation.
-	Logs(ctx context.Context, alloc *api.Allocation, task, logType string, follow bool) (<-chan *api.StreamFrame, <-chan error)
+	// Logs streams one task log file ("stdout" or "stderr") of an allocation,
+	// from the given byte offset of that file.
+	Logs(ctx context.Context, alloc *api.Allocation, task, logType string, follow bool, offset int64) (<-chan *api.StreamFrame, <-chan error)
 }
 
 // NewNomadClient builds the Nomad API client the nomad CLI would build.
@@ -193,15 +194,18 @@ func (n *nomadAPI) Exec(ctx context.Context, alloc *api.Allocation, task string,
 	return n.c.Allocations().Exec(ctx, alloc, task, tty, cmd, stdin, stdout, stderr, termSize, nil)
 }
 
-func (n *nomadAPI) Logs(ctx context.Context, alloc *api.Allocation, task, logType string, follow bool) (<-chan *api.StreamFrame, <-chan error) {
+func (n *nomadAPI) Logs(ctx context.Context, alloc *api.Allocation, task, logType string, follow bool, offset int64) (<-chan *api.StreamFrame, <-chan error) {
 	cancel := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		close(cancel)
 	}()
+	// A follow starts at the end of the file, which is what "follow" means for a
+	// log nobody has read yet; a resume starts at the byte it left off at, which
+	// is what makes a restarted stream repeat nothing and skip nothing.
 	origin := "start"
-	if follow {
+	if follow && offset == 0 {
 		origin = "end"
 	}
-	return n.c.AllocFS().Logs(alloc, follow, task, logType, origin, 0, cancel, nil)
+	return n.c.AllocFS().Logs(alloc, follow, task, logType, origin, offset, cancel, nil)
 }

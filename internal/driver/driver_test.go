@@ -26,13 +26,21 @@ import (
 // newTestDriver returns a configured driver bound to a fake limactl.
 func newTestDriver(t *testing.T, f *fakelima.Fake) *Driver {
 	t.Helper()
+	return newTestDriverAt(t, f, filepath.Join(t.TempDir(), "box-files"))
+}
+
+// newTestDriverAt is a driver whose task files live in filesRoot. A restarted
+// plugin finds them there, which is what a recovery test needs: the node's
+// files root is the same directory before and after the restart.
+func newTestDriverAt(t *testing.T, f *fakelima.Fake, filesRoot string) *Driver {
+	t.Helper()
 	d := NewDriver(context.Background(), hclog.NewNullLogger())
 	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
 
 	cfg := Config{
 		LimactlPath:       f.Bin,
 		LimaHome:          f.Home,
-		FilesRoot:         filepath.Join(t.TempDir(), "box-files"),
+		FilesRoot:         filesRoot,
 		ImageCacheDir:     filepath.Join(f.Home, "_images"),
 		MemoryOverheadMiB: 150,
 		VMType:            "qemu",
@@ -595,6 +603,103 @@ func TestRefreshTaskFilesOnRerender(t *testing.T) {
 	require.Empty(t, f.Copies(t), "nothing is copied into the guest any more")
 	reloads := f.CallsWith(t, "shell box1 -- boxctl reload")
 	require.Len(t, reloads, 1, "boxd must be told to reload: %v", f.Calls(t))
+}
+
+// TestRefreshTaskFilesIgnoresARewriteWithTheSameBytes: Nomad may re-render a
+// template that ends with the same content (a Variable written and put back, a
+// client restart that renders again). The digest is the content, so nothing is
+// staged and boxd is not asked to reload: no executor restarts under a turn for
+// a file that did not change.
+func TestRefreshTaskFilesIgnoresARewriteWithTheSameBytes(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	vol := filepath.Join(t.TempDir(), "volume")
+	require.NoError(t, os.MkdirAll(vol, 0o755))
+	url := fakelima.ImageServer(t, "IMAGE")
+
+	tc := taskConfig(t, vol)
+	require.NoError(t, tc.EncodeConcreteDriverConfig(startConfig(t, url, sha256Hex("IMAGE"))))
+	secrets := tc.TaskDir().SecretsDir
+	require.NoError(t, os.MkdirAll(filepath.Join(secrets, "prime"), 0o700))
+	authPath := filepath.Join(secrets, "prime", "auth.json")
+	require.NoError(t, os.WriteFile(authPath, []byte(`{"gateway":{"access":"one"}}`), 0o600))
+
+	_, _, err := d.StartTask(tc)
+	require.NoError(t, err)
+	h := d.tasks.Get("task1")
+	require.NotNil(t, h)
+	b, err := d.boxFor(h, h.volumeDir, nil)
+	require.NoError(t, err)
+
+	staged := filepath.Join(d.boxm.FilesDir("box1"), "secrets", "prime", "auth.json")
+	before, err := os.Stat(staged)
+	require.NoError(t, err)
+
+	// The same bytes, written again: a new modification time and a new inode.
+	require.NoError(t, os.Remove(authPath))
+	require.NoError(t, os.WriteFile(authPath, []byte(`{"gateway":{"access":"one"}}`), 0o600))
+
+	f.ResetCalls(t)
+	d.refreshTaskFiles(h, b)
+	require.Empty(t, f.CallsWith(t, "shell box1 -- boxctl reload"), "a rewrite with the same bytes is not a change")
+	after, err := os.Stat(staged)
+	require.NoError(t, err)
+	require.Equal(t, before.ModTime(), after.ModTime(), "the mounted file must not be written again")
+	require.Equal(t, before.Size(), after.Size())
+}
+
+// TestRecoverTaskStagesNothingAndDoesNotReload is the chain behind a session that
+// went dead on a driver update: recovery left the handle without a digest, the
+// watcher read every task file as changed, staged them again and called
+// boxctl reload, which restarted the executors under the running turns. A
+// recovered task compares the files the guest mounts with what Nomad rendered and
+// does nothing when they agree.
+func TestRecoverTaskStagesNothingAndDoesNotReload(t *testing.T) {
+	f := fakelima.New(t)
+	d := newTestDriver(t, f)
+	vol := filepath.Join(t.TempDir(), "volume")
+	require.NoError(t, os.MkdirAll(vol, 0o755))
+	url := fakelima.ImageServer(t, "IMAGE")
+
+	tc := taskConfig(t, vol)
+	require.NoError(t, tc.EncodeConcreteDriverConfig(startConfig(t, url, sha256Hex("IMAGE"))))
+	secrets := tc.TaskDir().SecretsDir
+	require.NoError(t, os.MkdirAll(filepath.Join(secrets, "prime"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(secrets, "prime", "auth.json"), []byte(`{"access":"one"}`), 0o600))
+	require.NoError(t, os.MkdirAll(tc.TaskDir().LocalDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tc.TaskDir().LocalDir, "note.txt"), []byte("keep me"), 0o644))
+
+	handle, _, err := d.StartTask(tc)
+	require.NoError(t, err)
+	staged := filepath.Join(d.boxm.FilesDir("box1"), "secrets", "prime", "auth.json")
+	before, err := os.Stat(staged)
+	require.NoError(t, err)
+
+	// The client restarts: a new driver instance recovers the same task, and
+	// finds the files the running guest mounts where the node keeps them.
+	d2 := newTestDriverAt(t, f, d.config.FilesRoot)
+	f.ResetCalls(t)
+	require.NoError(t, d2.RecoverTask(handle))
+	h := d2.tasks.Get("task1")
+	require.NotNil(t, h)
+	b, err := d2.boxFor(h, h.volumeDir, nil)
+	require.NoError(t, err)
+
+	d2.refreshTaskFiles(h, b)
+	require.Empty(t, f.CallsWith(t, "shell box1 -- boxctl reload"),
+		"a recovered task with unchanged files must not tell boxd to reload: %v", f.Calls(t))
+	after, err := os.Stat(staged)
+	require.NoError(t, err)
+	require.Equal(t, before.ModTime(), after.ModTime(), "the files the guest mounts must not be staged again")
+
+	// A real rotation after the recovery still reaches the guest.
+	require.NoError(t, os.WriteFile(filepath.Join(secrets, "prime", "auth.json"), []byte(`{"access":"two"}`), 0o600))
+	f.ResetCalls(t)
+	d2.refreshTaskFiles(h, b)
+	got, err := os.ReadFile(staged)
+	require.NoError(t, err)
+	require.Contains(t, string(got), "two")
+	require.Len(t, f.CallsWith(t, "shell box1 -- boxctl reload"), 1, "a real change still reloads: %v", f.Calls(t))
 }
 
 // TestTaskConfigCannotSetNodeSettings keeps the boundary B4 draws: the task

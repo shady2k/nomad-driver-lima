@@ -84,6 +84,12 @@ func (a *App) cmdSessionNew(ctx context.Context, args []string) error {
 	if details, err := client.SessionGet(ctx, sessionID); err == nil {
 		out.Details = details
 	}
+	// Another session already writing in this directory is not a refusal -- two
+	// sessions in one box is normal -- but it is what a second writer in the same
+	// working copy looks like, so the agent is told before it sends a prompt.
+	if out.Details != nil {
+		a.warnSameDirectory(ctx, client, sessionID, out.Details.Cwd)
+	}
 	if a.JSON {
 		return a.printJSON(out)
 	}
@@ -131,7 +137,7 @@ func (a *App) cmdSessionList(ctx context.Context, args []string) error {
 			session.ID,
 			dash(session.Executor),
 			dash(session.Model),
-			session.State,
+			session.stateLabel(),
 			fmt.Sprintf("%d", session.LastTurn),
 			dash(session.Title),
 			dash(session.Cwd),
@@ -196,6 +202,9 @@ func (a *App) cmdSend(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if cwd, ok := a.sessionCwd(ctx, client, sessionID); ok {
+		a.warnSameDirectory(ctx, client, sessionID, cwd)
+	}
 	turn, err := client.Send(ctx, sessionID, prompt)
 	if err != nil {
 		var bce *BoxctlError
@@ -213,7 +222,71 @@ func (a *App) cmdSend(ctx context.Context, args []string) error {
 	return nil
 }
 
+// sessionCwd returns the working directory of one session of the box.
+func (a *App) sessionCwd(ctx context.Context, client *Boxctl, sessionID string) (string, bool) {
+	var sessions []Session
+	err := a.guestCall(ctx, "`boxctl session ls`", func(callCtx context.Context) error {
+		got, err := client.SessionList(callCtx)
+		if err != nil {
+			return err
+		}
+		sessions = got
+		return nil
+	})
+	if err != nil {
+		return "", false
+	}
+	for _, session := range sessions {
+		if session.ID == sessionID {
+			return session.Cwd, session.Cwd != ""
+		}
+	}
+	return "", false
+}
+
+// warnSameDirectory tells the caller when another session of this box is working
+// in the same directory: a running turn, or an executor that is still sending
+// updates after a turn that ended in an error. Two sessions in one working copy
+// is what a second writer looked like.
+//
+// It is a warning on stderr and never a refusal: the exit code does not change,
+// and a boxd that does not answer this question stays quiet.
+func (a *App) warnSameDirectory(ctx context.Context, client *Boxctl, sessionID, cwd string) {
+	if cwd == "" {
+		return
+	}
+	var sessions []Session
+	err := a.guestCall(ctx, "`boxctl session ls`", func(callCtx context.Context) error {
+		got, err := client.SessionList(callCtx)
+		if err != nil {
+			return err
+		}
+		sessions = got
+		return nil
+	})
+	if err != nil {
+		return
+	}
+	for _, other := range sessions {
+		if other.ID == sessionID || other.Cwd != cwd {
+			continue
+		}
+		if other.State != "running" && !other.activeOutsideTurn() {
+			continue
+		}
+		a.note("session %s is working in the same directory", other.ID)
+	}
+}
+
 // cmdWait waits for the running turn of a session.
+//
+// A lost connection to the box or to Nomad is not the end of the turn: the wait
+// keeps trying, with a pause between the attempts, to the end of --timeout, and
+// says on stderr when contact went and when it came back. It reconnects to the
+// same turn, so a turn that finished while the box was unreachable is reported
+// with its real result. Only a box that is really gone ends the wait, and a wait
+// that runs out of contact reports the new exit code: the turn's state is
+// unknown and it may still run.
 func (a *App) cmdWait(ctx context.Context, args []string) error {
 	fs := newFlagSet("wait")
 	timeout := fs.Duration("timeout", defaultWaitTimeout, "how long to wait; the turn keeps running when this expires")
@@ -222,30 +295,114 @@ func (a *App) cmdWait(ctx context.Context, args []string) error {
 		return err
 	}
 	id, sessionID := fs.Arg(0), fs.Arg(1)
-	client, _, err := a.boxctlFor(ctx, id)
-	if err != nil {
-		return err
-	}
-	waitCtx := ctx
-	var cancel context.CancelFunc
-	// Ask boxctl for one second less than our own budget, so its timeout
-	// arrives first and we can report the turn as still running.
-	seconds := int(timeout.Seconds())
-	if seconds > 1 {
-		seconds--
-	}
-	if *timeout > 0 {
-		waitCtx, cancel = context.WithTimeout(ctx, *timeout+15*time.Second)
-		defer cancel()
-	}
-	turn, err := client.Wait(waitCtx, sessionID, WaitOptions{Turn: *turnNumber, Timeout: seconds})
-	if err != nil {
-		if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
-			return timeoutf("the turn of session %s is still running after %s; `box events %s %s -f` shows what it is doing",
-				sessionID, *timeout, id, sessionID)
+	turn := *turnNumber
+	contact := a.newContact(id)
+	attempts := 0
+	// The budget is measured from the first loss of contact: the wait a healthy
+	// box gives is exactly the one --timeout asks for.
+	var deadline time.Time
+	for {
+		// Ask boxctl for one second less than our own budget, so its timeout
+		// arrives first and we can report the turn as still running.
+		seconds := 0
+		budget := time.Duration(0)
+		if *timeout > 0 {
+			seconds = int((*timeout).Seconds()) - 1
+			budget = *timeout + 15*time.Second
+			if attempts > 0 {
+				remaining := deadline.Sub(a.now())
+				seconds = int(remaining.Seconds()) - 1
+				budget = remaining + 15*time.Second
+			}
 		}
-		return wrapf(err, "the guest could not wait for session %s", sessionID)
+		// The attempt is given up on a little after boxctl's own timeout: a
+		// healthy call answers by then, and a call that does not is a connection
+		// that is not there, however the transport feels about it.
+		attemptBound := time.Duration(0)
+		if *timeout > 0 {
+			attemptBound = time.Duration(seconds)*time.Second + 5*time.Second
+			if attemptBound < 2*time.Second {
+				attemptBound = 2 * time.Second
+			}
+		}
+		client, _, err := a.boxctlRunning(ctx, id)
+		if err == nil {
+			callCtx := ctx
+			cancel := func() {}
+			if *timeout > 0 {
+				callCtx, cancel = context.WithTimeout(ctx, budget)
+			}
+			var got *Turn
+			got, err = boundedCall(attemptBound, "`boxctl wait`", func() (*Turn, error) {
+				return client.Wait(callCtx, sessionID, WaitOptions{Turn: turn, Timeout: seconds})
+			})
+			cancel()
+			if err == nil {
+				contact.back("wait")
+				return a.reportTurn(got, id, sessionID, *timeout)
+			}
+		}
+		if !lostContact(err) {
+			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+				return timeoutf("the turn of session %s is still running after %s; `box events %s %s -f` shows what it is doing",
+					sessionID, *timeout, id, sessionID)
+			}
+			if isBoxStateError(err) {
+				return err
+			}
+			return wrapKeep(err, "the guest could not wait for session %s", sessionID)
+		}
+		// Contact is lost: this is not a turn that ended.
+		contact.lost("wait", err)
+		if deadline.IsZero() {
+			deadline = a.now().Add(*timeout)
+		}
+		attempts++
+		if *timeout > 0 && !a.now().Before(deadline) {
+			return unknownAfter(fmt.Sprintf("the state of the turn of session %s", sessionID), id, contact.lostFor(),
+				fmt.Sprintf("; `box events %s %s --since <seq>` shows what it did once the box answers again", id, sessionID))
+		}
+		if err := contact.waitForContact(ctx, id, attempts); err != nil {
+			return err
+		}
+		// Back? One cheap guest call proves it, says so on stderr, and gives the
+		// turn to keep waiting for: the retry is the same turn, not whatever
+		// turn comes next.
+		if last, err := a.lastTurn(ctx, client, sessionID); err == nil {
+			contact.back("wait")
+			if turn == 0 && last > 0 {
+				turn = last
+			}
+		}
 	}
+}
+
+// lastTurn returns the number of the last turn of a session, so a wait that lost
+// its connection resumes on the turn it was waiting for.
+func (a *App) lastTurn(ctx context.Context, client *Boxctl, sessionID string) (int, error) {
+	if client == nil {
+		return 0, errorf("the box is not reachable")
+	}
+	var session *Session
+	err := a.guestCall(ctx, "`boxctl session get`", func(callCtx context.Context) error {
+		got, err := client.SessionGet(callCtx, sessionID)
+		if err != nil {
+			return err
+		}
+		session = got
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if session == nil {
+		return 0, nil
+	}
+	return session.LastTurn, nil
+}
+
+// reportTurn prints the result of a turn the wait saw finish.
+func (a *App) reportTurn(turn *Turn, id, sessionID string, timeout time.Duration) error {
 	if turn.State == "running" {
 		if a.JSON {
 			if err := a.printJSON(turn); err != nil {
@@ -253,7 +410,7 @@ func (a *App) cmdWait(ctx context.Context, args []string) error {
 			}
 		}
 		return timeoutf("the turn %d of session %s is still running after %s; `box events %s %s -f` shows what it is doing",
-			turn.Turn, sessionID, *timeout, id, sessionID)
+			turn.Turn, sessionID, timeout, id, sessionID)
 	}
 	if a.JSON {
 		if err := a.printJSON(turn); err != nil {
@@ -317,25 +474,80 @@ func turnSuffix(turn *Turn) string {
 }
 
 // cmdEvents streams the events of a session.
+//
+// The cursor is the sequence number of the last event printed, so a stream that
+// loses its connection to the box resumes where it was: nothing is printed twice
+// and nothing is skipped. A lost connection is not the end of a feed; only a box
+// that is really gone ends it.
 func (a *App) cmdEvents(ctx context.Context, args []string) error {
 	fs := newFlagSet("events")
 	since := fs.Int64("since", 0, "resume from this sequence number")
 	limit := fs.Int("limit", 200, "how many events to ask for per call")
+	tail := fs.Int("tail", 0, "print the last N events only")
 	follow := fs.Bool("f", false, "keep following the stream")
 	if err := parseFlags(fs, args, 2); err != nil {
 		return err
 	}
 	id, sessionID := fs.Arg(0), fs.Arg(1)
-	client, _, err := a.boxctlFor(ctx, id)
+	if *tail < 0 {
+		return usagef("box events %s %s: --tail %d is not a number of events", id, sessionID, *tail)
+	}
+	if *tail > 0 && *follow {
+		return usagef("box events %s %s: --tail N reads what a session already did; --f follows what it does next", id, sessionID)
+	}
+	client, _, err := a.boxctlRunning(ctx, id)
 	if err != nil {
-		return err
+		if !lostContact(err) {
+			return err
+		}
+		// The box is not reachable yet: keep trying for as long as the caller
+		// lets us, the same way the follow loop does.
+		contact := a.newContact(id)
+		contact.lost("events", err)
+		attempts := 0
+		for {
+			attempts++
+			if err := contact.waitForContact(ctx, id, attempts); err != nil {
+				return err
+			}
+			fresh, _, err := a.boxctlRunning(ctx, id)
+			if err == nil {
+				client = fresh
+				contact.back("events")
+				break
+			}
+			if !lostContact(err) {
+				return err
+			}
+		}
+	}
+	if *tail > 0 {
+		return a.tailEvents(ctx, client, id, sessionID, *tail)
 	}
 	cursor := *since
+	contact := a.newContact(id)
+	attempts := 0
 	for {
-		page, err := client.Events(ctx, sessionID, EventsOptions{Since: cursor, Limit: *limit})
+		page, err := boundedCall(a.guestTimeout(), "`boxctl events`", func() (EventPage, error) {
+			return client.Events(ctx, sessionID, EventsOptions{Since: cursor, Limit: *limit})
+		})
 		if err != nil {
-			return wrapf(err, "the guest could not read the events of session %s", sessionID)
+			if !lostContact(err) {
+				return wrapf(err, "the guest could not read the events of session %s", sessionID)
+			}
+			contact.lost("events", err)
+			attempts++
+			if err := contact.waitForContact(ctx, id, attempts); err != nil {
+				return err
+			}
+			// The box was away: ask Nomad for the guest again, in case the
+			// allocation came back under the same box.
+			if fresh, _, err := a.boxctlRunning(ctx, id); err == nil {
+				client = fresh
+			}
+			continue
 		}
+		contact.back("events")
 		for _, event := range page.Events {
 			if err := a.printEvent(event); err != nil {
 				return err
@@ -354,6 +566,61 @@ func (a *App) cmdEvents(ctx context.Context, args []string) error {
 			return nil
 		}
 	}
+}
+
+// tailEvents prints the last n events of a session: the news, not the whole feed.
+//
+// The feed counts from 1 and has no gaps, and a page says how many events there
+// are after the cursor, so the last n are the ones from total-n+1. One cheap
+// first call is what makes that a two-call answer instead of reading the feed.
+func (a *App) tailEvents(ctx context.Context, client *Boxctl, id, sessionID string, n int) error {
+	fetch := func(opts EventsOptions) (EventPage, error) {
+		return boundedCall(a.guestTimeout(), "`boxctl events`", func() (EventPage, error) {
+			return client.Events(ctx, sessionID, opts)
+		})
+	}
+	head, err := fetch(EventsOptions{Limit: 1})
+	if err != nil {
+		if !lostContact(err) {
+			return wrapf(err, "the guest could not read the events of session %s", sessionID)
+		}
+		// The count is not known while the box is away; asking again from the
+		// start is the same answer once it is back.
+		contact := a.newContact(id)
+		contact.lost("events", err)
+		attempts := 0
+		for {
+			attempts++
+			if err := contact.waitForContact(ctx, id, attempts); err != nil {
+				return err
+			}
+			if fresh, _, err := a.boxctlRunning(ctx, id); err == nil {
+				client = fresh
+			}
+			head, err = fetch(EventsOptions{Limit: 1})
+			if err == nil {
+				contact.back("events")
+				break
+			}
+			if !lostContact(err) {
+				return wrapf(err, "the guest could not read the events of session %s", sessionID)
+			}
+		}
+	}
+	since := int64(head.Total) - int64(n) + 1
+	if since < 1 {
+		since = 1
+	}
+	page, err := fetch(EventsOptions{Since: since, Limit: n})
+	if err != nil {
+		return wrapf(err, "the guest could not read the events of session %s", sessionID)
+	}
+	for _, event := range page.Events {
+		if err := a.printEvent(event); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // noteMoreEvents says that the events printed were a page of the feed and not

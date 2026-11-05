@@ -486,7 +486,11 @@ func (a *App) followWorkLog(ctx context.Context, jobID string, since uint64, tim
 			return
 		}
 	}
-	_ = a.streamLog(ctx, alloc, "stdout", true, &logWriter{a: a})
+	// The steps of a bake are what a person follows while it runs; the task's
+	// own exit is what the command reports, so a stream that ends early is not
+	// an error here and is not picked up again.
+	var offset int64
+	_ = a.streamLogOnce(ctx, alloc, "stdout", true, &logWriter{a: a}, &offset, nil)
 }
 
 // allocSucceeded reports whether an allocation's task exited 0.

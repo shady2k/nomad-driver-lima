@@ -331,7 +331,7 @@ func (a *App) printStatus(out *statusOutput) {
 	if len(out.Sessions) > 0 {
 		a.note("  sessions:")
 		for _, session := range out.Sessions {
-			a.note("    %s  %-8s %-24s %-8s turn %d  %s", session.ID, session.Executor, session.Model, session.State,
+			a.note("    %s  %-8s %-24s %-8s turn %d  %s", session.ID, session.Executor, session.Model, session.stateLabel(),
 				session.LastTurn, oneLine(session.Title, 60))
 		}
 	}

@@ -255,12 +255,14 @@ func TestReloadDefersARunningTurn(t *testing.T) {
 	cfg := testConfig(t)
 	writeSecrets(t, cfg, "prime", map[string]string{"settings.json": "{}"})
 	m := newManager(t, cfg)
-	s := mustSession(t, m, "prime", "test-model")
+	s := mustSession(t, m, "prime", "fake/model-1")
 
 	sess, err := m.lookup(s.ID)
 	if err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
+	// The operator rotated the credential while the turn runs.
+	writeSecrets(t, cfg, "prime", map[string]string{"settings.json": `{"rotated":true}`})
 	// A turn is in flight (the turn machinery itself is covered elsewhere).
 	sess.mu.Lock()
 	sess.busy = true
@@ -288,6 +290,110 @@ func TestReloadDefersARunningTurn(t *testing.T) {
 		t.Fatalf("Send after reload: %v", err)
 	}
 	waitTurn(t, m, s.ID, 1)
+}
+
+// TestReloadWithUnchangedBytesRestartsNothing: Nomad re-renders a template whose
+// Variable was written and put back, and the driver stages the same bytes again.
+// boxd compares the content of the credential files, so a rewrite that changed
+// nothing restarts no executor: the session keeps the process it has.
+func TestReloadWithUnchangedBytesRestartsNothing(t *testing.T) {
+	cfg := testConfig(t)
+	writeSecrets(t, cfg, "prime", map[string]string{"auth.json": `{"gateway":{"access":"one"}}`})
+	m := newManager(t, cfg)
+	s := mustSession(t, m, "prime", "fake/model-1")
+	if _, err := m.Send(s.ID, "pong"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	waitTurn(t, m, s.ID, 1)
+
+	sess, err := m.lookup(s.ID)
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	sess.mu.Lock()
+	pid := sess.meta.Pid
+	sess.mu.Unlock()
+	if pid == 0 {
+		t.Fatal("the executor must still run after a turn")
+	}
+
+	// The same bytes written again, with a new modification time.
+	time.Sleep(10 * time.Millisecond)
+	writeSecrets(t, cfg, "prime", map[string]string{"auth.json": `{"gateway":{"access":"one"}}`})
+	res, err := m.Reload()
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if len(res.Restarted) != 0 || len(res.Deferred) != 0 {
+		t.Fatalf("a reload that changed no byte must restart nothing, got %+v", res)
+	}
+	sess.mu.Lock()
+	after := sess.meta.Pid
+	sess.mu.Unlock()
+	if after != pid {
+		t.Fatalf("the executor was restarted for a credential that did not change (pid %d -> %d)", pid, after)
+	}
+	// And the session still works.
+	if _, err := m.Send(s.ID, "pong"); err != nil {
+		t.Fatalf("Send after an unchanged reload: %v", err)
+	}
+	waitTurn(t, m, s.ID, 2)
+}
+
+// TestReloadRestartsAnIdleExecutorAndDefersABusyOne is a real rotation during a
+// turn: the idle session's executor restarts at once, the busy one keeps its
+// executor until its turn ends and is restarted after it, the journal says so,
+// and both sessions work afterwards.
+func TestReloadRestartsAnIdleExecutorAndDefersABusyOne(t *testing.T) {
+	cfg := testConfig(t)
+	journal := &lockedBuffer{}
+	cfg.Journal = journal
+	writeSecrets(t, cfg, "prime", map[string]string{"auth.json": `{"gateway":{"access":"one"}}`})
+	m := newManager(t, cfg)
+
+	idle := mustSession(t, m, "prime", "fake/model-1")
+	if _, err := m.Send(idle.ID, "pong"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	waitTurn(t, m, idle.ID, 1)
+
+	busy := mustSession(t, m, "prime", "fake/model-1")
+	if _, err := m.Send(busy.ID, "slow:600"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	// The operator rotates the credential while the busy turn runs.
+	writeSecrets(t, cfg, "prime", map[string]string{"auth.json": `{"gateway":{"access":"two"}}`})
+	res, err := m.Reload()
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if strings.Join(res.Restarted, ",") != idle.ID {
+		t.Fatalf("the idle executor must restart at once, got %+v", res)
+	}
+	if strings.Join(res.Deferred, ",") != busy.ID {
+		t.Fatalf("the busy session must defer its restart to the end of its turn, got %+v", res)
+	}
+	if !strings.Contains(journal.String(), "restarts with the new ones when the turn ends") {
+		t.Fatalf("the journal must say that the restart waits for the turn: %q", journal.String())
+	}
+
+	// The turn of the busy session ends with its own executor, as it must.
+	if tr := waitTurn(t, m, busy.ID, 1); tr.State != TurnDone {
+		t.Fatalf("the turn must finish normally, got %+v", tr)
+	}
+
+	// Both sessions work with the new credentials.
+	for _, id := range []string{idle.ID, busy.ID} {
+		if _, err := m.Send(id, "pong"); err != nil {
+			t.Fatalf("Send to %s after the reload: %v", id, err)
+		}
+		waitTurn(t, m, id, 2)
+	}
+	copyPath := filepath.Join(cfg.RuntimeDir, "executors", "prime", "auth.json")
+	if data, err := os.ReadFile(copyPath); err != nil || !strings.Contains(string(data), "two") {
+		t.Fatalf("the runtime copy still holds the old credential: %s %v", data, err)
+	}
 }
 
 // TestExecutorHomesExistWithoutCredentials keeps an executor from writing into

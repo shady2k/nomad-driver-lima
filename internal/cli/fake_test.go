@@ -80,6 +80,12 @@ type fakeCluster struct {
 	exec ExecTransport
 	// logData is what the log stream returns, per log file.
 	logData map[string]string
+	// logSteps scripts the calls of a log stream: the nth call serves the nth
+	// step, and the last step repeats. A step with an error is a stream that
+	// dies after its frames, which is what a client restart looks like.
+	logSteps map[string][]logStep
+	// logCalls counts the Logs calls per log type.
+	logCalls map[string]int
 	// calls records what the command asked Nomad for.
 	calls []string
 	// volumeRegisterErr fails the update of an existing volume.
@@ -87,6 +93,8 @@ type fakeCluster struct {
 	// variableWriteErr makes every VariableWrite fail, as a token without the
 	// variables capability sees it.
 	variableWriteErr error
+	// variableDeleteErr makes every VariableDelete fail.
+	variableDeleteErr error
 	// callsMu guards calls. The streaming calls (Exec, Logs) run in a goroutine
 	// of their own and must not take mu, so record has a lock of its own.
 	callsMu sync.Mutex
@@ -398,6 +406,9 @@ func (c *fakeCluster) VariableDelete(ctx context.Context, path string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.record("VariableDelete " + path)
+	if c.variableDeleteErr != nil {
+		return c.variableDeleteErr
+	}
 	if _, ok := c.variables[path]; !ok {
 		return notFoundError()
 	}
@@ -441,16 +452,51 @@ func (c *fakeCluster) Exec(ctx context.Context, alloc *api.Allocation, task stri
 	return c.exec.Exec(ctx, ExecOpts{Command: cmd, Stdin: stdin, Stdout: stdout, Stderr: stderr, TTY: tty, TermSize: termSize})
 }
 
-func (c *fakeCluster) Logs(ctx context.Context, alloc *api.Allocation, task, logType string, follow bool) (<-chan *api.StreamFrame, <-chan error) {
-	c.record("Logs " + alloc.ID + " " + logType)
-	frames := make(chan *api.StreamFrame, 1)
-	if data, ok := c.logData[logType]; ok {
+func (c *fakeCluster) Logs(ctx context.Context, alloc *api.Allocation, task, logType string, follow bool, offset int64) (<-chan *api.StreamFrame, <-chan error) {
+	c.record(fmt.Sprintf("Logs %s %s %d", alloc.ID, logType, offset))
+	c.mu.Lock()
+	if c.logCalls == nil {
+		c.logCalls = map[string]int{}
+	}
+	c.logCalls[logType]++
+	n := c.logCalls[logType]
+	steps := c.logSteps[logType]
+	data, hasData := c.logData[logType]
+	c.mu.Unlock()
+
+	frames := make(chan *api.StreamFrame, 4)
+	errCh := make(chan error, 1)
+	if len(steps) > 0 {
+		if n > len(steps) {
+			n = len(steps)
+		}
+		step := steps[n-1]
+		for _, frame := range step.frames {
+			frames <- &api.StreamFrame{Data: []byte(frame)}
+		}
+		if step.err != nil {
+			// A lost stream does not close its frames: Nomad reports it on the
+			// error channel and leaves the stream open, which is what a client
+			// that restarted does.
+			errCh <- step.err
+			return frames, errCh
+		}
+		close(frames)
+		errCh <- io.EOF
+		return frames, errCh
+	}
+	if hasData {
 		frames <- &api.StreamFrame{Data: []byte(data)}
 	}
 	close(frames)
-	errCh := make(chan error, 1)
 	errCh <- io.EOF
 	return frames, errCh
+}
+
+// logStep is one call of a scripted log stream: its frames, then its error.
+type logStep struct {
+	frames []string
+	err    error
 }
 
 // addNode registers a node with the box driver and the box-volume plugin.
@@ -593,8 +639,26 @@ type fakeGuest struct {
 	// "session ls"): each one blocks until its context ends, which is what a
 	// guest out of memory does.
 	silent map[string]bool
+	// lost is how many upcoming calls fail the way a lost connection does,
+	// before the guest answers again; lostErr is what they report.
+	lost    int
+	lostErr error
+	// loseWhen, when set, decides per call whether it is lost (it gets the
+	// command and the number of the call), so a test can lose exactly one.
+	loseWhen func(command []string, call int) error
+	// onCall runs for every command the guest runs, on the caller's goroutine.
+	onCall func(command []string)
+	// deaf holds the boxctl calls never answer at all, not even when their
+	// context ends: what a transport does while its server looks for a node that
+	// is restarting, and what no bound of the caller's context can stop.
+	deaf map[string]bool
+	// deafCh keeps the deaf calls of a test from returning.
+	deafCh chan struct{}
 	// tty records whether a command asked for a terminal.
 	tty bool
+	// mu guards calls and stdin: a command that gave up on a call leaves its
+	// goroutine running, so two calls can be in flight at once.
+	mu sync.Mutex
 	// calls records every command that ran.
 	calls [][]string
 	// stdin records what was sent on stdin.
@@ -613,6 +677,8 @@ func newFakeGuest(t *testing.T) *fakeGuest {
 		responses: map[string]string{},
 		errors:    map[string]boxctlAnswer{},
 		silent:    map[string]bool{},
+		deaf:      map[string]bool{},
+		deafCh:    make(chan struct{}),
 	}
 }
 
@@ -639,7 +705,25 @@ func (g *fakeGuest) read(t *testing.T, guestPath string) string {
 }
 
 func (g *fakeGuest) Exec(ctx context.Context, opts ExecOpts) (int, error) {
+	g.mu.Lock()
 	g.calls = append(g.calls, opts.Command)
+	call := len(g.calls)
+	g.mu.Unlock()
+	if g.onCall != nil {
+		g.onCall(opts.Command)
+	}
+	if g.loseWhen != nil {
+		if err := g.loseWhen(opts.Command, call); err != nil {
+			return -2, err
+		}
+	}
+	if g.lost > 0 {
+		g.lost--
+		if g.lostErr != nil {
+			return -2, g.lostErr
+		}
+		return -2, fmt.Errorf("cannot run boxctl in the box: unexpected EOF")
+	}
 	if opts.TTY {
 		g.tty = true
 	}
@@ -667,8 +751,11 @@ func (g *fakeGuest) Exec(ctx context.Context, opts ExecOpts) (int, error) {
 
 // callLines is every command the fake guest ran, as one line each.
 func (g *fakeGuest) callLines() []string {
-	out := make([]string, 0, len(g.calls))
-	for _, call := range g.calls {
+	g.mu.Lock()
+	calls := append([][]string(nil), g.calls...)
+	g.mu.Unlock()
+	out := make([]string, 0, len(calls))
+	for _, call := range calls {
 		out = append(out, strings.Join(call, " "))
 	}
 	return out
@@ -680,7 +767,9 @@ func (g *fakeGuest) recordStdin(opts ExecOpts) {
 		return
 	}
 	data, _ := io.ReadAll(opts.Stdin)
+	g.mu.Lock()
 	g.stdin = append(g.stdin, string(data))
+	g.mu.Unlock()
 }
 
 func (g *fakeGuest) boxctl(ctx context.Context, opts ExecOpts) (int, error) {
@@ -697,14 +786,22 @@ func (g *fakeGuest) boxctl(ctx context.Context, opts ExecOpts) (int, error) {
 		data, _ := io.ReadAll(opts.Stdin)
 		stdin = string(data)
 	}
+	g.mu.Lock()
 	g.stdin = append(g.stdin, stdin)
-	if answer, ok := g.errors[key]; ok {
+	g.mu.Unlock()
+	for prefix := range g.deaf {
+		if strings.HasPrefix(key, prefix) {
+			<-g.deafCh
+			return -2, fmt.Errorf("the box did not answer")
+		}
+	}
+	if answer, ok := lookupAnswer(g.errors, key); ok {
 		if opts.Stdout != nil {
 			_, _ = io.WriteString(opts.Stdout, answer.json)
 		}
 		return answer.code, nil
 	}
-	if answer, ok := g.responses[key]; ok {
+	if answer, ok := lookupResponse(g.responses, key); ok {
 		if opts.Stdout != nil {
 			_, _ = io.WriteString(opts.Stdout, answer)
 		}
@@ -714,6 +811,36 @@ func (g *fakeGuest) boxctl(ctx context.Context, opts ExecOpts) (int, error) {
 		fmt.Fprintf(opts.Stderr, "fake boxctl: unknown command %q", key)
 	}
 	return 1, nil
+}
+
+// lookupResponse finds the answer of a call. An answer registered for a prefix of
+// the call answers it, so a test does not have to know a timeout that a clock
+// computed; an exact answer always wins.
+func lookupResponse(m map[string]string, key string) (string, bool) {
+	if v, ok := m[key]; ok {
+		return v, true
+	}
+	best, bestLen := "", -1
+	for k, v := range m {
+		if strings.HasPrefix(key, k) && len(k) > bestLen {
+			best, bestLen = v, len(k)
+		}
+	}
+	return best, bestLen >= 0
+}
+
+// lookupAnswer is lookupResponse for the error documents.
+func lookupAnswer(m map[string]boxctlAnswer, key string) (boxctlAnswer, bool) {
+	if v, ok := m[key]; ok {
+		return v, true
+	}
+	best, bestLen, found := boxctlAnswer{}, -1, false
+	for k, v := range m {
+		if strings.HasPrefix(key, k) && len(k) > bestLen {
+			best, bestLen, found = v, len(k), true
+		}
+	}
+	return best, found
 }
 
 func (g *fakeGuest) tar(opts ExecOpts) (int, error) {
@@ -836,7 +963,17 @@ func newTestApp(t *testing.T, indexBody string) *testApp {
 	app.In = in
 	clock := &fakeClock{now: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC), step: time.Second}
 	app.Now = clock.Now
-	app.Sleep = func(ctx context.Context, d time.Duration) error { return nil }
+	// A sleep that notices the caller stopping is what a real wait does; a
+	// command that follows a stream would otherwise run on after its context
+	// ended.
+	app.Sleep = func(ctx context.Context, d time.Duration) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
 	app.SetImageIndexURL("http://images.test/box-base/index.json")
 	return &testApp{App: app, cluster: cluster, guest: guest, images: images, term: term, out: out, errOut: errOut, in: in, clock: clock}
 }

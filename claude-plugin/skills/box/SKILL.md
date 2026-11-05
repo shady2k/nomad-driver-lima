@@ -49,7 +49,18 @@ started again.
 `--json` on any command gives one JSON document to parse.
 
 Exit codes: `0` ok, `1` error, `2` usage, `3` not found, `4` timeout (still
-running). A non-zero exit is always a sentence you can act on.
+running), `5` unknown (contact with the box was lost: the turn or the command may
+still run). A non-zero exit is always a sentence you can act on.
+
+**A lost connection is not a lost turn.** `box wait`, `box events -f` and
+`box logs -f` keep trying while the connection to the box is away — the node's
+client restarted for a driver update, a 5xx, a restarted `boxd` — and say so
+twice on stderr (`lost contact with the box; retrying`, then `back in contact
+after 1m12s`). `box wait` does not exit 1 for that: it ends with the turn's own
+result, and only exits `5` when contact is still lost at `--timeout`. `box run`
+cannot be sent twice, so a lost stream exits `5` and says the result is unknown;
+check the box (`box run <id> -- ps -ef`, `box logs <id> -f`) instead of running
+the command again.
 
 ## Keeping an environment: project images
 
@@ -87,6 +98,9 @@ box's environment an image instead of repeating it.
   look for a project image of your project: a `project` row whose parent is the
   newest base image already holds the toolchain and the caches, and a box from it
   starts ahead of one that installs them again.
+- **`box events <id> <session> --tail 20`** is the news of a long session: the
+  last N events instead of the feed from a cursor. Use it when you come back to a
+  session you did not follow, then `--since` with the last sequence to go on.
 - **A box's `boxd` and executors come from a platform bundle, not from its
   image.** For an image built for bundles the driver mounts the newest bundle
   for the box's architecture read-only at `/opt/box` when the box starts;
@@ -131,7 +145,17 @@ box's environment an image instead of repeating it.
   resumes a stream you already read. Do not write `while ...; sleep 60; done`
   scripts around a box, and do not poll `box status` in a loop.
 - **`box wait` exits 1 when the turn ended in an error or was cancelled**, with
-  the turn's error; 0 means the turn is done.
+  the turn's error; 0 means the turn is done; `5` means contact with the box was
+  lost and the turn's state is unknown, so it may still be running — read
+  `box events <id> <session> --since N` when the box answers again instead of
+  sending the prompt a second time.
+- **A session that is `active outside a turn` is still working.** A turn that
+  ended in an error while the executor kept going: `box session ls` and `box
+  status` say `active outside a turn`, and what it does is in `box events` with
+  turn 0. Do not send it a second prompt in that state, and do not open a second
+  session in the same directory: `box session new` and `box send` warn
+  (`session s-x is working in the same directory`). Read the work from
+  `box events`, not from the turn that ended.
 - **A done turn with processes still running is not finished work.** `box wait`
   says so on stderr when the turn left a command running in the box (a build, a
   test run, a server); the exit code stays 0, because when its turn ends is the
@@ -198,6 +222,11 @@ starts, so no key lands on a disk.
 - `boxctl info` inside the box (`box run <id> -- boxctl info`) reports
   `available` (the binary is installed) and `configured` (the credentials are
   there) for every executor.
+- **A rotated key reaches a running box by itself**, within seconds: an idle
+  session's executor restarts at once, a session in a turn keeps its executor
+  until the turn ends, and a rotation that changes no byte restarts nothing (a
+  driver update therefore costs no turn). Nothing to do in the box, and no reason
+  to recreate it.
 
 ## What a box does not protect
 

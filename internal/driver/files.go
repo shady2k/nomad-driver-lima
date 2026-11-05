@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 
@@ -15,20 +16,43 @@ import (
 	"github.com/shady2k/nomad-driver-lima/internal/box"
 )
 
-// taskFilesDigest fingerprints the files Nomad rendered into a task's local and
-// secrets directories.
+// taskFilesDigest fingerprints the files of a task's local and secrets
+// directories.
 //
-// The driver copies those files into the guest when the task starts. Nomad
+// The driver copies those files into the directories the guest mounts. Nomad
 // re-renders a template whose Nomad Variable changed (change_mode = "noop", so a
 // credential rotation never restarts the VM), and the driver then has to notice
-// and refresh the guest's tmpfs copy. A digest of path, size and modification time
-// is cheap enough to compute on a timer and exact enough to catch a rotation.
+// and refresh the guest's copy.
+//
+// The digest is the content of every file, not its size and modification time: a
+// re-render that writes the same bytes is not a change, and a driver update that
+// re-attaches to a running box must not read every file as new and interrupt the
+// work in it. A file rewritten with the same bytes therefore stages nothing and
+// reloads nothing.
 func taskFilesDigest(tc *drivers.TaskConfig) string {
 	if tc == nil {
 		return ""
 	}
+	return dirsDigest(tc.TaskDir().LocalDir, tc.TaskDir().SecretsDir)
+}
+
+// stagedFilesDigest fingerprints the files the guest is mounted now: the box's
+// host directories, which StageTaskFiles filled. It is the same digest over the
+// same layout as taskFilesDigest, so a recovered task compares what is there
+// with what Nomad rendered, and stages nothing when they agree.
+func stagedFilesDigest(b *box.Box) string {
+	if b == nil {
+		return ""
+	}
+	local, secrets := b.TaskFilesDirs()
+	return dirsDigest(local, secrets)
+}
+
+// dirsDigest hashes every regular file below the given roots by the name of the
+// root it is in, its path below that root and the sha256 of its content.
+func dirsDigest(roots ...string) string {
 	h := sha256.New()
-	for _, root := range []string{tc.TaskDir().LocalDir, tc.TaskDir().SecretsDir} {
+	for _, root := range roots {
 		if root == "" {
 			continue
 		}
@@ -37,15 +61,16 @@ func taskFilesDigest(tc *drivers.TaskConfig) string {
 			if err != nil || d.IsDir() || !d.Type().IsRegular() {
 				return nil
 			}
-			info, err := d.Info()
-			if err != nil {
-				return nil
-			}
 			rel, err := filepath.Rel(root, path)
 			if err != nil {
 				return nil
 			}
-			entries = append(entries, fmt.Sprintf("%s\x00%s\x00%d\x00%d", filepath.Base(root), rel, info.Size(), info.ModTime().UnixNano()))
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			sum := sha256.Sum256(data)
+			entries = append(entries, fmt.Sprintf("%s\x00%s\x00%s", filepath.Base(root), rel, hex.EncodeToString(sum[:])))
 			return nil
 		})
 		sort.Strings(entries)
@@ -63,13 +88,22 @@ func taskFilesDigest(tc *drivers.TaskConfig) string {
 // them, and tells boxd so a running box picks up new executor credentials.
 //
 // The box is not restarted: this is what makes a credential rotation reach a
-// running box (see docs/design-decisions.md).
+// running box (see docs/design-decisions.md). A re-render that changed no byte
+// does nothing here at all: no file is written and boxd is not called, so a
+// driver update cannot restart an executor under a running turn.
 func (d *Driver) refreshTaskFiles(h *taskHandle, b *box.Box) {
 	if h == nil || b == nil {
 		return
 	}
 	digest := taskFilesDigest(h.tc)
-	if digest == "" || digest == h.filesDigest() {
+	if digest == "" {
+		return
+	}
+	// The digest of what is there is taken before the comparison, and it is the
+	// answer to "does the guest have these files": a task recovered after a
+	// driver restart carries no record of them, and a Nomad re-render that wrote
+	// the same bytes must not stage anything or restart an executor.
+	if stagedFilesDigest(b) == digest {
 		return
 	}
 	n, err := b.StageTaskFiles(h.tc.TaskDir().LocalDir, h.tc.TaskDir().SecretsDir, taskPrivateDir(h.tc))
@@ -77,7 +111,6 @@ func (d *Driver) refreshTaskFiles(h *taskHandle, b *box.Box) {
 		d.emit(h.tc, "files", fmt.Sprintf("Box %s: the task files changed, but they could not be put where the guest mounts them: %v", h.boxID, err))
 		return
 	}
-	h.setFilesDigest(digest)
 	d.emit(h.tc, "files", fmt.Sprintf("Box %s: Nomad re-rendered the task files (%d file(s)); the guest has them again", h.boxID, n))
 	if _, stderr, err := d.boxm.Lima().Shell(d.ctx, h.boxID, []string{"boxctl", "reload"}); err != nil {
 		d.emit(h.tc, "reload", fmt.Sprintf("Box %s: boxd could not reload the executor credentials (%v%s)", h.boxID, err, suffixStderr(stderr)))

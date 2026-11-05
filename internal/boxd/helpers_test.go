@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -149,6 +150,44 @@ func allEvents(t *testing.T, m *Manager, id string) []Event {
 		}
 		since = next
 	}
+}
+
+// lockedBuffer is a Journal a test reads while boxd writes it: the outside-turn
+// watcher writes from a goroutine of its own.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// transcriptHas reports whether any transcript of a session holds want. The fake
+// executor writes one file per transcript under the session's own directory.
+func transcriptHas(t *testing.T, cfg DaemonConfig, sessionID, want string) bool {
+	t.Helper()
+	root := filepath.Join(cfg.StateDir, "sessions", sessionID)
+	found := false
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".jsonl") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err == nil && strings.Contains(string(data), want) {
+			found = true
+		}
+		return nil
+	})
+	return found
 }
 
 // mkdirAll is a test helper.

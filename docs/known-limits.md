@@ -237,6 +237,46 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   the right. Until then the version stays readable, and a box created from it
   keeps working: it holds only the digest of what it pulled.
 
+## When the connection is lost
+
+- **A turn's state can be unknown.** When `box wait` runs out of `--timeout`
+  with contact still lost it exits `5` rather than `4` or `1`: the turn may have
+  finished while the box was unreachable, and it may still run. The feed's cursor
+  (`box events --since`) is what answers the question once the box is back, and
+  nothing in the CLI can answer it before that.
+- **`box run` has no answer after a lost stream.** A command that was cut off
+  cannot be asked whether it ran: it might have finished its work, left half of
+  it, or not started. The command exits `5` and does not send it again; what ran
+  is in the box's own log (`box logs -f`) and in `box run <id> -- ps -ef` when the
+  box answers.
+- **A log resumed by byte offset assumes the file only grew.** `box logs -f`
+  resumes each of the task's two log files at the byte it read to. Nomad rotates
+  a task log at 10 MiB, and a rotation while the connection is lost makes that
+  offset point into a file that was truncated: the resumed read then starts at
+  the wrong place or ends early. A follow that spans a rotation is read again
+  from the start with `box logs <id>`.
+- **A long disconnection ends the task at Nomad.** `box wait` keeps trying for as
+  long as `--timeout` allows, but the box is Nomad's task: a client that stays
+  away longer than the server tolerates makes the server mark the allocation lost
+  and place a new one, and the client then stops the box on its return. The disk
+  is kept, so the new allocation adopts the same box and the same sessions, and
+  the turn that was running is lost with the VM. Measured on the local cluster:
+  six seconds away cost nothing, and a rebuild that kept the client down for
+  about eighty seconds made Nomad end the allocation at its return (the next
+  allocation started four seconds later on the same disk).
+- **A lost connection is only retried by four commands.** `box wait`,
+  `box events -f`, `box logs -f` and `box run` know the difference between a box
+  that is gone and a connection that is not there. Every other command reports
+  what it saw: `box status` and `box top` are short and are meant to be asked
+  again, and `box send` either reached the guest or did not, which its sentence
+  says.
+- **A box replaced by another allocation is not followed.** `box wait` asks for
+  the turn by number after a loss, and the number lives in the box's session
+  store, so a box whose allocation Nomad replaced under a new id — a resize, a
+  re-registration — is followed for its state but the guest call has to find the
+  same guest. A box that was restarted loses its running turn: that is not a lost
+  connection and is reported as the turn it is.
+
 ## Sessions and executors
 
 - **Resume works for prime only.** opencode keeps its own transcripts and the
@@ -252,6 +292,18 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   implies 4 to 5 sessions in a 1 GiB box; that case is not covered by a test.
 - **One in-flight turn per session.** A second `send` while a turn runs answers
   `busy`. There is no queue.
+- **An executor that keeps working after a failed turn is only watched, not
+  fenced.** boxd sends `session/cancel` when a turn ends in an error from the
+  executor, and records what it still sends (`executor_active`), and `box session
+  new` and `box send` warn when another session works in the same directory. None
+  of that stops the executor: an executor that ignores `session/cancel` goes on
+  until it stops by itself or the session is closed. A file lock or a git index
+  two writers touch is still two writers.
+- **A rotation is compared by content.** boxd restarts an executor when the
+  credential files' content changed, and the driver decides by the task files'
+  content, so a rotation that writes the same bytes restarts nothing — and a
+  rotation of a key the provider has already invalidated fails the next turn with
+  the provider's own error, which is what it is.
 - **A resize kills an in-flight turn.** Sessions should be idle when a box is
   resized: the turn dies with the VM.
 - **A box gets no extra agent packages and no skills.** A package cannot travel

@@ -146,6 +146,17 @@ func (a *App) cmdRun(ctx context.Context, args []string) error {
 		return errorf("box run %s: interrupted; %s", id, stopped)
 	}
 	if err != nil {
+		// A command cannot be sent twice: a stream that was lost may have run it
+		// to the end, or not at all, and there is no way to ask. Saying it failed
+		// would make an agent run it again, and saying it passed would be a lie.
+		if lostContact(err) && ctx.Err() == nil {
+			if gone := a.boxGone(ctx, id); gone != nil {
+				return gone
+			}
+			return unknownf("lost contact with the box %s while %q ran: what the command did is not known, and it may still be running in the box. "+
+				"It is not run again. `box run %s -- ps -ef` shows what runs when the box answers, `box logs %s -f` what it printed",
+				id, strings.Join(rest, " "), id, id)
+		}
 		return wrapf(err, "cannot run %q in box %s", strings.Join(rest, " "), id)
 	}
 	return guestExitCode(code)
@@ -178,7 +189,9 @@ func (a *App) stopGuestRun(tr ExecTransport, pidFile string) string {
 // cmdLogs streams the task log of a box, which is the boxd event stream.
 //
 // Nomad keeps stdout and stderr of the task apart; both belong to the log the
-// coordinator reads, so both are streamed.
+// coordinator reads, so both are streamed. Each stream resumes from the byte it
+// left off at, so a client that restarts mid-read costs neither a repeated line
+// nor a lost one, and only a box that is really gone ends the stream.
 func (a *App) cmdLogs(ctx context.Context, args []string) error {
 	fs := newFlagSet("logs")
 	follow := fs.Bool("f", false, "follow the log")
@@ -193,15 +206,13 @@ func (a *App) cmdLogs(ctx context.Context, args []string) error {
 	if box.AllocationID == "" {
 		return errorf("the box %s has no allocation, so it has no logs; `box start %s` runs it again", id, id)
 	}
-	alloc, err := a.Nomad.Allocation(ctx, box.AllocationID)
+	alloc, err := a.logsAlloc(ctx, box)
 	if err != nil {
-		if isNotFoundErr(err) {
-			return notFoundf("the allocation of box %s is gone; its logs are gone with it", id)
-		}
-		return wrapf(err, "cannot read allocation %s", box.AllocationID)
+		return err
 	}
 
 	writer := &lockedWriter{w: a.Out}
+	contact := a.newContact(id)
 	streams := []string{"stdout", "stderr"}
 	errs := make(chan error, len(streams))
 	var wg sync.WaitGroup
@@ -209,7 +220,7 @@ func (a *App) cmdLogs(ctx context.Context, args []string) error {
 		wg.Add(1)
 		go func(logType string) {
 			defer wg.Done()
-			errs <- a.streamLog(ctx, alloc, logType, *follow, writer)
+			errs <- a.streamLog(ctx, id, alloc, logType, *follow, writer, contact)
 		}(logType)
 	}
 	wg.Wait()
@@ -222,32 +233,103 @@ func (a *App) cmdLogs(ctx context.Context, args []string) error {
 	return nil
 }
 
-// streamLog copies one log file of a task to w.
-func (a *App) streamLog(ctx context.Context, alloc *api.Allocation, logType string, follow bool, w io.Writer) error {
-	frames, errCh := a.Nomad.Logs(ctx, alloc, boxTaskName, logType, follow)
-	var streamErr error
-	for frames != nil {
+// logsAlloc returns the allocation whose task log is the box's journal.
+func (a *App) logsAlloc(ctx context.Context, box BoxRecord) (*api.Allocation, error) {
+	alloc, err := a.Nomad.Allocation(ctx, box.AllocationID)
+	if err != nil {
+		if isNotFoundErr(err) {
+			return nil, notFoundf("the allocation of box %s is gone; its logs are gone with it", box.ID)
+		}
+		return nil, wrapf(err, "cannot read allocation %s", box.AllocationID)
+	}
+	return alloc, nil
+}
+
+// streamLog copies one log file of a task to w, and picks it up again where it
+// stopped when the connection to the box is lost. It returns nil when the file
+// ended (without --f), when the caller interrupted it, or when the box is gone.
+func (a *App) streamLog(ctx context.Context, boxID string, alloc *api.Allocation, logType string, follow bool, w io.Writer, contact *contactOfBox) error {
+	var offset int64
+	attempts := 0
+	// Contact is back when a line arrives, not when the request succeeds: a
+	// stream that opens and stays silent proves nothing.
+	onFrame := func() { contact.back(logType) }
+	for {
+		err := a.streamLogOnce(ctx, alloc, logType, follow, w, &offset, onFrame)
+		if err == nil || ctx.Err() != nil {
+			return nil
+		}
+		if !lostContact(err) {
+			return err
+		}
+		contact.lost(logType, err)
+		attempts++
+		if err := contact.waitForContact(ctx, boxID, attempts); err != nil {
+			return err
+		}
+		// The allocation may have been replaced while the client was away; the
+		// log belongs to the box, so it is read from whichever one runs it now.
+		if box, _, err := a.findBox(ctx, boxID); err == nil && box.AllocationID != "" && box.AllocationID != alloc.ID {
+			if fresh, err := a.logsAlloc(ctx, box); err == nil {
+				alloc = fresh
+				offset = 0
+			}
+		}
+	}
+}
+
+// streamLogOnce copies one log file of a task to w from offset until the file
+// ends or the stream fails, and advances offset by what it read.
+//
+// The stream ends one of two ways: the frames channel closes, which is the end of
+// the file, or the error channel reports a failure -- a client that restarted
+// closes neither, it drops the connection, and Nomad then sends the error. The
+// bytes read are what the next attempt asks from, so a frame that arrived with
+// the failure and was not written is read again rather than lost.
+func (a *App) streamLogOnce(ctx context.Context, alloc *api.Allocation, logType string, follow bool, w io.Writer, offset *int64, onFrame func()) error {
+	frames, errCh := a.Nomad.Logs(ctx, alloc, boxTaskName, logType, follow, *offset)
+	write := func(frame *api.StreamFrame) {
+		if frame == nil || len(frame.Data) == 0 {
+			return
+		}
+		if onFrame != nil {
+			onFrame()
+		}
+		writeAll(w, frame.Data)
+		*offset += int64(len(frame.Data))
+	}
+	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case frame, ok := <-frames:
 			if !ok {
-				frames = nil
-				break
+				return nil
 			}
-			if frame != nil && len(frame.Data) > 0 {
-				writeAll(w, frame.Data)
-			}
+			write(frame)
 		case err := <-errCh:
-			// Keep reading the frames that are already buffered: the stream
-			// closes them when it is done.
-			if err != nil && !errors.Is(err, io.EOF) {
-				streamErr = err
+			if err == nil || errors.Is(err, io.EOF) {
+				// Nothing more will be said on the error side; the frames still
+				// say when the file ends.
+				errCh = nil
+				continue
 			}
-			errCh = nil
+			// The stream was lost. What it had already buffered is the log, so
+			// it goes out before the failure is reported.
+			for {
+				select {
+				case frame, ok := <-frames:
+					if !ok {
+						return err
+					}
+					write(frame)
+					continue
+				default:
+				}
+				return err
+			}
 		}
 	}
-	return streamErr
 }
 
 // lockedWriter serialises two log streams onto one writer.

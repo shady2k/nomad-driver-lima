@@ -24,6 +24,10 @@ const (
 	ExitNotFound = 3
 	// ExitTimeout is a wait that ran out while the work is still going on.
 	ExitTimeout = 4
+	// ExitUnknown is a command that lost contact with the box for good: the turn
+	// or the command it was following may still run, so its result is not known.
+	// It is neither a failure nor a timeout, because neither is true.
+	ExitUnknown = 5
 )
 
 // Error is a failure with an exit code and a message meant for the user.
@@ -86,6 +90,17 @@ func timeoutf(format string, args ...any) *Error {
 	return &Error{Code: ExitTimeout, Msg: fmt.Sprintf(format, args...)}
 }
 
+// partialf returns a failure that did part of its work (exit 1, as a failure):
+// the sentence says what happened and what is left to do.
+func partialf(format string, args ...any) *Error {
+	return &Error{Code: ExitError, Msg: fmt.Sprintf(format, args...)}
+}
+
+// unknownf returns a lost-contact failure (exit 5): the work may still go on.
+func unknownf(format string, args ...any) *Error {
+	return &Error{Code: ExitUnknown, Msg: fmt.Sprintf(format, args...)}
+}
+
 // ExitCode reports the process exit code for err: one of the Exit* constants.
 func ExitCode(err error) int {
 	if err == nil {
@@ -96,6 +111,14 @@ func ExitCode(err error) int {
 		return e.Code
 	}
 	return ExitError
+}
+
+// errOr renders an error for a sentence that carries it, or nothing at all.
+func errOr(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // joinNotes joins the sentences of a note, skipping the empty ones.

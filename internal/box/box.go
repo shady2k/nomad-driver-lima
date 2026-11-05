@@ -292,6 +292,13 @@ func (b *Box) DiskPath() string { return VolumeDiskPath(b.spec.VolumeDir, b.spec
 // InstanceDir returns <LIMA_HOME>/<box id>.
 func (b *Box) InstanceDir() string { return b.m.lima.InstanceDir(b.spec.BoxID) }
 
+// TaskFilesDirs returns the two host directories the guest mounts: the task's
+// local files and the executor credentials, below FilesDir.
+func (b *Box) TaskFilesDirs() (local, secrets string) {
+	dir := b.m.FilesDir(b.spec.BoxID)
+	return filepath.Join(dir, boxLocalDir), filepath.Join(dir, boxSecretsDir)
+}
+
 func (b *Box) event(kind, message string) {
 	if b.rep != nil {
 		b.rep(kind, message)

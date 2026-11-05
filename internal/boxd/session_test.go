@@ -181,6 +181,88 @@ func TestToolEvents(t *testing.T) {
 	}
 }
 
+// TestAFailedTurnCancelsTheExecutorAndSaysItIsActiveOutsideTheTurn: a turn that
+// ended in an error from the executor is not a turn the agent goes on writing
+// in. boxd asks the executor to cancel, records the updates that still arrive as
+// activity outside a turn, says so once in the journal, and says when it went
+// quiet again.
+func TestAFailedTurnCancelsTheExecutorAndSaysItIsActiveOutsideTheTurn(t *testing.T) {
+	cfg := testConfig(t)
+	journal := &lockedBuffer{}
+	cfg.Journal = journal
+	cfg.OutsideTurnQuiet = 300 * time.Millisecond
+	m := newManager(t, cfg)
+	s := mustSession(t, m, "prime", "fake/model-1")
+	if _, err := m.Send(s.ID, "fail-work"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if tr := waitTurn(t, m, s.ID, 1); tr.State != TurnError {
+		t.Fatalf("turn 1 = %q, want error: %+v", tr.State, tr)
+	}
+
+	// The updates that arrive after the error are recorded against the session,
+	// with the number of seconds since the last of them.
+	var active *int
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got, err := m.Get(s.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.ExecutorActive != nil {
+			active = got.ExecutorActive
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if active == nil {
+		t.Fatal("an executor sending updates with no turn running must be reported as active outside a turn")
+	}
+	if *active < 0 {
+		t.Fatalf("executor_active = %d seconds, want a measurement", *active)
+	}
+
+	// The events it sent are in the feed with turn 0: nothing pretends they
+	// belong to the turn that ended.
+	evs := allEvents(t, m, s.ID)
+	outside := 0
+	for _, ev := range evs {
+		if ev.Turn == 0 && ev.Kind == KindTool && strings.Contains(ev.Summary, "make test") {
+			outside++
+		}
+	}
+	if outside == 0 {
+		t.Fatalf("no event outside a turn in the feed: %v", kinds(evs))
+	}
+
+	// Once it stops, the session stops reporting it, and the journal says so.
+	for time.Now().Before(deadline.Add(2 * time.Second)) {
+		got, err := m.Get(s.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.ExecutorActive == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got, _ := m.Get(s.ID); got.ExecutorActive != nil {
+		t.Fatal("a quiet executor must stop being reported as active outside a turn")
+	}
+	lines := journal.String()
+	if strings.Count(lines, "active outside a turn") != 2 {
+		t.Fatalf("the journal must say it once when it starts and once when it stops:\n%s", lines)
+	}
+	if !strings.Contains(lines, "keeps working") || !strings.Contains(lines, "quiet again") {
+		t.Fatalf("the journal lines do not say what happened:\n%s", lines)
+	}
+
+	// The executor was asked to cancel: the fake keeps that in its transcript.
+	if !transcriptHas(t, cfg, s.ID, `"type":"cancel"`) {
+		t.Fatal("boxd did not send session/cancel to an executor whose turn ended in an error")
+	}
+}
+
 func TestCancelIsAcknowledged(t *testing.T) {
 	cfg := testConfig(t)
 	m := newManager(t, cfg)

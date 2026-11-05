@@ -61,6 +61,10 @@ type DaemonConfig struct {
 	CancelGrace  time.Duration // how long a cancel waits for the executor to agree
 	StartTimeout time.Duration // initialize + session/new budget
 	TurnLimit    time.Duration // hard ceiling on one turn (0 = none)
+	// OutsideTurnQuiet is how long an executor that keeps sending updates with
+	// no turn running must be quiet before the session stops reporting it
+	// (default one minute).
+	OutsideTurnQuiet time.Duration
 }
 
 func (c DaemonConfig) logf(format string, args ...any) {
@@ -117,6 +121,15 @@ func (c DaemonConfig) procRoot() string {
 		return c.ProcRoot
 	}
 	return "/proc"
+}
+
+// outsideTurnQuiet is how long a session may take no update before the episode
+// of updates outside a turn ends.
+func (c DaemonConfig) outsideTurnQuiet() time.Duration {
+	if c.OutsideTurnQuiet > 0 {
+		return c.OutsideTurnQuiet
+	}
+	return time.Minute
 }
 
 // journalctlBin is the binary the seal rotates and vacuums the journal with.
@@ -185,6 +198,16 @@ type Manager struct {
 	// would write the session list back into the state directory the seal just
 	// deleted.
 	sealed bool
+
+	// secrets is the digest of the executor credentials boxd last worked with
+	// (see rememberSecrets); secretsMu guards it.
+	secretsMu sync.Mutex
+	secrets   string
+
+	// outsideDone stops the watcher that ends the episodes of executor updates
+	// outside a turn (watchOutsideTurn).
+	outsideDone chan struct{}
+	outsideOnce sync.Once
 }
 
 // Prepare is the box's preparation.
@@ -201,10 +224,24 @@ func NewManager(cfg DaemonConfig) (*Manager, error) {
 		return nil, err
 	}
 	m := &Manager{cfg: cfg, store: store, sessions: map[string]*session{}, prep: newPreparer(cfg)}
+	m.secrets = secretsDigest(cfg)
 	if err := m.load(); err != nil {
 		return nil, err
 	}
+	m.outsideDone = make(chan struct{})
+	go m.watchOutsideTurn(m.outsideDone)
 	return m, nil
+}
+
+// rememberSecrets records the digest of the credentials boxd works with now and
+// reports whether they differ from the ones it had before. A reload uses it to
+// leave every executor running when nothing changed.
+func (m *Manager) rememberSecrets(digest string) bool {
+	m.secretsMu.Lock()
+	defer m.secretsMu.Unlock()
+	changed := m.secrets != digest
+	m.secrets = digest
+	return changed
 }
 
 func (m *Manager) load() error {
@@ -277,6 +314,7 @@ func (m *Manager) persist(_ *session) {
 		sess := m.sessions[id]
 		sess.mu.Lock()
 		ps := persistedSession{Session: sess.meta}
+		ps.ExecutorActive = nil
 		turns := make([]Turn, 0, len(sess.turns))
 		for _, t := range sess.turns {
 			turns = append(turns, t.Turn)
@@ -313,6 +351,15 @@ type session struct {
 	// reloadPending is set when new executor credentials arrived while a turn was
 	// running; the executor is restarted when the turn ends (see finishTurn).
 	reloadPending bool
+
+	// outsideTurn is set while the executor sends updates with no turn running:
+	// its turn ended in an error and boxd asked it to cancel, and it has not
+	// stopped yet (see noteOutsideUpdate). lastUpdate is its last update then;
+	// outsideExpected is what makes the first of them count, so an update that
+	// arrives late for a turn that ended normally is not one.
+	outsideTurn     bool
+	outsideExpected bool
+	lastUpdate      time.Time
 
 	// toolsMu guards toolTitles: tool calls announced without their input yet,
 	// by id, which are written out when the input or the result arrives.
@@ -603,8 +650,24 @@ func (m *Manager) List() []Session {
 	for _, id := range m.order {
 		s := m.sessions[id]
 		s.mu.Lock()
-		out = append(out, s.meta)
+		out = append(out, s.snapshotLocked())
 		s.mu.Unlock()
+	}
+	return out
+}
+
+// snapshotLocked is the session as a caller reads it: the stored record, plus
+// how long ago its executor last sent an update outside a turn, when it is
+// doing that. The caller holds s.mu.
+func (s *session) snapshotLocked() Session {
+	out := s.meta
+	out.ExecutorActive = nil
+	if s.outsideTurn {
+		seconds := int(s.m.cfg.now().Sub(s.lastUpdate).Round(time.Second) / time.Second)
+		if seconds < 0 {
+			seconds = 0
+		}
+		out.ExecutorActive = &seconds
 	}
 	return out
 }
@@ -617,28 +680,37 @@ func (m *Manager) List() []Session {
 // calls this. Idle executors are stopped so the next turn starts with the new
 // configuration; a session with a turn running is left alone and its executor
 // restarts after the turn, so a reload never kills work in flight.
+//
+// A reload that brings the same content restarts nothing. The comparison is of
+// the credential files' bytes, not their modification time and not whether they
+// were written again: Nomad re-renders a template whose Variable was written and
+// put back, and a box that restarted its executors for that would kill the turns
+// it was asked to keep.
 func (m *Manager) Reload() (ReloadResult, error) {
+	before := secretsDigest(m.cfg)
 	if err := prepareExecutorDirs(m.cfg); err != nil {
 		return ReloadResult{}, Errorf(CodeInternal, "reload the executor credentials: %v", err)
 	}
 	res := ReloadResult{Configured: []string{}}
-	for _, s := range m.List() {
-		if s.State == StateClosed {
-			continue
-		}
-		prep := m.lookupSession(s.ID)
-		if prep == nil {
-			continue
-		}
-		stopped, pending := prep.reloadExecutor()
-		if stopped {
-			res.Restarted = append(res.Restarted, s.ID)
-		}
-		if pending {
-			res.Deferred = append(res.Deferred, s.ID)
+	if m.rememberSecrets(before) {
+		for _, s := range m.List() {
+			if s.State == StateClosed {
+				continue
+			}
+			prep := m.lookupSession(s.ID)
+			if prep == nil {
+				continue
+			}
+			stopped, pending := prep.reloadExecutor()
+			if stopped {
+				res.Restarted = append(res.Restarted, s.ID)
+			}
+			if pending {
+				res.Deferred = append(res.Deferred, s.ID)
+			}
 		}
 	}
-	for _, name := range []string{"prime", "opencode", "claude"} {
+	for _, name := range executorNames {
 		ex, err := buildExecutor(name, m.cfg)
 		if err != nil {
 			continue
@@ -709,7 +781,7 @@ func (m *Manager) Get(id string) (Session, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.meta, nil
+	return s.snapshotLocked(), nil
 }
 
 // Send starts one turn and returns immediately.
@@ -735,6 +807,10 @@ func (m *Manager) Send(id, text string) (Turn, error) {
 	s.turns = append(s.turns, ts)
 	s.cur = ts
 	s.busy = true
+	// A new turn is the turn now: what the executor was doing outside the last
+	// one is part of this turn's work.
+	s.outsideTurn = false
+	s.outsideExpected = false
 	s.meta.LastTurn = n
 	s.meta.State = StateRunning
 	turn := ts.Turn
@@ -785,6 +861,17 @@ func (s *session) runTurn(ts *turnState, prompt string) {
 			s.finishTurn(ts, TurnCancelled, "cancelled", text, "cancelled")
 			return
 		}
+		// The executor answered the turn with an error and is alive: it may
+		// still be working -- a tool it started before it failed -- and a turn
+		// that ended is not a turn the agent may keep writing in with something
+		// else. Ask it to stop, and watch for what it still sends (see
+		// noteOutsideUpdate): events outside a turn are what a second writer in
+		// the same working copy looked like.
+		var rpc *acp.RPCError
+		if errors.As(err, &rpc) && s.executorAlive(p) {
+			s.expectUpdatesOutsideTurn()
+			_ = p.client.Cancel(p.session)
+		}
 		s.finishTurn(ts, TurnError, "", text, promptErrorSentence(err, p))
 		return
 	}
@@ -827,6 +914,96 @@ func promptErrorSentence(err error, p *proc) string {
 		return "turn timed out"
 	}
 	return fmt.Sprintf("executor stopped: %s (pid %d)", oneLine(err.Error(), 160), p.pid)
+}
+
+// executorAlive reports whether p is the session's live executor process.
+func (s *session) executorAlive(p *proc) bool {
+	if p == nil {
+		return false
+	}
+	s.mu.Lock()
+	current := s.proc
+	s.mu.Unlock()
+	if current != p {
+		return false
+	}
+	select {
+	case <-p.client.Done():
+		return false
+	default:
+		return true
+	}
+}
+
+// expectUpdatesOutsideTurn records that the turn ended in an error while the
+// executor is alive, so the next update it sends with no turn running is the
+// executor still working after its turn.
+func (s *session) expectUpdatesOutsideTurn() {
+	s.mu.Lock()
+	s.outsideExpected = true
+	s.outsideTurn = false
+	s.mu.Unlock()
+}
+
+// noteOutsideUpdate records one update that arrived with no turn running, while
+// the session expects them. It is the measurement `executor_active` reports, and
+// it says so once in the journal rather than once per update.
+func (s *session) noteOutsideUpdate() {
+	s.mu.Lock()
+	if !s.outsideExpected || s.busy {
+		s.mu.Unlock()
+		return
+	}
+	first := !s.outsideTurn
+	s.outsideTurn = true
+	s.lastUpdate = s.m.cfg.now()
+	s.mu.Unlock()
+	if first {
+		s.log.journalLine(0, "active outside a turn",
+			"the turn ended in an error but the executor keeps working: it was asked to cancel, and what it still sends is recorded until it stops")
+	}
+}
+
+// noteOutsideQuiet ends an episode of updates outside a turn once the executor
+// has been quiet for quiet. It returns whether it ended one.
+func (s *session) noteOutsideQuiet(quiet time.Duration) bool {
+	s.mu.Lock()
+	if !s.outsideTurn || s.m.cfg.now().Sub(s.lastUpdate) < quiet {
+		s.mu.Unlock()
+		return false
+	}
+	s.outsideTurn = false
+	s.outsideExpected = false
+	s.mu.Unlock()
+	s.log.journalLine(0, "active outside a turn",
+		fmt.Sprintf("the executor has sent nothing for %s; it is quiet again", quiet.Round(time.Second)))
+	return true
+}
+
+// watchOutsideTurn ends the episodes of updates outside a turn, so a session
+// that stopped says so in the journal and stops reporting executor_active.
+func (m *Manager) watchOutsideTurn(done <-chan struct{}) {
+	quiet := m.cfg.outsideTurnQuiet()
+	every := quiet / 10
+	if every < 10*time.Millisecond {
+		every = 10 * time.Millisecond
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			for _, meta := range m.List() {
+				s, err := m.lookup(meta.ID)
+				if err != nil {
+					continue
+				}
+				s.noteOutsideQuiet(quiet)
+			}
+		}
+	}
 }
 
 // finishTurn closes a turn exactly once and publishes its result.
@@ -1071,6 +1248,9 @@ func (m *Manager) Close(id string) error {
 
 // Shutdown stops every executor (boxd is going down; state stays resumable).
 func (m *Manager) Shutdown() {
+	if m.outsideDone != nil {
+		m.outsideOnce.Do(func() { close(m.outsideDone) })
+	}
 	sessions := m.List()
 	for _, meta := range sessions {
 		s, err := m.lookup(meta.ID)
@@ -1107,7 +1287,15 @@ func (s *session) reloadExecutor() (stopped, deferred bool) {
 	}
 	if s.busy {
 		s.reloadPending = true
+		turn := 0
+		if s.cur != nil {
+			turn = s.cur.Turn.Turn
+		}
 		s.mu.Unlock()
+		// A turn is running: it ends with the executor it started with, and the
+		// new credentials are what the next turn gets. The journal says so, so a
+		// person reading it knows why the executor restarts afterwards.
+		s.log.journalLine(turn, "reload", "the executor keeps this turn's credentials and restarts with the new ones when the turn ends")
 		return false, true
 	}
 	p := s.proc
@@ -1119,6 +1307,7 @@ func (s *session) reloadExecutor() (stopped, deferred bool) {
 		return false, false
 	}
 	p.stop(5 * time.Second)
+	s.log.journalLine(0, "reload", "new executor credentials: the idle executor was stopped and starts with them on the next turn")
 	s.m.persist(s)
 	return true, false
 }
@@ -1533,6 +1722,10 @@ func (s *session) handleUpdate(params json.RawMessage) {
 	turn := 0
 	if ts != nil {
 		turn = ts.Turn.Turn
+	} else {
+		// No turn is running and the executor is still sending: the turn it was
+		// in ended in an error. The update is recorded as such, with turn 0.
+		s.noteOutsideUpdate()
 	}
 	u := p.Update
 	data := map[string]any{"update": u.SessionUpdate}

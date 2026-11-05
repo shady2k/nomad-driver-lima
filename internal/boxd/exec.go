@@ -426,6 +426,45 @@ func (c *claudeExecutor) TranscriptIDs(string) []string { return nil }
 
 // --------------------------------------------------------------- config -----
 
+// executorNames are the executors boxd knows, in the order it reports them.
+var executorNames = []string{"prime", "opencode", "claude"}
+
+// secretsDigest fingerprints the executor credentials the driver put on the
+// tmpfs: every file of every executor's directory, by name and content.
+//
+// It is what a reload compares, so that a reload that changed nothing restarts
+// nothing. The modification time is deliberately not part of it: Nomad
+// re-renders a template that ends with the same bytes, and a rewrite is not a
+// new credential.
+func secretsDigest(cfg DaemonConfig) string {
+	h := sha256.New()
+	for _, name := range executorNames {
+		root := filepath.Join(cfg.SecretsDir, name)
+		var entries []string
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !d.Type().IsRegular() {
+				return nil
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return nil
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			sum := sha256.Sum256(b)
+			entries = append(entries, name+"/"+rel+"\x00"+hex.EncodeToString(sum[:]))
+			return nil
+		})
+		sort.Strings(entries)
+		for _, e := range entries {
+			_, _ = h.Write([]byte(e + "\n"))
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // prepareExecutorDirs copies the read-only secret directories into the runtime
 // directory (a tmpfs), so an agent can write its own settings without touching
 // the driver's copy in /run/box/secrets, and creates every executor's HOME (on
@@ -436,7 +475,7 @@ func prepareExecutorDirs(cfg DaemonConfig) error {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return fmt.Errorf("create %s: %w", root, err)
 	}
-	for _, name := range []string{"prime", "opencode", "claude"} {
+	for _, name := range executorNames {
 		// The HOME of every executor exists even without credentials: an executor
 		// that finds no HOME of its own writes into the home of the user boxd
 		// runs as.

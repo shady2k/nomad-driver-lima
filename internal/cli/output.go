@@ -563,6 +563,43 @@ func (a *App) boxctlFor(ctx context.Context, id string) (*Boxctl, BoxRecord, err
 	return client, box, nil
 }
 
+// boxctlRunning returns the guest client of a box that is running now, without
+// waiting for one that is on its way up.
+//
+// A box whose client is disconnected reports "unknown", and a command that
+// follows work must keep trying rather than sit in a wait of its own: waiting
+// here is what made a wait look like a hang while the node restarted. A box that
+// is stopped, failed or gone is an answer, and ends the wait.
+func (a *App) boxctlRunning(ctx context.Context, id string) (*Boxctl, BoxRecord, error) {
+	box, _, err := a.findBox(ctx, id)
+	if err != nil {
+		return nil, box, err
+	}
+	switch box.State {
+	case "running":
+	case "stopped", "failed", "orphan", "gone":
+		return nil, box, boxNotRunning(box)
+	default:
+		return nil, box, &notRunningYet{box: box}
+	}
+	client, err := a.boxctl(ctx, box)
+	if err != nil {
+		return nil, box, err
+	}
+	return client, box, nil
+}
+
+// notRunningYet is a box that is neither running nor finished: starting, or
+// unknown because its node is disconnected. It is not an answer, and a command
+// that follows work keeps trying.
+type notRunningYet struct {
+	box BoxRecord
+}
+
+func (e *notRunningYet) Error() string {
+	return fmt.Sprintf("the box %s is %s, not running yet", e.box.ID, dash(e.box.State))
+}
+
 // boxctl returns the guest client of a box.
 func (a *App) boxctl(ctx context.Context, box BoxRecord) (*Boxctl, error) {
 	alloc, err := a.runningAlloc(ctx, box)
@@ -607,19 +644,33 @@ func (a *App) nodeNameFor(ctx context.Context, cache map[string]string, nodeID s
 func boxNotRunning(box BoxRecord) error {
 	switch {
 	case box.State == "orphan":
-		return orphanCannot(box.ID, "run a command in")
+		return boxStatef("%s", orphanCannot(box.ID, "run a command in"))
 	case box.State == "gone":
-		return errorf("the box %s is gone: its disk no longer exists, so there is nothing to start. `box rm %s --yes` "+
+		return boxStatef("the box %s is gone: its disk no longer exists, so there is nothing to start. `box rm %s --yes` "+
 			"removes what is left of it", box.ID, box.ID)
 	case box.JobMissing:
-		return errorf("the box %s is stopped: Nomad no longer has its job, and its disk is kept. `box start %s` runs "+
+		return boxStatef("the box %s is stopped: Nomad no longer has its job, and its disk is kept. `box start %s` runs "+
 			"it again", box.ID, box.ID)
 	case box.State == "stopped":
-		return errorf("the box %s is stopped: its disk is kept. `box start %s` runs it again", box.ID, box.ID)
+		return boxStatef("the box %s is stopped: its disk is kept. `box start %s` runs it again", box.ID, box.ID)
 	case box.State == "starting":
-		return errorf("the box %s is starting; `box status %s` shows when the guest answers", box.ID, box.ID)
+		return boxStatef("the box %s is starting; `box status %s` shows when the guest answers", box.ID, box.ID)
 	default:
-		return errorf("the box %s is %s, not running; the guest cannot be reached. `box start %s` starts it again",
+		return boxStatef("the box %s is %s, not running; the guest cannot be reached. `box start %s` starts it again",
 			box.ID, dash(box.State), box.ID)
 	}
+}
+
+// boxStateError is a sentence about the box itself -- stopped, failed, gone,
+// orphaned -- and not about the connection to it. A command that keeps trying
+// while it has lost contact ends on one of these: the box is not coming back.
+type boxStateError struct{ inner *Error }
+
+func (e *boxStateError) Error() string { return e.inner.Error() }
+
+func (e *boxStateError) Unwrap() error { return e.inner }
+
+// boxStatef builds a boxStateError.
+func boxStatef(format string, args ...any) error {
+	return &boxStateError{inner: errorf(format, args...)}
 }

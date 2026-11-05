@@ -1,6 +1,7 @@
 package box
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -159,6 +160,12 @@ func (b *Box) syncFiles(dst string, files []taskFile) (int, error) {
 		data, err := os.ReadFile(f.host)
 		if err != nil {
 			return 0, fmt.Errorf("read task file %s: %w", f.log, err)
+		}
+		// A file the guest already mounts with these bytes is left alone: the
+		// guest sees a rewrite as a change, and a re-render that changed nothing
+		// must not look like one.
+		if current, err := os.ReadFile(target); err == nil && bytes.Equal(current, data) {
+			continue
 		}
 		tmp := target + ".box-new"
 		if err := os.WriteFile(tmp, data, 0o600); err != nil {

@@ -42,11 +42,8 @@ type taskHandle struct {
 	instanceDir string
 	cgroupMode  string
 
-	mu    sync.RWMutex
-	state drivers.TaskState
-	// digest is the digest of the task files the guest last received; the
-	// watcher re-copies them when Nomad re-renders them (a credential rotation).
-	digest      string
+	mu          sync.RWMutex
+	state       drivers.TaskState
 	startedAt   time.Time
 	completedAt time.Time
 	exit        *drivers.ExitResult
@@ -118,21 +115,6 @@ func (h *taskHandle) finish(res *drivers.ExitResult) {
 	h.exit = res.Copy()
 	h.mu.Unlock()
 	h.doneOnce.Do(func() { close(h.done) })
-}
-
-// setFilesDigest records the digest of the task files the guest now has.
-func (h *taskHandle) setFilesDigest(digest string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.digest = digest
-}
-
-// filesDigest returns the digest of the task files the guest last received; an
-// empty string means "unknown", which makes the watcher copy them again.
-func (h *taskHandle) filesDigest() string {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.digest
 }
 
 // currentInstanceDir returns the Lima instance directory, if known.

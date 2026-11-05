@@ -16,8 +16,9 @@ box [--json] <command> [arguments]
 - A `--` ends the flags: everything after it belongs to the command that
   follows (`box run dev1 -- df -h /` gives `df` its own `-h`).
 - Exit codes: `0` ok, `1` error, `2` usage, `3` not found, `4` timeout (the
-  thing is still running). `box run` and `box ssh` return the guest's own exit
-  code.
+  thing is still running), `5` unknown (contact with the box was lost and the
+  turn or the command may still run: see "When the connection is lost"). `box
+  run` and `box ssh` return the guest's own exit code.
 
 The environment the CLI reads:
 
@@ -356,6 +357,10 @@ description - a box made before boxes kept one - is shown as `orphan`: `box rm
 One box in detail: state, task events (default 10), the platform bundle it
 mounts, the guest and its executors, the sessions, the disk.
 
+A session whose turn ended in an error while the executor went on working shows
+as `idle (active outside a turn)`, with `executor_active` (the seconds since its
+last update) under `--json`; `box session ls` shows the same state.
+
 When processes are running in the guest and no turn is in progress in any
 session, the guest's block carries one line for them: `12 work process(es) are
 running with no turn in progress: cc1 -c big.c (pid 341, 3h2m, 2 children,
@@ -386,6 +391,19 @@ Deletes the box **and its disk**: the VM is stopped, the instance deleted, the
 volume and its directory removed, and the stored description deleted with it. It
 works when Nomad no longer has the job, and on an `orphan` disk. It asks first
 unless `--yes` is given, and it refuses to ask from a non-interactive shell.
+
+When the disk is deleted and the description cannot be, the command says it is
+**partial** instead of reporting a failure of the whole: the box is gone, the
+record is left, and `box ls` still lists a box with no disk. Exit code `1`, as
+for any failure, with the sentence that says what to do:
+
+```
+box: the box dev1 is gone -- its job and its disk were deleted -- but its
+description nomad/jobs/box-dev1/spec is left behind, so `box ls` still shows it
+and `box start dev1` would find a box with no disk. Delete the record with
+`nomad var delete nomad/jobs/box-dev1/spec` (Nomad could not delete the variable
+nomad/jobs/box-dev1/spec: Permission denied)
+```
 
 ### `box resize <id> [--cpus N] [--memory-mib N] [--disk-gib N] [--timeout D] [--wait]`
 
@@ -456,6 +474,36 @@ process is left to finish it. A failure prints its reason and the last lines
 the step wrote; `box status` and the task log show them too. A session started
 with no `--cwd` starts in the prepared sources.
 
+## When the connection is lost
+
+A box is reached through Nomad: the API for its state and `alloc exec` for
+everything in the guest. Either one can go away for a moment — the client node
+restarts for a driver update, the server loses its path to the node, boxd
+restarts in the guest — and none of that is work that ended. A lost connection
+used to cost a turn: the command exited `1`, which an agent reads as "this turn
+failed", and the work in the box went on without anyone waiting for it.
+
+The four commands that follow work — `box wait`, `box events -f`, `box logs -f`
+and `box run` — tell the two apart:
+
+| what happened | what the command does |
+| --- | --- |
+| the box answered, with `busy`, `not_found`, the turn's result or an error | reports it, exit code as always |
+| the box is stopped, failed, orphaned or gone | ends with the box's own sentence, exit `1` |
+| contact was lost (EOF, connection refused, no path to node, a 5xx, a restarted client) | `box wait`, `box events -f` and `box logs -f` keep trying with a pause between attempts, resume where they were, and say so twice on stderr |
+| contact is still lost when the budget runs out | exit `5`: the turn's state is unknown and it may still be running |
+| contact was lost in `box run` | exit `5` at once, and the command is **not** sent again |
+
+The two lines are one each, however many attempts they take:
+
+```
+lost contact with the box; retrying
+back in contact after 1m12s
+```
+
+Only `box wait` has a budget of its own (`--timeout`); `box events -f` and `box
+logs -f` follow until they are interrupted, and `Ctrl-C` still ends them.
+
 ## Inside a box
 
 ### `box ssh <id>`
@@ -470,6 +518,13 @@ runs in a session of its own in the guest: a `box run` that is interrupted
 whole session before it returns, so nothing keeps running in the box with no
 one to read how it ended. Nomad itself does not tell the box that the caller
 went away while the command prints nothing. `--timeout` ends with exit 4.
+
+**A command is never run twice.** When the connection to the box is lost while
+the command runs, `box run` does not send it again — it cannot know whether it
+ran to the end or not at all — and exits `5` with a sentence that says the
+result is unknown and the command may still be running in the box. A box that
+stopped ends the same way a command in a stopped box does: exit `1`, with the
+box's own sentence.
 
 ### `box cp <src> <dst>`
 
@@ -511,12 +566,29 @@ as long as the work they start.
 
 The task log of the box, which is the boxd event stream from the guest.
 
+`-f` follows it. Both files (stdout and stderr of the task) are followed at
+once, and each one remembers how many bytes it has printed: a connection that
+is lost and comes back continues at that byte, so no line is printed twice and
+none is skipped.
+
 ## Agent sessions
 
 A box can host several agent sessions. Each session is one executor process in
 the guest with its own model, transcript and working directory.
 
 ### `box session new <id> --executor prime|opencode|claude --model <provider>/<model> [--cwd DIR] [--title T]`
+
+`box session new` prints a warning on stderr — never a refusal — when another
+session of this box has a **running turn or is active outside a turn** in the same
+working directory:
+
+```
+session s-7f3a2c is working in the same directory
+```
+
+Two sessions in one box are normal; two writers in one working copy are what a
+lost edit, a surprise rebase and a half-written file look like afterwards. The
+session is created anyway and the exit code stays `0`.
 
 ### `box session ls <id>`
 
@@ -527,12 +599,34 @@ Stops the executor process and keeps the history.
 ### `box send <id> <session> [--file F] [prompt...]`
 
 Starts one turn and returns at once. A second send while a turn runs answers
-`busy`.
+`busy`. The same warning as `box session new` is printed on stderr when another
+session of the box is working in this session's directory; the send goes ahead
+and the exit code does not change.
 
 ### `box wait <id> <session> [--timeout D] [--turn N] [--json]`
 
 Waits for the turn and prints its final text. On timeout it exits 4 and the turn
 keeps running. `--turn N` waits for an older turn instead of the running one.
+
+A lost connection to the box — the Nomad client restarted for a driver update,
+the server lost the path to the node, a 5xx, boxd restarted in the guest — is
+not the end of the turn. The wait keeps trying, with a pause between the
+attempts, until `--timeout` runs out, and it says so twice on stderr:
+
+```
+lost contact with the box; retrying
+back in contact after 1m12s
+```
+
+It reconnects to the **same turn**: the turn is asked for by its number after
+the first loss, so a turn that finished while the box was unreachable is
+reported with its real result and its real text, once. Only a box that is really
+gone — stopped, failed, removed — ends the wait, with the box's own sentence.
+
+When `--timeout` runs out with contact still lost, the exit code is `5` and the
+sentence says the turn's state is unknown and it may still be running. That is
+not a failure and not a timeout: `box events <id> <session> --since N` reads what
+the turn did as soon as the box answers again.
 
 When the turn ends with processes still running in the box, the warning comes
 after the text, on stderr, and the exit code stays the turn's:
@@ -553,9 +647,17 @@ on, and say what you saw. `--json` carries the same list as `still_running`
 (`docs/boxctl-contract.md`, `Turn`); nothing is printed on stderr then, and the
 field is missing when the turn left nothing running.
 
-### `box events <id> <session> [--since N] [--limit N] [-f]`
+### `box events <id> <session> [--since N] [--limit N] [--tail N] [-f]`
 
-The session's event feed. `--since` is a resumable cursor; `-f` follows it.
+The session's event feed. `--since` is a resumable cursor; `-f` follows it, and
+picks the feed up again at the last sequence it printed when the connection to
+the box is lost (the same two lines on stderr as `box wait`).
+
+`--tail N` prints the last N events instead of the feed: the news of a long
+session, for a person or an agent coming back to it. It is two calls — one for
+how many events there are, one for the last N — and `--json` prints the same last
+N documents. `--tail` and `-f` are different questions and cannot be asked
+together.
 
 One call returns at most `--limit` events (200). When there are more, the command
 says so on stderr and gives the cursor that continues them:
@@ -614,12 +716,20 @@ A required file is satisfied by either form: an `auth.json.tmpl` item is enough
 for `prime`, which asks for `settings.json` and `auth.json`.
 
 **Rotation needs no new box.** After `box executors set`, Nomad re-renders the
-box's templates within seconds; the driver notices the changed task files, puts
-them where the guest mounts them and runs `boxctl reload`. boxd re-reads the credentials
-and stops the executor of every idle session, so the next turn runs with the new
-configuration; a session in the middle of a turn restarts its executor when the
-turn ends. The VM, the allocation and the transcripts are untouched. A box that
-was stopped picks the new files up at its next start.
+box's templates within seconds; the driver compares the **content** of the task
+files with the files the guest mounts, puts the new ones where the guest mounts
+them and runs `boxctl reload`. boxd re-reads the credentials and stops the
+executor of every idle session, so the next turn runs with the new
+configuration; a session in the middle of a turn keeps the executor it started
+with, and it restarts when the turn ends — the journal says so in one line. The
+VM, the allocation and the transcripts are untouched. A box that was stopped
+picks the new files up at its next start.
+
+**A rotation that changes no byte restarts nothing.** A template re-rendered with
+the same content is not a new credential: the driver stages nothing, calls no
+reload, and boxd compares the credential files' content, not their modification
+time. That is what makes a driver update — which re-attaches to every running box
+— cost no turn: a recovered task stages nothing and reloads nothing.
 
 ### `box executors show`
 

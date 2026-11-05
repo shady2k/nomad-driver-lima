@@ -78,6 +78,9 @@ func (a *App) guestCall(ctx context.Context, what string, call func(context.Cont
 	timeout := a.guestTimeout()
 	bounded, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	// The call is not abandoned: a caller writes into the structures of its
+	// command while this runs, and a goroutine left behind would write into them
+	// after the command has read them.
 	err := call(bounded)
 	if err != nil && ctx.Err() == nil && errors.Is(bounded.Err(), context.DeadlineExceeded) {
 		return &guestSilent{timeout: timeout, what: what, err: err}
@@ -349,6 +352,25 @@ type Session struct {
 	LastTurn        int    `json:"last_turn"`
 	ExecutorSession string `json:"executor_session,omitempty"`
 	PID             int    `json:"pid,omitempty"`
+	// ExecutorActive is set while the executor keeps sending updates with no turn
+	// running -- its turn ended in an error and it has not stopped -- and is the
+	// number of seconds since its last update. A boxd that does not report it
+	// leaves it out.
+	ExecutorActive *int `json:"executor_active,omitempty"`
+}
+
+// activeOutsideTurn reports whether the executor is still working with no turn
+// running, which is what a second writer in the same working copy looks like.
+func (s Session) activeOutsideTurn() bool { return s.ExecutorActive != nil }
+
+// stateLabel is the session's state as a person reads it: a session whose
+// executor is still sending updates outside a turn says so, whatever its stored
+// state is.
+func (s Session) stateLabel() string {
+	if !s.activeOutsideTurn() {
+		return s.State
+	}
+	return s.State + " (active outside a turn)"
 }
 
 // Turn is one prompt and the agent's answer to it.

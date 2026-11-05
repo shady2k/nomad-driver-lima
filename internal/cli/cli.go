@@ -301,7 +301,8 @@ func (a *App) printUsage() {
 	for _, name := range names {
 		fmt.Fprintf(a.ErrOut, "  %-18s %s\n", name, a.commands()[name].usage)
 	}
-	fmt.Fprintf(a.ErrOut, "\nexit codes: 0 ok, 1 error, 2 usage, 3 not found, 4 timeout (still running)\n")
+	fmt.Fprintf(a.ErrOut, "\nexit codes: 0 ok, 1 error, 2 usage, 3 not found, 4 timeout (still running),\n"+
+		"            5 unknown: the connection to the box was lost and the turn or the command may still run\n")
 }
 
 func (a *App) commands() map[string]command {

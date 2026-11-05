@@ -186,9 +186,16 @@ func (a *App) cmdRemove(ctx context.Context, args []string) error {
 	}
 	// The description goes with the disk: a box is the two of them, and a
 	// description without a disk would be a box `box start` cannot run.
+	//
+	// The disk is gone at this point, so a failure here is partial work and says
+	// so: the box is deleted and a record of it is left, which `box ls` still
+	// shows and `box start` cannot run. Only the person can remove it.
 	forgot, err := a.forgetBoxSpec(ctx, id)
 	if err != nil {
-		return err
+		return partialf("the box %s is gone -- its job and its disk were deleted -- but its description %s is left behind: "+
+			"so `box ls` still shows it and `box start %s` would find a box with no disk. Delete the record with "+
+			"`nomad var delete %s` (%s)",
+			id, BoxSpecVariable(id), id, BoxSpecVariable(id), errOr(err))
 	}
 	box.State = "deleted"
 	out.Box = box
