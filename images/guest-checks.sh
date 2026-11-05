@@ -149,6 +149,13 @@ else
   fi
 fi
 
+# --- nothing changes under a running turn --------------------------------------
+for unit in apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service; do
+  check "$unit is masked" "masked" "$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+done
+check "needrestart leaves boxd alone" "present" \
+  "$(grep -q 'boxd' /etc/needrestart/conf.d/box.conf 2>/dev/null && echo present || echo missing)"
+
 # --- the guest booted ---------------------------------------------------------
 printf '\n== the guest\n'
 BOOT_ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)

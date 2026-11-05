@@ -226,6 +226,20 @@ apt-get install -y --no-install-recommends \
   docker.io docker-buildx docker-compose-v2 \
   qemu-guest-agent openssh-server cloud-init earlyoom
 apt-get clean
+# --- nothing changes under a running turn --------------------------------------
+# unattended-upgrades in a box restarted boxd through needrestart and cut a turn
+# short. A box lives as long as its task, and a new image is how it gets updates,
+# so the timers stay off; they also hold the apt lock against the agent's own
+# apt-get. An upgrade the agent runs itself still triggers needrestart, which is
+# told to leave boxd alone: its restart would end every session in the box.
+systemctl mask apt-daily.timer apt-daily-upgrade.timer apt-daily.service \
+  apt-daily-upgrade.service unattended-upgrades.service >/dev/null
+install -d -m 0755 /etc/needrestart/conf.d
+cat > /etc/needrestart/conf.d/box.conf <<'EOF'
+# Written by images/provision.sh: a restart of boxd ends every session in the box.
+$nrconf{override_rc}{qr(^boxd\.service$)} = 0;
+EOF
+chmod 0644 /etc/needrestart/conf.d/box.conf
 
 # --- docker ------------------------------------------------------------------
 log "docker"
