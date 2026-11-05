@@ -146,6 +146,9 @@ npm, port = sys.argv[1], sys.argv[2]
 for path in glob.glob(f"{npm}/@opencode/*/*"):
     doc = json.load(open(path))
     doc["dist"]["tarball"] = doc["dist"]["tarball"].replace("PORT", port)
+    # A proxy registry answers a version's URL with the whole package document.
+    if "arm64" in path:
+        doc = {"name": doc["name"], "versions": {doc["version"]: doc}}
     json.dump(doc, open(path, "w"), indent=2)
 PY
 python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$WORK/upstream" >"$WORK/server.log" 2>&1 &

@@ -214,7 +214,7 @@ chmod 0755 "$PRIME_BIN"
 # through a postinstall script, which needs the target CPU; the per-arch package
 # is the same bytes without that step, and one platform instead of four.
 log "opencode $OPENCODE_VERSION ($OPENCODE_NPM_PKG)"
-META_URL=$NPM_REGISTRY/${OPENCODE_NPM_PKG}/$OPENCODE_VERSION
+META_URL=$NPM_REGISTRY${OPENCODE_NPM_PKG}/$OPENCODE_VERSION
 download "$META_URL" "$WORK/download/opencode-meta.json"
 NPM_TARBALL_URL=$(python3 - "$WORK/download/opencode-meta.json" "$OPENCODE_VERSION" "$OPENCODE_NPM_PKG" <<'PY'
 import json, sys
@@ -223,6 +223,9 @@ doc = json.load(open(sys.argv[1]))
 want_version, want_name = sys.argv[2], sys.argv[3]
 if doc.get("name") != want_name:
     sys.exit(f"the registry answered for {doc.get('name')!r}, want {want_name!r}")
+# A proxy registry may answer a version's URL with the whole package document.
+if "versions" in doc:
+    doc = doc["versions"].get(want_version) or {}
 if doc.get("version") != want_version:
     sys.exit(f"the registry has version {doc.get('version')!r}, the pin says {want_version!r}")
 dist = doc.get("dist") or {}
