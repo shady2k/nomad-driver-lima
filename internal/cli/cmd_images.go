@@ -280,15 +280,11 @@ func (a *App) cmdImagesPublish(ctx context.Context, args []string) error {
 		a.note("publishing %s (%s, sha256 %s) from node %s", draft.Version, draft.Arch,
 			shortSHA(draft.SHA256), dash(draft.NodeName))
 	}
-	resp, err := a.Nomad.RegisterJob(ctx, job)
+	evalID, since, err := a.registerWorkJob(ctx, job)
 	if err != nil {
 		return wrapf(err, "Nomad rejected the publish job %s", jobID)
 	}
-	evalID := ""
-	if resp != nil {
-		evalID = resp.EvalID
-	}
-	alloc, err := a.waitForJobDone(ctx, jobID, evalID, *timeout)
+	alloc, err := a.waitForJobDone(ctx, jobID, evalID, since, *timeout)
 	if err != nil {
 		return err
 	}

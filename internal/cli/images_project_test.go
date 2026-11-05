@@ -394,3 +394,38 @@ func TestProjectVersionsOrderByNumber(t *testing.T) {
 		t.Fatalf("next = %q, %v; want proj-11", next, err)
 	}
 }
+
+// What an earlier run left must not answer for this one: Nomad starts nothing for
+// an unchanged job, and its failed allocation would be read as this bake's.
+func TestWorkJobPurgesTheLastRun(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	job := &api.Job{ID: strPtr("box-bake-a")}
+	_, _, err := ta.App.registerWorkJob(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop, reg := -1, -1
+	for i, call := range ta.cluster.calls {
+		if strings.HasPrefix(call, "StopJob box-bake-a purge=true") {
+			stop = i
+		}
+		if strings.HasPrefix(call, "RegisterJob box-bake-a") {
+			reg = i
+		}
+	}
+	if stop < 0 || stop > reg {
+		t.Fatalf("the last job is not purged first: %v", ta.cluster.calls)
+	}
+}
+
+func TestAllocsSinceDropsAnOlderRun(t *testing.T) {
+	old := &api.AllocationListStub{ID: "old", CreateIndex: 10, ClientStatus: "failed"}
+	cur := &api.AllocationListStub{ID: "new", CreateIndex: 20, ClientStatus: "running"}
+	got := allocsSince([]*api.AllocationListStub{old, cur}, 15)
+	if len(got) != 1 || got[0].ID != "new" {
+		t.Fatalf("kept %v", got)
+	}
+	if len(allocsSince([]*api.AllocationListStub{old}, 0)) != 1 {
+		t.Fatal("no index keeps everything")
+	}
+}

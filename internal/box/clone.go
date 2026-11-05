@@ -139,6 +139,12 @@ func (m *Manager) CloneForBake(ctx context.Context, source, name, platformDir st
 	// The stand-ins go in after the clone: `limactl clone` refuses an instance
 	// directory that already exists (measured with Lima 2.2.0), and the clone's
 	// own directory is where they belong, so `limactl delete` removes them.
+	// Each level belongs to the runtime user, which runs qemu: created in one go,
+	// the parent would stay the driver's, and qemu could not enter it.
+	if err := m.opts.Identity.EnsureDir(standIn, 0o700); err != nil {
+		_ = c.Delete(context.WithoutCancel(ctx))
+		return nil, fmt.Errorf("create the stand-in mounts of the clone: %w", err)
+	}
 	for _, part := range []string{"local", "secrets"} {
 		if err := m.opts.Identity.EnsureDir(filepath.Join(standIn, part), 0o700); err != nil {
 			_ = c.Delete(context.WithoutCancel(ctx))

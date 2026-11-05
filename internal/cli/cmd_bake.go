@@ -399,13 +399,9 @@ func (a *App) runBakeJob(ctx context.Context, jobSpec BakeJobSpec, timeout time.
 		return nil, err
 	}
 	jobID := derefStr(job.ID, "")
-	resp, err := a.Nomad.RegisterJob(ctx, job)
+	evalID, since, err := a.registerWorkJob(ctx, job)
 	if err != nil {
 		return nil, wrapf(err, "Nomad rejected the bake job %s%s", jobID, registerDenied(err, BoxVolumeName(jobSpec.BoxID)))
-	}
-	evalID := ""
-	if resp != nil {
-		evalID = resp.EvalID
 	}
 	if !a.JSON {
 		a.note("baking %s on the node that holds its disk (job %s)", jobSpec.Version, jobID)
@@ -418,9 +414,9 @@ func (a *App) runBakeJob(ctx context.Context, jobSpec BakeJobSpec, timeout time.
 	logDone := make(chan struct{})
 	go func() {
 		defer close(logDone)
-		a.followWorkLog(logCtx, jobID, timeout)
+		a.followWorkLog(logCtx, jobID, since, timeout)
 	}()
-	alloc, err := a.waitForJobDone(ctx, jobID, evalID, timeout)
+	alloc, err := a.waitForJobDone(ctx, jobID, evalID, since, timeout)
 	// The follower is waited for before this command returns: a goroutine that
 	// printed after the command did would write into a terminal (or a test's
 	// buffer) nobody owns any more. The stream ends by itself once the task is
@@ -467,7 +463,7 @@ func (a *App) runBakeJob(ctx context.Context, jobSpec BakeJobSpec, timeout time.
 // seal -- which Nomad's ten task events are too few to hold. A job whose
 // allocation is not placed yet has no log: this waits for it, and gives up when
 // the wait does.
-func (a *App) followWorkLog(ctx context.Context, jobID string, timeout time.Duration) {
+func (a *App) followWorkLog(ctx context.Context, jobID string, since uint64, timeout time.Duration) {
 	if a.JSON || a.ErrOut == nil {
 		return
 	}
@@ -476,7 +472,7 @@ func (a *App) followWorkLog(ctx context.Context, jobID string, timeout time.Dura
 	for {
 		byJob, err := a.jobAllocations(ctx)
 		if err == nil {
-			if newest := latestAllocation(byJob[jobID]); newest != nil {
+			if newest := latestAllocation(allocsSince(byJob[jobID], since)); newest != nil {
 				if full, err := a.Nomad.Allocation(ctx, newest.ID); err == nil {
 					alloc = full
 					break
@@ -505,9 +501,44 @@ func allocSucceeded(alloc *api.Allocation) bool {
 	return state.State == "dead" && !state.Failed
 }
 
+// registerWorkJob registers a batch job under a name that comes back: a bake or a
+// publish of the same box. What the last one left is purged first, because Nomad
+// starts nothing for a job it already ran with the same content, and its failed
+// allocation would answer for this run. The index it returns tells this run's
+// allocations from any older one Nomad still lists.
+func (a *App) registerWorkJob(ctx context.Context, job *api.Job) (string, uint64, error) {
+	jobID := derefStr(job.ID, "")
+	if err := a.Nomad.StopJob(ctx, jobID, true); err != nil && !isNotFoundErr(err) {
+		return "", 0, wrapf(err, "the last job %s could not be purged", jobID)
+	}
+	resp, err := a.Nomad.RegisterJob(ctx, job)
+	if err != nil {
+		return "", 0, err
+	}
+	if resp == nil {
+		return "", 0, nil
+	}
+	return resp.EvalID, resp.JobModifyIndex, nil
+}
+
+// allocsSince keeps the allocations made after the job's registration at index
+// since (0: all of them).
+func allocsSince(allocs []*api.AllocationListStub, since uint64) []*api.AllocationListStub {
+	if since == 0 {
+		return allocs
+	}
+	kept := make([]*api.AllocationListStub, 0, len(allocs))
+	for _, alloc := range allocs {
+		if alloc != nil && alloc.CreateIndex >= since {
+			kept = append(kept, alloc)
+		}
+	}
+	return kept
+}
+
 // waitForJobDone waits until a batch job has no live allocation, and returns its
 // newest allocation with the task events that say how it ended.
-func (a *App) waitForJobDone(ctx context.Context, jobID, evalID string, timeout time.Duration) (*api.Allocation, error) {
+func (a *App) waitForJobDone(ctx context.Context, jobID, evalID string, since uint64, timeout time.Duration) (*api.Allocation, error) {
 	deadline := a.now().Add(timeout)
 	last := "Nomad has not placed it yet"
 	for {
@@ -515,7 +546,7 @@ func (a *App) waitForJobDone(ctx context.Context, jobID, evalID string, timeout 
 		if err != nil {
 			return nil, wrapf(err, "cannot list the allocations of %s", jobID)
 		}
-		newest := latestAllocation(byJob[jobID])
+		newest := latestAllocation(allocsSince(byJob[jobID], since))
 		switch {
 		case newest == nil:
 			if blocker := a.evalBlocker(ctx, evalID); blocker != "" {
