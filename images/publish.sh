@@ -228,6 +228,10 @@ status_of() { curl -sS -o /dev/null -w '%{http_code}' --max-time 60 "${CURL_AUTH
 # head_status is the HEAD status of one published path.
 head_status() { status_of -I --max-time 30 "$1"; }
 
+# curl --data-binary says the body is a form unless told otherwise, and a store
+# in front of a servlet takes a form's fields out of the body and stores nothing.
+BINARY_BODY='Content-Type: application/octet-stream'
+
 # --- lock --------------------------------------------------------------------
 LOCK_OWNER="$(hostname 2>/dev/null || echo unknown)-$$"
 
@@ -244,7 +248,7 @@ lock_field() { sed -n "s/^$1=//p" <<<"$2" | head -1; }
 # wrote at the same moment notice that one of them lost.
 lock_put() {
   local body=$1 got status
-  status=$(with_auth -X PUT --data-binary "$body" -o /dev/null -w '%{http_code}' \
+  status=$(with_auth -X PUT -H "$BINARY_BODY" --data-binary "$body" -o /dev/null -w '%{http_code}' \
     --max-time 60 "$REPO_URL/$LOCK_PATH" || true)
   case $status in
     2*) ;;
@@ -355,7 +359,7 @@ upload_put() {
       log "the store refused $(stat -c %s "$file") bytes (HTTP 413); retrying $label in chunked form"
       code=$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 2 \
         "${CURL_AUTH[@]}" -H 'Transfer-Encoding: chunked' \
-        -X PUT --data-binary @- "$url" < "$file" || true)
+        -X PUT -H "$BINARY_BODY" --data-binary @- "$url" < "$file" || true)
       case $code in
         2*) printf 'PUT %s %s (chunked, %s bytes)\n' "$label" "$code" "$(stat -c %s "$file")"; return 0 ;;
       esac

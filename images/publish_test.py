@@ -147,6 +147,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if body is None:
             self.reply(413, b"body too large", "text/plain")
             return
+        # A real store behind a servlet takes a form's fields out of the body.
+        if self.headers.get("Content-Type", "").startswith("application/x-www-form-urlencoded"):
+            body = b""
         try:
             self.repo().put(path, body)
         except PermissionError:
