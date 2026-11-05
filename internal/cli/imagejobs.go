@@ -28,8 +28,8 @@ const (
 
 // BakeJobSpec is the input of RenderBakeJob.
 type BakeJobSpec struct {
-	// BoxID names the sealed box whose disk is baked; its volume box-<id> binds
-	// the job to the node that holds the disk.
+	// BoxID names the box whose disk is baked; its volume box-<id> binds the job
+	// to the node that holds the disk.
 	BoxID string
 	// Name, Version, Parent and Arch name the image the bake makes.
 	Name    string
@@ -38,14 +38,26 @@ type BakeJobSpec struct {
 	Arch    string
 	// Recipe is the recipe the image carries, base64.
 	Recipe string
+	// PlatformVersion, PlatformURL and PlatformSHA256 name the bundle the box
+	// mounts, which the bake's clone mounts too: boxd, boxctl and the seal's
+	// guest/no-secrets.sh come from it.
+	PlatformVersion string
+	PlatformURL     string
+	PlatformSHA256  string
+	// CPUShares and MemoryMiB are what the task reserves. They are the box's own
+	// size plus the converter's core: the bake boots the clone -- a VM as big as
+	// the box -- and compresses its disk, in one task, and a reservation below
+	// that is a task the client kills for its memory.
+	CPUShares int
+	MemoryMiB int
 }
 
-// RenderBakeJob builds the batch job that bakes a sealed box into an image.
+// RenderBakeJob builds the batch job that bakes a box into an image.
 //
 // The job is not a box: its meta says it is a step of an image's life, so
 // `box ls`, the capacity count and the box id of a job name do not take it for
-// one. It mounts the box's volume read-only, which is also what places it on the
-// node that holds the disk.
+// one. It mounts the box's volume, which is also what places it on the node that
+// holds the disk.
 func RenderBakeJob(spec BakeJobSpec) (*api.Job, error) {
 	if err := ValidateBoxID(spec.BoxID); err != nil {
 		return nil, err
@@ -76,15 +88,32 @@ func RenderBakeJob(spec BakeJobSpec) (*api.Job, error) {
 	if spec.Recipe != "" {
 		bake["recipe"] = spec.Recipe
 	}
+	cpuShares, memoryMiB := spec.CPUShares, spec.MemoryMiB
+	if cpuShares <= 0 {
+		cpuShares = bakeCPUShares
+	}
+	if memoryMiB <= 0 {
+		memoryMiB = bakeMemoryMiB
+	}
 	jobID := BoxBakeJobName(spec.BoxID)
+	config := map[string]any{
+		"box_id": spec.BoxID,
+		"bake":   bake,
+	}
+	// The clone the bake starts runs the bundle's boxd and seals itself with the
+	// bundle's own guest/no-secrets.sh, so the block travels with the job.
+	if spec.PlatformURL != "" && spec.PlatformSHA256 != "" {
+		config["platform"] = map[string]any{
+			"version": spec.PlatformVersion,
+			"url":     spec.PlatformURL,
+			"sha256":  spec.PlatformSHA256,
+		}
+	}
 	task := &api.Task{
-		Name:   boxTaskName,
-		Driver: boxDriverName,
-		Config: map[string]any{
-			"box_id": spec.BoxID,
-			"bake":   bake,
-		},
-		Resources: &api.Resources{CPU: intPtr(bakeCPUShares), MemoryMB: intPtr(bakeMemoryMiB)},
+		Name:      boxTaskName,
+		Driver:    boxDriverName,
+		Config:    config,
+		Resources: &api.Resources{CPU: intPtr(cpuShares), MemoryMB: intPtr(memoryMiB)},
 		VolumeMounts: []*api.VolumeMount{{
 			Volume:      strPtr(boxDiskVolume),
 			Destination: strPtr(boxDiskMount),
@@ -116,9 +145,18 @@ func RenderBakeJob(spec BakeJobSpec) (*api.Job, error) {
 				Attempts: intPtr(0),
 				Mode:     strPtr("fail"),
 			},
-			// The disk is mounted read-write, and the task only reads it: the
-			// driver converts it with `qemu-img convert`, which opens its source
-			// read-only, and writes the image into the node's cache.
+			// Nomad reschedules a failed batch allocation once by default, and a
+			// second attempt of a bake is a second clone of the box: the failed one
+			// is still there, and the box's boxd is not the machine the retry would
+			// want. A bake that fails is reported, not retried.
+			ReschedulePolicy: &api.ReschedulePolicy{
+				Attempts:  intPtr(0),
+				Unlimited: boolPtr(false),
+			},
+			// The disk is mounted read-write, and the task only reads it:
+			// driver clones the box into a copy of its own and converts that
+			// copy, so the box's disk is opened read-only by `qemu-img convert`
+			// and never written.
 			//
 			// It cannot be asked for read-only, although that is what it is: Nomad
 			// schedules a read-only request of a dynamic host volume only when the

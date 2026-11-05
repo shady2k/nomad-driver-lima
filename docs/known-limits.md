@@ -200,11 +200,19 @@ where one is known, what would close it. Nothing here is a promise to fix it.
 - **A published version cannot be withdrawn** by any tooling here: the store's
   own permissions decide whether an operator can delete a file, and boxes hold
   the digest of what they pulled.
-- **A sealed box is an empty machine.** `box bake` seals the box and leaves it
-  stopped with its disk; `box start` on it boots the image's files with none of
-  the work, because the seal deleted `/work` and every session. Its disk is the
-  image now, so `box rm <id> --yes` is the step after a bake, and the work has to
-  be pushed out or copied out before it.
+- **A bake stops the box, and it takes minutes.** The seal runs in a clone of the
+  box's disk, so `/work` and every session are still there when the box starts
+  again, and a box that was stopped stays stopped. It is not usable while the bake
+  runs: the job clones the disk, boots the clone, seals it and compresses the
+  result.
+- **A bake needs room on the node for a second copy of the disk.** The clone is a
+  full copy of the disk file, written beside it in the node's Lima home, so a node
+  with less free space there than the box's disk occupies refuses the bake, and the
+  refusal names both numbers.
+- **The clone path is measured on qemu only.** `limactl clone` was measured with
+  Lima 2.2.0 on qemu: a full copy of a stopped instance's disk, a new hostname, no
+  snapshot. The same bake on a Mac's vz has not been run end to end, so run it
+  there once before you rely on it.
 - **A draft lives on one node.** It is a file in that node's image cache, so a
   box is created from it there: `box create --image NAME-N` pins the box to that
   node, and `--node` must name the same node or be left out. A node with no room
@@ -314,9 +322,12 @@ where one is known, what would close it. Nothing here is a promise to fix it.
 - **`disk_gib` is not checked against free space.** qcow2 is sparse, so a size
   check is not obviously right, and a box can fill its node's volume filesystem.
 - **Orphans are reported, never removed.** A Lima instance with no task for ten
-  minutes, or without its disk, appears in the driver's fingerprint and as a line
-  of `box capacity`; the operator removes it on the node with `limactl delete`.
-  No command of this project does it.
+  minutes, or without its disk, appears in the driver's fingerprint; the operator
+  removes it on the node with `limactl delete`. No command of this project does it.
+  A stopped box looks exactly like that to the driver, so `box capacity` answers as
+  `box ls` does: a box with a job or a stored description is named with its state
+  there ("no box task, and the cluster knows this box as stopped"), and only a VM
+  that is neither is an orphan.
 - **The VM's pid is not a driver attribute.** Nomad 2.0 consumes no
   `DriverAttributes` at all (its `TaskStatus` has none since `TaskHandle` was
   removed), so the pid an attribute would carry is invisible. It reaches a reader

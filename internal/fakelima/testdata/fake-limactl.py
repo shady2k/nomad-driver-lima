@@ -23,6 +23,7 @@ STATE_PATH = os.path.join(HOME, ".fake-state.json")
 MODE_PATH = os.path.join(HOME, ".fake-mode.json")
 CALLS_PATH = os.path.join(HOME, ".fake-calls.log")
 COPIES_PATH = os.path.join(HOME, ".fake-copies.log")
+SEAL_PATH = os.path.join(HOME, ".fake-seal.log")
 
 
 def load(path, default):
@@ -93,6 +94,58 @@ def main():
                 "sshConfigFile": os.path.join(d, "ssh.config"),
                 "limaVersion": "2.2.0",
             }))
+        return 0
+
+    if cmd == "clone":
+        # clone OLDINST NEWINST [flags]: a copy of the instance directory --
+        # lima copies the disk file, so the clone has a disk of its own.
+        positional = [a for a in args[1:] if not a.startswith("-")]
+        if mode.get("fail_clone"):
+            sys.stderr.write("fake limactl: clone failed\n")
+            return 1
+        if len(positional) < 2:
+            sys.stderr.write("fake limactl: clone needs two instance names\n")
+            return 1
+        old, new = positional[-2], positional[-1]
+        if old not in state:
+            sys.stderr.write("fatal: instance %s not found\n" % old)
+            return 1
+        if new in state:
+            sys.stderr.write("fatal: instance %s already exists\n" % new)
+            return 1
+        src, dst = instance_dir(old), instance_dir(new)
+        os.makedirs(dst, exist_ok=True)
+        cfg = os.path.join(dst, "lima.yaml")
+        for name in ("lima.yaml", "disk"):
+            if os.path.exists(os.path.join(src, name)):
+                shutil.copyfile(os.path.join(src, name), os.path.join(dst, name))
+        if "--mount-none" in args and os.path.exists(cfg):
+            # What lima's `--mount-none` does to the configuration: no mount at
+            # all, above all no mount of the box's own task files.
+            kept, in_mounts = [], False
+            for line in open(cfg).read().splitlines(True):
+                if line.startswith("mounts:"):
+                    in_mounts = True
+                    kept.append("mounts: []\n")
+                    continue
+                if in_mounts:
+                    if line[:1] in (" ", "\t", "-"):
+                        continue
+                    in_mounts = False
+                kept.append(line)
+            open(cfg, "w").write("".join(kept))
+        if mode.get("clone_symlink_disk"):
+            # A limactl that copied the disk *link* instead of the file: the
+            # clone's disk would be the box's own disk, which a bake must never
+            # seal.
+            os.remove(os.path.join(dst, "disk"))
+            os.symlink(os.path.join(src, "disk"), os.path.join(dst, "disk"))
+        inst = dict(state.get(old, {}))
+        inst["status"] = "Stopped"
+        inst["driverPID"] = 0
+        inst["hostAgentPID"] = 0
+        state[new] = inst
+        save_state(state)
         return 0
 
     if cmd == "create":
@@ -227,6 +280,28 @@ def main():
         if mode.get("fail_shell"):
             sys.stderr.write("fake limactl: shell failed\n")
             return 1
+        joined = " ".join(args)
+        # The driver runs the bundle's boxctl in the clone. The fake answers the
+        # two calls a bake makes -- `info` (does boxd answer?) and `seal` -- and
+        # records what the seal was given, so a test can assert on it without a
+        # guest.
+        if "boxctl" in joined:
+            name = args[1] if len(args) > 1 else ""
+            if joined.rstrip().endswith("seal") or " seal " in joined + " ":
+                stdin = sys.stdin.buffer.read()
+                with open(SEAL_PATH, "a") as f:
+                    f.write("%s\t%d\t%s\n" % (name, len(stdin), hashlib.sha256(stdin).hexdigest()))
+                if mode.get("fail_seal"):
+                    print(json.dumps({"line": "closing the box's sessions and stopping its executors"}))
+                    print(json.dumps({"error": {"code": "internal", "message": mode["fail_seal"]}}))
+                    return 1
+                print(json.dumps({"line": "closing the box's sessions and stopping its executors"}))
+                print(json.dumps({"line": "the workspace: deleted /work (12.0 MiB)"}))
+                print(json.dumps({"line": "guest/no-secrets.sh: 21 check(s) passed"}))
+                print(json.dumps({"seal": {"image": {"schema": 1, "name": "project", "platform": "mount"}, "steps": []}}))
+                return 0
+            print(json.dumps({"boxd_version": "test", "sessions": 0, "seal": {"ok": True}}))
+            return 0
         # The driver sends the task files as a tar stream on stdin. The fake
         # records each member's name and the sha256 of its content, never the
         # content: a test checks that no plaintext of a secret reaches the disk.

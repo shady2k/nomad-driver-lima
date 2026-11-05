@@ -85,18 +85,43 @@ func (a *App) cmdStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	// The executors variable is read again: a start is the moment to pick up
-	// credentials that were added since the box was created.
+	if !*wait {
+		// The job is registered even when the command does not wait: the box
+		// starts, and `box status` shows when it is ready.
+		if _, err := a.startBoxJob(ctx, id, spec, false, *timeout); err != nil {
+			return err
+		}
+		out.Warn = "the box is starting; `box status " + id + "` shows when it is ready"
+		return a.printLifecycle(&out)
+	}
+	rec, err := a.startBoxJob(ctx, id, spec, true, *timeout)
+	if err != nil {
+		out.Box = rec
+		return err
+	}
+	out.Box = rec
+	out.Warn = "the box runs on its old disk"
+	return a.printLifecycle(&out)
+}
+
+// startBoxJob registers a box's job again on its existing disk and, when wait
+// is set, waits until the box runs. It is what `box start` does, and what a bake
+// does to give the box back after it stopped it.
+//
+// The executors variable is read again: a start is the moment to pick up
+// credentials that were added since the box was created (or created since it was
+// stopped).
+func (a *App) startBoxJob(ctx context.Context, id string, spec BoxSpec, wait bool, timeout time.Duration) (BoxRecord, error) {
 	spec.ExecutorItems = a.executorItems(ctx)
 	spec.VaultRole = a.vaultRoleFor(spec.VaultRole)
 	a.noteNoVaultRole(spec)
 	engineered, err := RenderJob(spec)
 	if err != nil {
-		return err
+		return BoxRecord{}, err
 	}
 	resp, err := a.Nomad.RegisterJob(ctx, engineered)
 	if err != nil {
-		return wrapf(err, "Nomad rejected the job %s%s", BoxJobName(id), registerDenied(err, BoxVolumeName(id)))
+		return BoxRecord{}, wrapf(err, "Nomad rejected the job %s%s", BoxJobName(id), registerDenied(err, BoxVolumeName(id)))
 	}
 	evalID := ""
 	if resp != nil {
@@ -106,21 +131,13 @@ func (a *App) cmdStart(ctx context.Context, args []string) error {
 	// is written before the wait: a box that times out is still a box that can be
 	// started again tomorrow.
 	if err := a.storeBoxSpec(ctx, id, engineered); err != nil {
-		return wrapKeep(err, "the box %s was registered, but its description was not stored, so `box start %s` "+
-			"cannot bring it back once Nomad collects its job", id, id)
+		return BoxRecord{}, wrapKeep(err, "the box %s was registered, but its description was not stored, so "+
+			"`box start %s` cannot bring it back once Nomad collects its job", id, id)
 	}
-	if !*wait {
-		out.Warn = "the box is starting; `box status " + id + "` shows when it is ready"
-		return a.printLifecycle(&out)
+	if !wait {
+		return BoxRecord{}, nil
 	}
-	rec, err := a.waitForBoxRunning(ctx, id, evalID, *timeout)
-	if err != nil {
-		out.Box = rec
-		return err
-	}
-	out.Box = rec
-	out.Warn = "the box runs on its old disk"
-	return a.printLifecycle(&out)
+	return a.waitForBoxRunning(ctx, id, evalID, timeout)
 }
 
 // cmdRemove deletes a box and its disk.

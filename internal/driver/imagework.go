@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/nomad/plugins/drivers"
@@ -68,45 +69,6 @@ func (d *Driver) doImageWork(ctx context.Context, h *taskHandle) *drivers.ExitRe
 		return d.bakeImage(ctx, h)
 	}
 	return d.publishImage(ctx, h)
-}
-
-// bakeImage writes the disk of the sealed box into the image cache.
-func (d *Driver) bakeImage(ctx context.Context, h *taskHandle) *drivers.ExitResult {
-	b := h.cfg.Bake
-	if d.boxm == nil {
-		return imageWorkFailure(h, d, "the box driver is not configured on this node")
-	}
-	d.emit(h.tc, "bake", fmt.Sprintf("Baking box %s into the image %s %s (the disk at %s)", h.boxID, b.Name, b.Version, h.diskPath))
-	rec := box.BakedRecord{Version: b.Version, Arch: b.Arch, Parent: b.Parent, Name: b.Name, Recipe: b.Recipe}
-	out, err := d.boxm.Bake(ctx, h.diskPath, rec, func(_ int, note string) {
-		d.emit(h.tc, "bake", note)
-	})
-	if err != nil {
-		var missing *box.QEMUImgMissing
-		if errors.As(err, &missing) {
-			return imageWorkFailure(h, d, fmt.Sprintf("qemu-img is not installed on this node (%v), and a bake needs it to compress "+
-				"the disk of the box into an image. Install qemu-img on the node and bake again", missing.Err()))
-		}
-		if ctx.Err() != nil {
-			return imageWorkFailure(h, d, fmt.Sprintf("the bake of %s was stopped; its temporary file is gone", b.Version))
-		}
-		return imageWorkFailure(h, d, fmt.Sprintf("the bake of %s failed: %v", b.Version, err))
-	}
-	// The event carries the record's fields: the CLI reads them to print the
-	// result, because it cannot look into this node's image cache.
-	d.emitData(h.tc, "bake", fmt.Sprintf("Baked the image %s %s: sha256 %s, %s compressed, the disk inside it %s; "+
-		"a box on this node creates from it without a download",
-		out.Version, out.Arch, out.SHA256, humanSize(out.Size), humanSize(out.VirtualBytes)),
-		map[string]string{
-			"version":       out.Version,
-			"arch":          out.Arch,
-			"sha256":        out.SHA256,
-			"size":          fmt.Sprintf("%d", out.Size),
-			"virtual_bytes": fmt.Sprintf("%d", out.VirtualBytes),
-			"name":          out.Name,
-			"parent":        out.Parent,
-		})
-	return &drivers.ExitResult{}
 }
 
 // publishImage uploads an image baked on this node into the operator's store.
@@ -252,4 +214,48 @@ func setAttribute(fp *drivers.Fingerprint, key, value string) {
 		fp.Attributes = map[string]*structs.Attribute{}
 	}
 	fp.Attributes[key] = structs.NewStringAttribute(value)
+}
+
+// workLog is the task's own log, where a bake writes its steps.
+//
+// Nomad keeps the last ten task events of a task, and a seal prints more lines
+// than that: the events are the short version in `nomad alloc status`, and this
+// is the whole of it, which `nomad alloc logs` and `box bake` read.
+type workLog struct {
+	f  *os.File
+	mu sync.Mutex
+}
+
+// line writes one line, whole.
+func (l *workLog) line(text string) {
+	if l == nil || l.f == nil || text == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, _ = fmt.Fprintln(l.f, text)
+}
+
+// close closes the log file.
+func (l *workLog) close() {
+	if l == nil || l.f == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_ = l.f.Close()
+	l.f = nil
+}
+
+// workLog opens the task's stdout for the work of a bake. A task without a
+// stdout path (a test) writes nowhere.
+func (h *taskHandle) workLog() *workLog {
+	if h.tc == nil || h.tc.StdoutPath == "" {
+		return &workLog{}
+	}
+	f, err := os.OpenFile(h.tc.StdoutPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return &workLog{}
+	}
+	return &workLog{f: f}
 }

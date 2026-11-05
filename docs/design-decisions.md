@@ -370,14 +370,34 @@ from what the box looked like from outside.
 - **Baking a box into an image is a task of the driver, not a command of the
   CLI.** An image is made from a disk, the disk is a qcow2 on one node's volume,
   and the driver is the host-side code that owns that disk: it knows the volume
-  path, it runs as the runtime user, and it already writes the node's image cache.
-  The CLI on a coordinator can reach neither the disk nor the cache; all it can do
-  is register work and read what came of it. So the bake is a batch job of the box
-  driver that runs no VM -- a task, which is what Nomad schedules, reports and
-  stops, with a log when it fails -- and the CLI's part is the seal inside the
-  guest, the stop, the registration and the wait. A bake that is stopped removes
-  its temporary file before the task ends, so no half image stays in a cache; a
-  bake that ran leaves a record and a file, not an allocation to keep.
+  path, it runs as the runtime user, it already writes the node's image cache, and
+  it is the only place that can clone an instance of that node. The CLI on a
+  coordinator can reach neither the disk nor the cache; all it can do is check
+  what it can see, register work and read what came of it. So the bake is a batch
+  job of the box driver -- a task, which is what Nomad schedules, reports and stops,
+  with a log when it fails -- and the CLI's part is the seal's gate inside the box,
+  the room for the copy, the stop, the registration, the wait and the start again.
+  A bake that is stopped removes its temporary file and its clone before the task
+  ends, so no half image and no copy of a box's disk stays in a cache; a bake that
+  ran leaves a record and a file, not an allocation to keep.
+- **A bake seals a clone, and the box keeps its work.** The seal deletes `/work`
+  and every session, so a bake that ran in the box itself was a step a box did not
+  come back from. It runs in a clone instead: `limactl clone` of a stopped instance
+  is a full copy of its disk (measured with Lima 2.2.0: a new hostname, and no
+  snapshot), so the seal empties the copy while the box keeps its disk, its `/work`
+  and its sessions and is started again when the bake ends. The clone is also what
+  makes the seal's one proof enough: it mounts the platform bundle and two empty
+  directories where a box has its credentials and its task files, never the box's
+  own mounts, so the machine the seal empties never saw a credential; the driver
+  reads the clone's configuration back and refuses any other mount, and it copies a
+  disk that turns out to be a symlink to the box's own. The seal states the same
+  rule as a check of its own -- a guest with the box's credentials mounted is
+  refused before anything is deleted -- and a bake's clone is the guest that passes
+  it. A copy is disposable, which is why the driver deletes it whatever happens,
+  and why the next bake of the same box removes one that a killed driver left
+  behind. Rejected: sealing the box and starting it again -- an empty machine with a
+  fresh image's files is not the box the owner was working in, and nothing it deleted
+  comes back.
 - **A baked image is a draft first, and published second.** The two steps are the
   two things an image's life needs: it is made on one node, and it is distributed
   from one store. A draft is the file where the disk was, plus a record beside it,
@@ -392,19 +412,18 @@ from what the box looked like from outside.
   rather than through a box's. A version is immutable in both steps: a published
   version never changes, and a bake never reuses a number, because the number it
   takes is one above every published version and every draft of that name.
-- **The seal searches the disk for the credential values themselves.** Deleting
-  the files a credential is written into is not the same as deleting the
-  credential, because a file named like a credential is not the only way a
-  credential reaches a disk: a tool writes its key into a log, a shell history
-  keeps the command that held it, a build artifact carries it, a database row has
-  it in a column nobody named. So after the deletions the seal reads the values
-  out of the secrets directory -- every JSON string and every whole line long
-  enough to be a value -- and looks for them on the guest's own filesystem,
-  skipping the tmpfs the credentials live on and the bundle. A hit names the path
-  and never the value: the message is what a person acts on, and repeating a
-  credential into a task log would be the leak the check exists to prevent. What
-  the check proves is narrow and the right thing to prove: no value that is in
-  this box's secrets directory is anywhere on the disk that becomes the image.
+- **The seal does not search the disk for the credential values, on purpose.**
+  The seal's proof is the bundle's `guest/no-secrets.sh`: the same check the image
+  build runs, and the one an operator runs on an image before publishing it. A
+  search for the values themselves was tried and removed. It read every file of a
+  disk that can be tens of gigabytes, and what it proved was narrow -- the values
+  in this box's secrets directory, as they were at that moment. So a file that
+  merely mentions a credential does not stop a seal: a log line, a shell history, a
+  build artifact or a database row can carry a value into an image, and the file
+  names and directories the script looks for are what the proof covers. That
+  consequence is accepted rather than hidden: a credential that ends up in an image
+  is rotated, and a new version is published, because a published version never
+  changes.
 
 ## The platform bundle
 

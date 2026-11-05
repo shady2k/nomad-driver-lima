@@ -298,16 +298,25 @@ func allocFailureText(alloc *api.Allocation) string {
 	// why the work stopped. The driver's event is the one that names the cause
 	// ("proj-1 amd64 is published in this store, and a published version never
 	// changes"), so it wins over anything Nomad adds after it.
-	for i := len(task.Events) - 1; i >= 0; i-- {
-		event := task.Events[i]
-		if event == nil || event.Type != "Driver" {
-			continue
-		}
-		if v := strings.TrimSpace(event.Details["message"]); v != "" {
-			return oneLine(v, 300)
-		}
-		if event.DisplayMessage != "" {
-			return oneLine(event.DisplayMessage, 300)
+	//
+	// A driver that also reports its progress has more than one event, and the
+	// one that says how it ended is the "exit" kind: a cleanup step after the
+	// failure ("deleted the clone") must not be read as the reason.
+	for _, wantExit := range []bool{true, false} {
+		for i := len(task.Events) - 1; i >= 0; i-- {
+			event := task.Events[i]
+			if event == nil || event.Type != "Driver" {
+				continue
+			}
+			if wantExit && event.Details["kind"] != "exit" {
+				continue
+			}
+			if v := strings.TrimSpace(event.Details["message"]); v != "" {
+				return oneLine(v, 300)
+			}
+			if event.DisplayMessage != "" {
+				return oneLine(event.DisplayMessage, 300)
+			}
 		}
 	}
 	for i := len(task.Events) - 1; i >= 0; i-- {

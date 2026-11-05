@@ -1,8 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/base64"
-	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -48,19 +49,25 @@ func (ta *testApp) addBoxSpec(t *testing.T, spec BoxSpec) {
 	ta.cluster.addNodeDiskLocked("node-1", spec.ID, 300<<20, int64(spec.DiskGiB)<<30)
 }
 
-// sealAnswer is what boxctl seal prints: a line per step, then the record.
-const sealAnswer = `{"line":"closing the box's sessions and stopping its executors"}
-{"line":"the workspace: deleted /work (12.0 MiB)"}
-{"line":"searched 20 file(s) on the disk for 2 credential value(s): none of them is there"}
-{"seal":{"image":{"schema":1,"version":"project-1","name":"project","arch":"amd64","parent":"1.0.0","platform":"mount","recipe":"IyEvYmluL2Jhc2gK","sealed_at":"2026-11-02T12:00:00Z"},"steps":["closing the box's sessions"],"files":20,"values":2}}
-`
+// bakeDetails is what the driver's bake event carries when it made an image.
+func bakeDetails() map[string]string {
+	return map[string]string{
+		"kind": "bake", "version": "project-1", "arch": "amd64", "name": "project", "parent": "1.0.0",
+		"sha256": strings.Repeat("ab", 32), "size": "1048576", "virtual_bytes": "8589934592",
+	}
+}
 
 // finishWorkJobs makes the fake cluster run every batch job the command
-// registers: the driver's task ends with the event that says what it did.
+// registers -- the driver's task ends with the event that says what it did -- and
+// run every box job again, which is what a bake's restart of the box is.
 func (ta *testApp) finishWorkJobs(t *testing.T, details map[string]string, failure string) {
 	t.Helper()
 	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) {
 		id := derefStr(job.ID, "")
+		if _, isBox := BoxIDFromJobName(id); isBox {
+			c.runBox(job)
+			return
+		}
 		if !strings.HasPrefix(id, boxBakeJobPrefix) && !strings.HasPrefix(id, boxPublishJobPrefix) {
 			return
 		}
@@ -84,28 +91,58 @@ func (ta *testApp) finishWorkJobs(t *testing.T, details map[string]string, failu
 	}
 }
 
-// TestBakeSealsStopsAndBakes drives the whole `box bake` of a box.
-func TestBakeSealsStopsAndBakes(t *testing.T) {
+// sealMayRun makes the fake guest answer the seal's gate, which `box bake` asks
+// before it stops anything.
+func (ta *testApp) sealMayRun() {
+	ta.guest.responses["info"] = `{"boxd_version":"0.5.0","sessions":0,"seal":{"ok":true}}`
+}
+
+// stopBox makes a box stopped: its job is stopped and its allocation is done.
+func (ta *testApp) stopBox(id string) {
+	ta.cluster.mu.Lock()
+	defer ta.cluster.mu.Unlock()
+	job := ta.cluster.jobs[BoxJobName(id)]
+	if job != nil {
+		job.Stop = boolPtr(true)
+		job.Status = strPtr("dead")
+	}
+	for _, alloc := range ta.cluster.allocs {
+		if alloc.JobID == BoxJobName(id) {
+			alloc.ClientStatus = "complete"
+			if task := alloc.TaskStates[boxTaskName]; task != nil {
+				task.State = "dead"
+			}
+		}
+	}
+}
+
+// TestBakeStopsSealsAndStartsTheBox drives the whole `box bake` of a box: it is
+// stopped, the driver clones and seals it, and it runs again with its work.
+func TestBakeStopsSealsAndStartsTheBox(t *testing.T) {
 	ta := newTestApp(t, platformIndexJSON)
-	ta.addBoxSpec(t, goodProjectSpec())
-	ta.finishWorkJobs(t, map[string]string{
-		"kind": "bake", "version": "project-1", "arch": "amd64", "name": "project", "parent": "1.0.0",
-		"sha256": strings.Repeat("ab", 32), "size": "1048576", "virtual_bytes": "8589934592",
-	}, "")
+	spec := goodProjectSpec()
+	ta.addBoxSpec(t, spec)
+	ta.finishWorkJobs(t, bakeDetails(), "")
+	ta.sealMayRun()
 	recipe := filepath.Join(t.TempDir(), "recipe.sh")
 	require.NoError(t, os.WriteFile(recipe, []byte("#!/bin/bash\napt-get install -y ripgrep\n"), 0o644))
-	ta.guest.responses["seal --name project --version project-1 --parent 1.0.0 --arch amd64 --recipe -"] = sealAnswer
 
-	require.Equal(t, ExitOK, ta.run(t, "bake", "dev1", "--name", "project", "--recipe", recipe, "--yes"), ta.errOut.String())
+	require.Equal(t, ExitOK, ta.run(t, "bake", "dev1", "--name", "project", "--recipe", recipe), ta.errOut.String())
 
-	// The recipe goes in with the seal, in the box.
-	require.Contains(t, strings.Join(ta.guest.stdin, "\n"), "apt-get install -y ripgrep")
-	// The seal's own lines reach the terminal as they happen.
-	require.Contains(t, ta.errOut.String(), "the workspace: deleted /work")
-	require.Contains(t, ta.errOut.String(), "sealing box dev1 into the image project-1")
+	// The seal's own gate was asked in the box, and the CLI never sealed: the
+	// clone does that.
+	require.Contains(t, strings.Join(ta.guest.callLines(), "\n"), boxctlPath+" info",
+		"the seal's gate was asked in the box, before it was stopped")
 
-	// The box is stopped, and the bake job carries the volume, the image and the
-	// mark that keeps it out of `box ls`.
+	// The box was stopped, and it runs again afterwards.
+	require.True(t, callCount(ta, "StopJob box-dev1 purge=false") > 0, "the box is stopped for the copy")
+	require.True(t, callCount(ta, "RegisterJob box-dev1") > 0, "the box runs again")
+	box, _, err := ta.findBox(context.Background(), "dev1")
+	require.NoError(t, err)
+	require.Equal(t, "running", box.State)
+
+	// The bake job carries the volume, the image, the platform bundle the clone
+	// mounts, and the box's own size: the task boots the clone in itself.
 	job := ta.workJob
 	require.NotNil(t, job, "the bake job was registered")
 	require.Equal(t, BoxBakeJobName("dev1"), derefStr(job.ID, ""))
@@ -113,14 +150,10 @@ func TestBakeSealsStopsAndBakes(t *testing.T) {
 	require.Equal(t, "bake", job.Meta[boxWorkMarker])
 	group := job.TaskGroups[0]
 	require.Equal(t, BoxVolumeName("dev1"), group.Volumes[boxDiskVolume].Source)
-	// Read-write, although the task only reads: Nomad places a read-only request
-	// of a dynamic host volume only when the volume offers a read-only access
-	// mode, and this volume is single-node-writer -- a read-only bake job is
-	// never placed at all.
-	require.False(t, group.Volumes[boxDiskVolume].ReadOnly,
-		"Nomad cannot mount a single-node-writer host volume read-only")
-	require.Empty(t, group.Volumes[boxDiskVolume].AccessMode,
-		"a host volume request leaves the mode to the scheduler")
+	// Read-write, although the task only reads the box's disk: Nomad places a
+	// read-only request of a dynamic host volume only when the volume offers a
+	// read-only access mode, and this volume is single-node-writer.
+	require.False(t, group.Volumes[boxDiskVolume].ReadOnly)
 	task, err := boxTask(ta.workJob)
 	require.NoError(t, err)
 	bake, ok := task.Config["bake"].(map[string]any)
@@ -130,54 +163,81 @@ func TestBakeSealsStopsAndBakes(t *testing.T) {
 	require.Equal(t, "1.0.0", bake["parent"])
 	require.Equal(t, "amd64", bake["arch"])
 	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("#!/bin/bash\napt-get install -y ripgrep\n")), bake["recipe"])
+	platform, ok := task.Config["platform"].(map[string]any)
+	require.True(t, ok, "the clone mounts the bundle the box mounts")
+	require.Equal(t, "1.10.0", platform["version"])
+	require.Equal(t, spec.PlatformSHA256, platform["sha256"])
+	require.Equal(t, spec.TaskCPUShares()+bakeCPUShares, *task.Resources.CPU)
+	require.Equal(t, spec.TaskMemoryMiB(), *task.Resources.MemoryMB)
 
-	// The result is printed, and the next steps with it.
+	// The result is printed, and the box is said to keep its work.
 	out := ta.errOut.String()
+	require.Contains(t, out, "stopping box dev1")
 	require.Contains(t, out, "baked the image project-1 (amd64)")
 	require.Contains(t, out, strings.Repeat("ab", 32))
-	require.Contains(t, out, "box rm dev1 --yes")
-	require.Contains(t, out, "starting it gives an empty, clean machine")
+	require.Contains(t, out, "box dev1 runs again on the same disk: /work and the sessions are still there")
+	require.Contains(t, out, "keeps its work")
 	require.Contains(t, out, "box images publish project-1 --yes")
-	require.True(t, callCount(ta, "StopJob box-dev1 purge=false") > 0, "the sealed box is stopped")
+	require.NotContains(t, out, "sealed and stopped")
 	require.True(t, callCount(ta, "StopJob box-bake-dev1 purge=true") > 0, "the bake job is purged")
 }
 
-// TestBakeNeedsYes: the seal deletes the work, so a bake refuses without --yes and
-// says what to do first.
-func TestBakeNeedsYes(t *testing.T) {
+// TestBakeRefusesABusyBoxWithoutStoppingIt: the seal refuses a box with a turn
+// running, and that is asked in the box -- before it is stopped -- because the
+// clone's own daemon is fresh and would answer at once.
+func TestBakeRefusesABusyBoxWithoutStoppingIt(t *testing.T) {
 	ta := newTestApp(t, platformIndexJSON)
 	ta.addBoxSpec(t, goodProjectSpec())
+	ta.guest.responses["info"] = `{"boxd_version":"0.5.0","sessions":1,` +
+		`"seal":{"ok":false,"reason":"session s-1 is running turn 1: a seal removes the sessions and their transcripts, so cancel it first (` + "`box cancel dev1 s-1`" + `)"}}`
+
 	rc := ta.run(t, "bake", "dev1", "--name", "project")
 	require.Equal(t, ExitError, rc)
 	out := ta.errOut.String()
-	require.Contains(t, out, "seals it")
-	require.Contains(t, out, "/work")
-	require.Contains(t, out, "Push the work out of the box first")
-	require.Contains(t, out, "--yes")
-	require.Zero(t, callCount(ta, "RegisterJob box-bake"), "nothing is registered without --yes")
+	require.Contains(t, out, "box dev1 is busy")
+	require.Contains(t, out, "running turn 1")
+	require.Contains(t, out, "Nothing was stopped")
+	require.Zero(t, callCount(ta, "StopJob box-dev1"), "a busy box is refused without a stop")
+	require.Zero(t, callCount(ta, "RegisterJob box-bake"), "nothing is registered")
 }
 
-// TestBakeRefusesWhatItCannotSeal: a stopped box, an image without the bundle, and
-// two recipe flags are refused before anything happens.
+// TestBakeRefusesACopyThatDoesNotFit: a clone is a full copy of the disk, so a node
+// without the room is refused with a sentence before the box is stopped.
+func TestBakeRefusesACopyThatDoesNotFit(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.addBoxSpec(t, goodProjectSpec())
+	ta.sealMayRun()
+	ta.cluster.mu.Lock()
+	ta.cluster.nodes["node-1"].Attributes[boxDiskAttrPrefix+"free_bytes"] = strconv.FormatInt(1<<20, 10)
+	ta.cluster.mu.Unlock()
+
+	rc := ta.run(t, "bake", "dev1", "--name", "project")
+	require.Equal(t, ExitError, rc)
+	out := ta.errOut.String()
+	require.Contains(t, out, "free where a bake writes the copy")
+	require.Contains(t, out, "needs")
+	require.Zero(t, callCount(ta, "StopJob box-dev1"), "a bake whose copy does not fit does not stop the box")
+	require.Zero(t, callCount(ta, "RegisterJob box-bake"), "nothing is registered")
+}
+
+// TestBakeTakesNoYes: nothing is destroyed any more, so the flag that said "seal
+// it anyway" is gone.
+func TestBakeTakesNoYes(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.addBoxSpec(t, goodProjectSpec())
+	rc := ta.run(t, "bake", "dev1", "--name", "project", "--yes")
+	require.Equal(t, ExitUsage, rc)
+	require.Contains(t, ta.errOut.String(), "yes")
+	require.Zero(t, callCount(ta, "StopJob box-dev1"))
+}
+
+// TestBakeRefusesWhatItCannotSeal: an image without the bundle and two recipe
+// flags are refused before anything happens.
 func TestBakeRefusesWhatItCannotSeal(t *testing.T) {
-	t.Run("a stopped box", func(t *testing.T) {
-		ta := newTestApp(t, platformIndexJSON)
-		ta.addBoxSpec(t, goodProjectSpec())
-		ta.cluster.mu.Lock()
-		ta.cluster.jobs["box-dev1"].Stop = boolPtr(true)
-		for _, alloc := range ta.cluster.allocs {
-			alloc.ClientStatus = "complete"
-		}
-		ta.cluster.mu.Unlock()
-		rc := ta.run(t, "bake", "dev1", "--name", "project", "--yes")
-		require.Equal(t, ExitError, rc)
-		require.Contains(t, ta.errOut.String(), "the seal runs inside the box")
-		require.Contains(t, ta.errOut.String(), "box start dev1")
-	})
 	t.Run("an image that carries its own boxd", func(t *testing.T) {
 		ta := newTestApp(t, indexJSON)
 		ta.addBox(t, "dev1") // an image without a platform entry
-		rc := ta.run(t, "bake", "dev1", "--name", "project", "--yes")
+		rc := ta.run(t, "bake", "dev1", "--name", "project")
 		require.Equal(t, ExitError, rc)
 		require.Contains(t, ta.errOut.String(), "takes no platform bundle")
 		require.Contains(t, ta.errOut.String(), "only an image with")
@@ -185,17 +245,57 @@ func TestBakeRefusesWhatItCannotSeal(t *testing.T) {
 	t.Run("two recipe flags", func(t *testing.T) {
 		ta := newTestApp(t, platformIndexJSON)
 		ta.addBoxSpec(t, goodProjectSpec())
-		rc := ta.run(t, "bake", "dev1", "--name", "project", "--recipe", "/tmp/x", "--no-recipe", "--yes")
+		rc := ta.run(t, "bake", "dev1", "--name", "project", "--recipe", "/tmp/x", "--no-recipe")
 		require.Equal(t, ExitUsage, rc)
 		require.Contains(t, ta.errOut.String(), "--recipe and --no-recipe")
 	})
 	t.Run("a name that is not a project name", func(t *testing.T) {
 		ta := newTestApp(t, platformIndexJSON)
 		ta.addBoxSpec(t, goodProjectSpec())
-		rc := ta.run(t, "bake", "dev1", "--name", "1.0.0", "--yes")
+		rc := ta.run(t, "bake", "dev1", "--name", "1.0.0")
 		require.Equal(t, ExitUsage, rc)
 		require.Contains(t, ta.errOut.String(), "looks like a base image")
 	})
+	t.Run("an orphan", func(t *testing.T) {
+		ta := newTestApp(t, platformIndexJSON)
+		ta.addBoxSpec(t, goodProjectSpec())
+		ta.cluster.mu.Lock()
+		delete(ta.cluster.jobs, "box-dev1")
+		ta.cluster.mu.Unlock()
+		rc := ta.run(t, "bake", "dev1", "--name", "project")
+		require.Equal(t, ExitError, rc)
+		require.Contains(t, ta.errOut.String(), "is an orphan")
+	})
+}
+
+// TestBakeLeavesAStoppedBoxStopped: a bake of a stopped box works -- its disk is
+// copied all the same -- and it does not start the box.
+func TestBakeLeavesAStoppedBoxStopped(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.addBoxSpec(t, goodProjectSpec())
+	ta.stopBox("dev1")
+	ta.finishWorkJobs(t, bakeDetails(), "")
+
+	require.Equal(t, ExitOK, ta.run(t, "bake", "dev1", "--name", "project", "--no-recipe"), ta.errOut.String())
+	require.Zero(t, callCount(ta, "StopJob box-dev1"), "the box was already stopped")
+	require.Zero(t, callCount(ta, "RegisterJob box-dev1"), "a stopped box stays stopped")
+	require.NotContains(t, ta.errOut.String(), "runs again")
+	require.Contains(t, ta.errOut.String(), "baked the image project-1 (amd64)")
+}
+
+// TestBakeSaysWhenTheBoxDoesNotComeBack: a box that was running and cannot be
+// started again is an error that names `box start`, and the image is not lost
+// with it.
+func TestBakeSaysWhenTheBoxDoesNotComeBack(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.addBoxSpec(t, goodProjectSpec())
+	ta.sealMayRun()
+	ta.finishWorkJobs(t, bakeDetails(), "")
+	// The restart fails: Nomad rejects the box's job the second time.
+	ta.cluster.registerErr = fmt.Errorf("no eligible nodes")
+	require.NotNil(t, ta.run(t, "bake", "dev1", "--name", "project", "--no-recipe"))
+	require.Contains(t, ta.errOut.String(), "does not run again")
+	require.Contains(t, ta.errOut.String(), "box start dev1")
 }
 
 // TestBakeCountsTheVersionsItCanSee: the version is NAME-N, one above the highest
@@ -204,59 +304,17 @@ func TestBakeCountsTheVersionsItCanSee(t *testing.T) {
 	ta := newTestApp(t, platformIndexJSON)
 	ta.withDraft(t, "project-3", "project", "1.0.0", 3)
 	ta.addBoxSpec(t, goodProjectSpec())
-	ta.finishWorkJobs(t, map[string]string{"kind": "bake", "version": "project-4", "arch": "amd64",
-		"name": "project", "sha256": strings.Repeat("cd", 32), "size": "1024"}, "")
-	ta.guest.responses["seal --name project --version project-4 --parent 1.0.0 --arch amd64"] = sealAnswer
+	details := bakeDetails()
+	details["version"] = "project-4"
+	ta.finishWorkJobs(t, details, "")
+	ta.sealMayRun()
 
-	require.Equal(t, ExitOK, ta.run(t, "bake", "dev1", "--name", "project", "--no-recipe", "--yes"), ta.errOut.String())
+	require.Equal(t, ExitOK, ta.run(t, "bake", "dev1", "--name", "project", "--no-recipe"), ta.errOut.String())
 	require.Contains(t, ta.errOut.String(), "project-4")
 	task, err := boxTask(ta.workJob)
 	require.NoError(t, err)
 	bake, _ := task.Config["bake"].(map[string]any)
 	require.Equal(t, "project-4", bake["version"], "3 is a draft, so the new version is 4")
-}
-
-// TestBakeJobIsNotABox: the batch jobs of an image are not boxes: neither the box
-// list, nor the capacity count, nor a job name takes them for one.
-func TestBakeJobIsNotABox(t *testing.T) {
-	if id, ok := BoxIDFromJobName("box-bake-dev1"); ok {
-		t.Fatalf("box-bake-dev1 was taken for box %q", id)
-	}
-	if id, ok := BoxIDFromJobName("box-publish-project-1"); ok {
-		t.Fatalf("box-publish-project-1 was taken for box %q", id)
-	}
-	if id, ok := BoxIDFromJobName("box-dev1"); !ok || id != "dev1" {
-		t.Fatalf("box-dev1 is a box: %q, %v", id, ok)
-	}
-
-	ta := newTestApp(t, platformIndexJSON)
-	ta.addBox(t, "dev1")
-	ta.cluster.mu.Lock()
-	ta.cluster.jobs["box-bake-dev1"] = &api.Job{
-		ID: strPtr("box-bake-dev1"), Name: strPtr("box-bake-dev1"), Type: strPtr("batch"),
-		Meta: map[string]string{boxWorkMarker: "bake"},
-	}
-	ta.cluster.allocSeq++
-	ta.cluster.allocs["alloc-bake"] = &api.Allocation{
-		ID: "alloc-bake", JobID: "box-bake-dev1", NodeID: "node-1", NodeName: "node-1",
-		ClientStatus: "running", DesiredStatus: "run", CreateIndex: uint64(ta.cluster.allocSeq),
-	}
-	ta.cluster.mu.Unlock()
-
-	require.Equal(t, ExitOK, ta.run(t, "ls", "--json"))
-	var ls lsOutput
-	require.NoError(t, json.Unmarshal(ta.out.Bytes(), &ls))
-	require.Len(t, ls.Boxes, 1, "the bake job is not a box: %+v", ls.Boxes)
-	require.Equal(t, "dev1", ls.Boxes[0].ID)
-
-	ta.out.Reset()
-	ta.errOut.Reset()
-	require.Equal(t, ExitOK, ta.run(t, "capacity", "--json"))
-	var cap capacityOutput
-	require.NoError(t, json.Unmarshal(ta.out.Bytes(), &cap))
-	for _, node := range cap.Nodes {
-		require.Equal(t, 1, node.Boxes, "a bake job is not a box in the capacity count either")
-	}
 }
 
 // job returns one registered job of the fake cluster.
@@ -303,7 +361,58 @@ func TestBakeRefusesARecipeItCannotCarry(t *testing.T) {
 	ta.addBoxSpec(t, goodProjectSpec())
 	big := filepath.Join(t.TempDir(), "big.sh")
 	require.NoError(t, os.WriteFile(big, []byte(strings.Repeat("#!/bin/bash\n", 7000)), 0o644))
-	rc := ta.run(t, "bake", "dev1", "--name", "project", "--recipe", big, "--yes")
+	rc := ta.run(t, "bake", "dev1", "--name", "project", "--recipe", big)
 	require.Equal(t, ExitUsage, rc)
 	require.Contains(t, ta.errOut.String(), "more than the 65536")
+}
+
+// TestBakePrintsTheTaskLog: the driver writes every step of a bake -- and every
+// line of the seal -- into the task's own log, which is where the command reads
+// them. Nomad keeps ten task events, and a seal prints more.
+func TestBakePrintsTheTaskLog(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.addBoxSpec(t, goodProjectSpec())
+	ta.finishWorkJobs(t, bakeDetails(), "")
+	ta.sealMayRun()
+	ta.cluster.mu.Lock()
+	ta.cluster.logData["stdout"] = "cloned box dev1 into dev1-bake-1: a copy of its stopped disk\n" +
+		"  guest/no-secrets.sh: 21 check(s) passed\n" +
+		"deleted the clone dev1-bake-1\n"
+	ta.cluster.mu.Unlock()
+
+	require.Equal(t, ExitOK, ta.run(t, "bake", "dev1", "--name", "project", "--no-recipe"), ta.errOut.String())
+	out := ta.errOut.String()
+	require.Contains(t, out, "cloned box dev1 into dev1-bake-1")
+	require.Contains(t, out, "guest/no-secrets.sh: 21 check(s) passed")
+	require.Contains(t, out, "deleted the clone dev1-bake-1")
+}
+
+// TestRebuildBakesTheTemporaryBoxAndDeletesIt: a rebuild creates its temporary box
+// from the newer base image, runs the recipe, bakes it -- the same bake as any box,
+// on a clone -- and deletes the box instead of starting it again.
+func TestRebuildBakesTheTemporaryBoxAndDeletesIt(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	ta.finishWorkJobs(t, map[string]string{"kind": "bake", "version": "project-3", "arch": "amd64",
+		"name": "project", "parent": "1.0.0", "sha256": strings.Repeat("ef", 32), "size": "2048"}, "")
+
+	require.Equal(t, ExitOK, ta.run(t, "bake", "--rebuild", "project-2", "--base", "1.0.0"), ta.errOut.String())
+	out := ta.errOut.String()
+	require.Contains(t, out, "rebuilding project-2: a temporary box project-rebuild")
+	require.Contains(t, out, "baked the image project-3 (amd64)")
+	require.Contains(t, out, "from    project-2 (rebuilt on 1.0.0)")
+
+	// The temporary box was stopped for its bake, and it was deleted instead of
+	// being started again.
+	require.True(t, callCount(ta, "StopJob box-project-rebuild purge=false") > 0, "the temporary box is stopped")
+	require.Equal(t, 1, countRegisterOf(ta, "box-project-rebuild"),
+		"the temporary box is registered once (its create) and not started again")
+	require.True(t, callCount(ta, "StopJob box-project-rebuild purge=true") > 0, "the temporary box is deleted")
+	// And the bake job it registered is an ordinary bake of that box.
+	require.Equal(t, BoxBakeJobName("project-rebuild"), derefStr(ta.workJob.ID, ""))
+}
+
+// countRegisterOf counts the registrations of one job.
+func countRegisterOf(ta *testApp, id string) int {
+	return callCount(ta, "RegisterJob "+id)
 }

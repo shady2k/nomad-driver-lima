@@ -37,6 +37,12 @@ Lima instances Nomad does not know about, the driver and volume plugin versions,
 and how many boxes the node runs. A node's free resources are reported *after*
 subtracting the running VMs that no task owns.
 
+A VM with no task is an orphan to the driver after ten minutes, and that is what
+every stopped box looks like to it. So this command answers as `box ls` does: a box
+with a job or a stored description is named with its state from there -- a stopped
+box is `stopped`, and the line reads "no box task, and the cluster knows this box as
+stopped" -- and only a VM that is neither is an orphan.
+
 ### `box images`
 
 The images a box can be created from, newest first -- the base images published in
@@ -126,24 +132,26 @@ Exit codes are the page's: `0` published, `1` the job failed or no store is
 configured, `2` usage, `3` no node holds that draft, `4` the job did not finish
 within `--timeout` (default 30m).
 
-### `box bake <id> --name NAME [--recipe FILE | --no-recipe] [--yes] [--timeout D]`
+### `box bake <id> --name NAME [--recipe FILE | --no-recipe] [--timeout D]`
 
-Turns a box into an image: the box is sealed from inside, stopped, and its disk
-is baked into the node's image cache as a draft (`docs/guest-image.md`, "Project
-images"). Those are the only flags.
+Turns a box into an image without emptying the box: a copy of its disk is sealed
+and baked into the node's image cache as a draft, and the box carries on with its
+work (`docs/guest-image.md`, "Project images"). Those are the only flags.
 
 A bake is refused, with a sentence that says why, when:
 
 - the box's image takes no platform bundle (`"platform"` is not `mount`): boxd and
   the executors come from the node's `/opt/box`, so an image that carries its own
   boxd cannot be baked;
-- the box is not running: the seal runs inside it;
-- `--recipe` and `--no-recipe` are both given: they say opposite things;
-- `--yes` is missing.
+- a turn runs in the box, or a preparation is in progress: the seal would refuse
+  it, and the box is asked before anything is stopped;
+- the node has less free space where the bake writes the copy than the box's disk
+  occupies: a bake clones the disk before it seals it, and the refusal names both
+  numbers;
+- `--recipe` and `--no-recipe` are both given: they say opposite things.
 
-Without `--yes` the command names the image it would make and says what the seal
-does: it deletes `/work` and every session in the box, and the box cannot be
-sealed twice. Push the work out of the box first.
+A bake destroys nothing, so it asks nothing: `--yes` is not one of its flags. A
+refusal stops nothing and bakes nothing.
 
 The recipe is the script that makes the box's environment from its parent image.
 It comes from `--recipe FILE`, or else from the record of the image the box was
@@ -156,28 +164,46 @@ script belongs in the project's sources, which the recipe prepares.
 | `--name NAME` | – (required) | the project the image belongs to: `NAME-1`, `NAME-2`, ... |
 | `--recipe FILE` | the box's image record | the script that makes this environment from the parent image |
 | `--no-recipe` | false | bake without a recipe; such an image cannot be rebuilt |
-| `--yes` | false | seal the box without asking |
 | `--timeout D` | 30m | how long to wait for the bake job |
 
 The steps, in this order:
 
-1. `boxctl seal` in the guest: it deletes the work, the sessions and the
-   credentials, and proves the result. Its lines go to stderr as they happen (not
-   under `--json`), and a failed seal fails the command with the seal's own
-   message.
-2. `box stop` the box. A sealed box is not started again: it is an empty, clean
-   machine with the image's files, not the work.
-3. The batch job `box-bake-<id>`, which mounts the box's volume -- the volume also
+1. `boxctl info` in the box, a call that changes nothing: a turn running or a
+   preparation in progress refuses the bake with a sentence, and nothing is
+   stopped. The check happens here because the clone's own boxd is a fresh daemon
+   and cannot know about the box's turn. A box that is already stopped skips this
+   step: it has no turn to lose.
+2. The room on the node, against the space the box's disk occupies there.
+3. `box stop`, on the path `box stop` takes, which records that the box was
+   running: a clone of a running box is a copy of a disk being written.
+4. The batch job `box-bake-<id>`, which mounts the box's volume -- the volume also
    places the job on the node that holds the disk. The mount is read-write because
    Nomad does not place a read-only request on a `single-node-writer` host volume;
-   the task reads the disk and writes only the image in the cache. It runs no VM: it
-   compresses the disk with `qemu-img` and records the image. A node without
-   `qemu-img` fails it with a sentence.
-4. The job is purged, and the result is printed: version, sha256, size, node, and
-   the next steps.
+   the task reads the box's disk and writes only the image in the cache. In one
+   driver task it clones the box as `<id>-bake-<n>` -- a full copy of the stopped
+   instance's disk, a new hostname, no snapshot (measured with Lima 2.2.0) --
+   starts the clone with the platform bundle at `/opt/box` and two empty
+   directories where `boxd.service` waits for its mounts (`/run/box/secrets` and
+   `/etc/box/local`), runs `boxctl seal` in it through `limactl shell`, stops it,
+   compresses its disk into the node's image cache with `qemu-img convert -c`,
+   writes the draft's record, and deletes the clone again -- also when a step
+   fails or the task is stopped. The clone carries none of the box's task files
+   and none of its credentials, so the machine the seal empties never sees a
+   credential, and the seal -- which refuses a guest that has the box's credentials
+   mounted -- has nothing to refuse here. A clone that a killed driver left behind
+   is removed by the next bake of the same box, and until then the driver reports
+   it as an orphan. Every step of the driver, and every line of the seal, is
+   printed while it runs. A node without `qemu-img` fails the task with a sentence.
+5. Whatever the bake answered, the box starts again if it was running, and the
+   command says so: same disk, `/work` and the sessions are still there. A box that
+   was stopped stays stopped. A box that does not come back is an error naming
+   `box start <id>`: its disk is untouched, so that command runs it again with its
+   work.
 
-The box is not deleted. It stays stopped with its disk, and `box rm <id> --yes`
-removes it when its work is out of it.
+The box is not deleted and not emptied: it keeps its disk, its `/work` and its
+sessions, and `box rm <id> --yes` is what deletes it. The bake job is purged when
+it ends, and the task reserves the box's own CPU and memory plus a core for the
+converter, because it boots a VM as big as the box.
 
 The version is `NAME-N`, with `N` one above the highest number among the versions
 of that name in the index and the drafts of every node, so a draft and a published
@@ -185,11 +211,13 @@ image never share a number. `NAME` is 1 to 63 lower-case letters, digits and
 dashes, starting and ending with a letter or a digit, and it may not look like a
 base image's version (`1.0.0`, `v2`).
 
-`--json` gives `box` (the sealed box), `version`, `arch`, `name`, `parent`,
-`sha256`, `size`, `virtual_bytes`, `node` and `draft`.
+`--json` gives `box` (the box that baked, when it runs again), `restarted`,
+`version`, `arch`, `name`, `parent`, `sha256`, `size`, `virtual_bytes`, `node` and
+`draft`.
 
-Exit codes are the page's: `0` baked, `1` the seal, the stop or the job failed,
-`2` usage, `4` the job did not finish within `--timeout` (it keeps running).
+Exit codes are the page's: `0` baked, `1` the seal, the stop, the job or the
+restart failed, `2` usage, `4` the job did not finish within `--timeout` (it keeps
+running).
 
 ### `box bake --rebuild NAME [--base VERSION] [--timeout D]`
 
@@ -206,9 +234,11 @@ time limit other than `--timeout` (default 1h) -- bakes the result as the next
 the box and says so: what the box ran is the way to see why (`box logs`, then `box
 rm NAME-rebuild --yes`).
 
-It publishes nothing: that is `box images publish`. `--yes` is accepted and
-unnecessary, and the command says so: the only box it seals is its own temporary
-one.
+It publishes nothing: that is `box images publish`. It takes `--base` and
+`--timeout` only: the image names itself, and its recipe is the one it carries.
+
+The bake is the one `box bake <id>` runs, on the temporary box: it works on a
+clone, and the temporary box is not started again, because the command deletes it.
 
 ### `box store set --url URL --from-file FILE | --template FILE`
 

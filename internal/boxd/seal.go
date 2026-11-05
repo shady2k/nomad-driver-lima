@@ -1,12 +1,9 @@
 package boxd
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -30,11 +27,10 @@ import (
 // the installed packages, the toolchains and the language environments in the
 // executor homes.
 //
-// The seal refuses to finish on an unclean result. Two proofs run before it says
-// it is done: the bundle's own guest/no-secrets.sh, and a search of the guest
-// disk for the credential values themselves. A hit names the path and never the
-// value. Some of the box is gone by then, so a failed seal says so as well, and
-// leaves the box running so its owner can act on what it found.
+// The seal refuses to finish on an unclean result: the bundle's own
+// guest/no-secrets.sh is the proof it runs before it says it is done. Some of the
+// box is gone by then, so a failed seal says so as well; the box a seal runs in
+// is a clone of the box it came from, so nothing the owner needs is lost.
 
 // imageRecordPath is where a sealed image records what it is. images/build.sh
 // writes the same file for a built image, so a booted box answers "what am I"
@@ -61,11 +57,6 @@ var (
 	imageNamePattern    = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 	imageVersionPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`)
 )
-
-// minSecretValueLen is the shortest string a seal looks for on the disk. Below
-// it a value is too common to search for: "1.0.0" or "true" would match
-// everywhere and prove nothing.
-const minSecretValueLen = 16
 
 // ImageRecord is what a sealed box writes to /etc/box/image.json: the record of
 // the image the box now is.
@@ -105,10 +96,6 @@ type SealResult struct {
 	Image ImageRecord `json:"image"`
 	// Steps is what the seal deleted or proved, in the order it happened.
 	Steps []string `json:"steps"`
-	// Files is the number of files the credential search read, Values the number
-	// of credential values it looked for.
-	Files  int `json:"files"`
-	Values int `json:"values"`
 }
 
 // SealPaths is where a seal cleans and where it proves the result.
@@ -121,14 +108,9 @@ type SealPaths struct {
 	Workspace string
 	// Homes are the executor homes to clean and every user's home.
 	Homes []string
-	// Secrets are the directories whose file names and values no longer belong
-	// in an image: the driver's credentials and boxd's own copies of them.
+	// Secrets are the directories whose file names no longer belong in an
+	// image: the driver's credentials and boxd's own copies of them.
 	Secrets []string
-	// DiskRoot is the filesystem the credential search walks.
-	DiskRoot string
-	// Skip are the directories the search does not descend into: the kernel
-	// filesystems, the tmpfs the credentials are on, and the bundle.
-	Skip []string
 	// Temp and Logs are emptied, keeping the directories themselves.
 	Temp []string
 	Logs []string
@@ -158,8 +140,6 @@ type SealPaths struct {
 func (c DaemonConfig) sealPaths() SealPaths {
 	p := SealPaths{
 		Workspace:    DefaultWorkspaceRoot,
-		DiskRoot:     "/",
-		Skip:         []string{"/proc", "/sys", "/run", "/dev", "/opt/box"},
 		Temp:         []string{"/tmp", "/var/tmp"},
 		Logs:         []string{"/var/log"},
 		HostKeys:     "/etc/ssh",
@@ -179,12 +159,6 @@ func (c DaemonConfig) sealPaths() SealPaths {
 	if o := c.Seal; o != nil {
 		if o.Workspace != "" {
 			p.Workspace = o.Workspace
-		}
-		if o.DiskRoot != "" {
-			p.DiskRoot = o.DiskRoot
-		}
-		if o.Skip != nil {
-			p.Skip = o.Skip
 		}
 		if o.Homes != nil {
 			p.Homes = o.Homes
@@ -265,9 +239,18 @@ func (c DaemonConfig) secretsDirs() []string {
 //
 // say receives every progress line; it may be nil. The lines also go to the
 // journal, which is where a person watches a long seal from the task log.
+//
+// A seal is only for a guest that is about to become an image, so it refuses one
+// that has the box's credentials: those are the files of the box's own work, and
+// an image must never be made of a machine that holds them. `box bake` never runs
+// into this, because it seals a clone that mounts empty stand-ins where a box has
+// its credentials.
 func (m *Manager) Seal(req SealRequest, say func(string)) (SealResult, error) {
 	if say == nil {
 		say = func(string) {}
+	}
+	if err := m.credentialsMounted(); err != nil {
+		return SealResult{Steps: []string{}}, err
 	}
 	s := &sealer{m: m, cfg: m.cfg, paths: m.cfg.sealPaths(), say: say, res: SealResult{Steps: []string{}}}
 	return s.run(req)
@@ -280,10 +263,12 @@ type sealer struct {
 	paths SealPaths
 	say   func(string)
 	res   SealResult
-	// zeroLimit bounds the zero fill that replaces fstrim. It is 0 for a real
-	// seal, which writes until the filesystem is full; a test sets it so that it
-	// does not fill the machine it runs on.
+	// zeroLimit bounds the zero fill that replaces fstrim, and zeroPath is the
+	// directory it fills. zeroLimit is 0 for a real seal, which writes until the
+	// filesystem is full; a test sets both so that it does not fill the machine
+	// it runs on.
 	zeroLimit int64
+	zeroPath  string
 }
 
 // line reports one step of the seal: to the caller, and to the journal.
@@ -296,11 +281,11 @@ func (s *sealer) line(format string, args ...any) {
 
 // fail wraps a step's failure. By the time a step runs the seal has already
 // deleted something, and nothing it deletes comes back: the message says so, and
-// that the box still runs.
+// that the machine a bake seals is a clone of the box.
 func (s *sealer) fail(what string, err error) (SealResult, error) {
 	return s.res, Errorf(CodeInternal,
-		"the seal stopped at %s: %v. Some of the box is already gone and cannot be brought back; "+
-			"the box still runs, so fix what is left and bake it again", what, err)
+		"the seal stopped at %s: %v. What it deleted is gone: a seal empties the machine it runs in, which for a "+
+			"bake is a clone of the box and never the box itself. Fix what is left and bake again", what, err)
 }
 
 // run is the seal: refuse, close, delete, prove, trim, record.
@@ -354,6 +339,52 @@ func (s *sealer) run(req SealRequest) (SealResult, error) {
 	}
 	s.line("the image is sealed: this box is now the image %s (%s)", record.Name, dashOr(record.Version, "no version"))
 	return s.res, nil
+}
+
+// credentialsMounted refuses a seal in a guest that has the box's credentials
+// mounted.
+//
+// The credentials are the driver's files on the host's tmpfs, mounted into the
+// guest at the secrets directory: a guest that has them is a box somebody works
+// in, not an image about to be made. A bake's clone mounts empty stand-ins there,
+// so the seal of a clone always passes this check.
+func (m *Manager) credentialsMounted() error {
+	dir := strings.TrimSpace(m.cfg.SecretsDir)
+	if dir == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		return nil // no directory, or an empty one: nothing is mounted
+	}
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	if len(names) > 5 {
+		names = append(names[:5], fmt.Sprintf("and %d more", len(names)-5))
+	}
+	return Errorf(CodeInvalid,
+		"this guest has the box's credentials mounted in %s (%s), and a seal is only for a guest that is about to "+
+			"become an image. Bake the box instead, which seals a clone with empty stand-ins for the credentials "+
+			"(docs/guest-image.md)", dir, strings.Join(names, ", "))
+}
+
+// SealStatus reports whether a seal would run in this box now, without changing
+// anything: it is the seal's own gate, asked before the box is stopped.
+//
+// `box bake` asks it through `boxctl info` (the guest is the only place a turn
+// or a preparation is visible), so a busy box is refused with no stop at all.
+func (m *Manager) SealStatus() SealStatus {
+	if err := m.sealGate(); err != nil {
+		reason := err.Error()
+		if e, ok := err.(*Error); ok {
+			reason = e.Message
+		}
+		return SealStatus{OK: false, Reason: reason}
+	}
+	return SealStatus{OK: true}
 }
 
 // sealGate refuses a seal that would race a turn or a preparation: both are work
@@ -1212,12 +1243,10 @@ func wipeMachineID(path string) error {
 	return nil
 }
 
-// prove runs the two checks that decide whether the box may become an image.
+// prove runs the check that decides whether the box may become an image: the
+// bundle's own guest/no-secrets.sh. It is the proof the seal keeps.
 func (s *sealer) prove() error {
-	if err := s.proveNoSecrets(); err != nil {
-		return err
-	}
-	return s.proveNoValues()
+	return s.proveNoSecrets()
 }
 
 // proveNoSecrets runs the bundle's guest/no-secrets.sh: the same check the image
@@ -1252,239 +1281,12 @@ func (s *sealer) proveNoSecrets() error {
 			failures = append(failures[:5], fmt.Sprintf("and %d more", len(failures)-5))
 		}
 		return Errorf(CodeInternal,
-			"guest/no-secrets.sh failed in this box: %s. Some of the box is already gone and cannot be brought back; "+
-				"the box still runs, so remove what it names and bake it again", strings.Join(failures, "; "))
+			"guest/no-secrets.sh failed in this box: %s. A seal empties the machine it runs in, which for a bake is "+
+				"a clone of the box and never the box itself: remove what it names in the box and bake again",
+			strings.Join(failures, "; "))
 	}
 	s.line("guest/no-secrets.sh: %d check(s) passed", countLines(out))
 	return nil
-}
-
-// proveNoValues searches the guest's disk for the credential values themselves.
-//
-// guest/no-secrets.sh looks for the files and directories a credential is written
-// into; this looks for the value wherever it ended up -- a log, a shell history,
-// a build artifact, a database. The search reads one filesystem and skips the
-// tmpfs the credentials live on, so it only ever reports what would travel in an
-// image.
-func (s *sealer) proveNoValues() error {
-	values, err := secretValues(s.paths.Secrets)
-	if err != nil {
-		return err
-	}
-	s.res.Values = len(values)
-	if len(values) == 0 {
-		s.line("no credential is configured in this box, so there is no value to search for")
-		return nil
-	}
-	hits, files, err := s.scanDisk(values)
-	s.res.Files = files
-	if err != nil {
-		return err
-	}
-	if len(hits) > 0 {
-		shown := hits
-		more := ""
-		if len(shown) > 5 {
-			shown = shown[:5]
-			more = fmt.Sprintf(" (and %d more)", len(hits)-5)
-		}
-		return Errorf(CodeInternal,
-			"the image would carry %d credential value(s): %s%s. The values themselves are not printed. "+
-				"Some of the box is already gone and cannot be brought back; the box still runs, so delete what is named there "+
-				"and bake it again (a credential that is in the image should be rotated as well)",
-			len(hits), strings.Join(shown, ", "), more)
-	}
-	s.line("searched %d file(s) on the disk for %d credential value(s): none of them is there", files, len(values))
-	return nil
-}
-
-// scanDisk walks the guest's disk and returns the files that hold one of the
-// values, and how many files it read.
-func (s *sealer) scanDisk(values map[string]string) ([]string, int, error) {
-	needles := make([]string, 0, len(values))
-	for value := range values {
-		needles = append(needles, value)
-	}
-	// The longest first: a report names the value that matched most of a file.
-	sort.Slice(needles, func(i, j int) bool { return len(needles[i]) > len(needles[j]) })
-	maxLen := 0
-	for _, needle := range needles {
-		if len(needle) > maxLen {
-			maxLen = len(needle)
-		}
-	}
-	root := s.paths.DiskRoot
-	rootDev, err := deviceOf(root)
-	if err != nil {
-		return nil, 0, err
-	}
-	buf := make([]byte, 1<<20+maxLen)
-	var hits []string
-	files := 0
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// A file that vanished (a log that rotated) or that boxd may not read
-			// is passed over: the proof is about what is there.
-			if d != nil && d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			if path != root && s.skipped(path) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		dev, err := deviceOf(path)
-		if err != nil || dev != rootDev {
-			return nil
-		}
-		files++
-		hit, err := fileHoldsValue(path, needles, maxLen, buf)
-		if err != nil || hit == "" {
-			return nil
-		}
-		hits = append(hits, fmt.Sprintf("%s (holds the credential from %s)", path, values[hit]))
-		if len(hits) >= 50 {
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	if err != nil {
-		return hits, files, err
-	}
-	sort.Strings(hits)
-	return hits, files, nil
-}
-
-// skipped reports whether path is one of the directories the search stays out of.
-func (s *sealer) skipped(path string) bool {
-	clean := filepath.Clean(path)
-	for _, skip := range s.paths.Skip {
-		skip = filepath.Clean(skip)
-		if clean == skip || strings.HasPrefix(clean, skip+string(filepath.Separator)) {
-			return true
-		}
-	}
-	return false
-}
-
-// secretValues reads the credential values out of the secrets directories: every
-// JSON string value of minSecretValueLen characters or more, and every whole line
-// of that length. The result maps a value to the file it came from, so a hit can
-// say which credential it found without printing it.
-func secretValues(dirs []string) (map[string]string, error) {
-	values := map[string]string{}
-	for _, dir := range dirs {
-		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				if os.IsNotExist(err) || os.IsPermission(err) {
-					return nil
-				}
-				return err
-			}
-			if d.IsDir() || !d.Type().IsRegular() {
-				return nil
-			}
-			b, err := os.ReadFile(path)
-			if err != nil {
-				return nil
-			}
-			if len(b) > 1<<20 {
-				b = b[:1<<20]
-			}
-			if json.Valid(b) {
-				var doc any
-				if json.Unmarshal(b, &doc) == nil {
-					collectStrings(doc, path, values)
-				}
-			}
-			for _, line := range strings.Split(string(b), "\n") {
-				line = strings.TrimSpace(line)
-				if len(line) >= minSecretValueLen && !strings.HasPrefix(line, "{") && !strings.HasPrefix(line, "[") {
-					if _, ok := values[line]; !ok {
-						values[line] = path
-					}
-				}
-			}
-			return nil
-		})
-		if err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("reading the credentials in %s: %w", dir, err)
-		}
-	}
-	return values, nil
-}
-
-// collectStrings adds every string of a JSON document that is long enough to be a
-// credential.
-func collectStrings(v any, path string, out map[string]string) {
-	switch value := v.(type) {
-	case string:
-		if len(value) >= minSecretValueLen {
-			if _, ok := out[value]; !ok {
-				out[value] = path
-			}
-		}
-	case []any:
-		for _, item := range value {
-			collectStrings(item, path, out)
-		}
-	case map[string]any:
-		// The keys are mapped too: a provider definition keeps its base URL in a
-		// key, and a value that is long enough to be a credential may well be
-		// written to the disk beside it.
-		for key, item := range value {
-			if len(key) >= minSecretValueLen {
-				if _, ok := out[key]; !ok {
-					out[key] = path
-				}
-			}
-			collectStrings(item, path, out)
-		}
-	}
-}
-
-// fileHoldsValue reports the first value that path contains, or "".
-//
-// The reader keeps the tail of each chunk in front of the next one, so a value
-// that spans a chunk boundary is still found.
-func fileHoldsValue(path string, needles []string, maxLen int, buf []byte) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	carry := 0
-	for {
-		n, rerr := f.Read(buf[carry:])
-		if n > 0 {
-			window := buf[:carry+n]
-			for _, needle := range needles {
-				if bytes.Contains(window, []byte(needle)) {
-					return needle, nil
-				}
-			}
-			// Keep the last maxLen-1 bytes: a value longer than that cannot be
-			// in the file, and a shorter one that crosses the boundary is kept.
-			keep := maxLen - 1
-			if keep > len(window) {
-				keep = len(window)
-			}
-			copy(buf[:keep], window[len(window)-keep:])
-			carry = keep
-		}
-		if rerr != nil {
-			if errors.Is(rerr, io.EOF) {
-				return "", nil
-			}
-			return "", rerr
-		}
-	}
 }
 
 // trim drops the blocks the seal freed, so that a qcow2 built from this disk does
@@ -1513,7 +1315,7 @@ func (s *sealer) trim() error {
 // zeroLimit bounds the work for a test; a real seal writes until the filesystem
 // answers "no space left", which is exactly the free space.
 func (s *sealer) zeroFreeSpace() error {
-	dir := s.paths.DiskRoot
+	dir := s.zeroPath
 	if dir == "" {
 		dir = "/"
 	}
@@ -1554,16 +1356,6 @@ func (s *sealer) zeroFreeSpace() error {
 	}
 	s.line("zero-filled %s of free space", formatSize(written))
 	return nil
-}
-
-// deviceOf is the filesystem a path is on, so the credential search reads the
-// guest's disk and none of the mounts on it.
-func deviceOf(path string) (uint64, error) {
-	var st syscall.Stat_t
-	if err := syscall.Stat(path, &st); err != nil {
-		return 0, err
-	}
-	return uint64(st.Dev), nil
 }
 
 // treeSize is what the files below path occupy, in bytes.

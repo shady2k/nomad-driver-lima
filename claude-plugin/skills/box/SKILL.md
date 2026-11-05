@@ -61,16 +61,18 @@ box's environment an image instead of repeating it.
    published one is created from anywhere; a draft (`draft on node X`) only on
    that node.
 2. Install what the project needs in the box, and only that: toolchains, package
-   sets, the caches a build fills. No code, no task data, no credential -- a seal
-   deletes them, and code belongs to a box.
+   sets, the caches a build fills. No code, no task data, no credential -- the
+   seal deletes them from the image's copy, and code belongs to a box.
 3. Write the recipe: the script that makes this environment from the parent
    image, and that can run on a fresh box of it. It is what a later `box bake
    --rebuild` replays on a newer base image.
-4. Propose the bake to the owner before you run it: the seal deletes `/work` and
-   every session in the box, and what it deletes does not come back.
-5. `box bake <id> --name <project> --recipe recipe.sh --yes`, then create with
-   `box create <id> --image <project>-N`. The box you baked stays stopped and
-   empty, so push the work out before step 5 and then `box rm <id> --yes`.
+4. `box bake <id> --name <project> --recipe recipe.sh`, between turns. The seal
+   runs in a clone of the box's disk, so the box keeps its work: nothing has to be
+   pushed out first, and a bake that fails leaves the box as it was. The box is not
+   usable while the bake runs -- a clone, a seal and a compression are minutes --
+   and it starts again with `/work` and its sessions when it ends.
+5. Create from the image with `box create <id> --image <project>-N`. The box you
+   baked keeps its disk and its sessions: `box rm <id> --yes` when its task is done.
 6. Propose publishing, and let the owner decide: `box images publish <version>
    --yes` puts the image in the operator's store, which is what makes it
    available on every node. A published version never changes.
@@ -174,8 +176,9 @@ nothing deletes it for you.
   disk.
 - **A box you did not create:** leave it alone, even when it looks abandoned;
   tell the owner its id and what `box status` says.
-- **An orphan** in `box capacity` (a VM with no box task, or without its disk)
-  is the operator's: the driver only reports it. Say so; do not try to remove it.
+- **An orphan** in `box capacity` (a VM with no box task and no description, or
+  without its disk) is the operator's: the driver only reports it. Say so; do not
+  try to remove it. A box you stopped is `stopped` there, not an orphan.
 
 ## Executors
 
@@ -217,6 +220,12 @@ starts, so no key lands on a disk.
   a rule, and the message names it. Tell the operator; do not retry.
 - `the box <id> is stopped` - `box start <id>` brings it back on its disk, also
   when Nomad no longer has its job.
+- `box <id> is busy: ... nothing was stopped and nothing was baked` - a turn runs
+  or a preparation is in progress, and `box bake` refuses it before it stops
+  anything. `box wait` for the turn, then bake again.
+- `node <name> has ... free ... and the copy of box <id>'s disk needs ...` - the
+  node has no room for the bake's copy of the disk. Bake a box with a smaller
+  disk, or tell the owner which box to remove.
 - `the box <id> is an orphan` - its disk is there and nothing describes it, so it
   cannot be started; `box rm <id> --yes` deletes the disk. Tell the owner.
 - `the guest did not answer boxctl info` - the box is up but `boxd` is not (yet);

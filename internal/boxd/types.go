@@ -103,6 +103,15 @@ type PlatformInfo struct {
 	Reason  string            `json:"reason,omitempty"`
 }
 
+// SealStatus says whether a seal would run in this box now. It is what `box
+// bake` reads before it stops anything: the seal refuses a box with a turn
+// running or a preparation in progress, and that answer is cheaper than a stop
+// that has to be undone.
+type SealStatus struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+}
+
 // Info is the result of "boxctl info".
 type Info struct {
 	BoxdVersion string         `json:"boxd_version"`
@@ -118,6 +127,8 @@ type Info struct {
 	// Platform is the bundle the box mounts at /opt/box; it is always present,
 	// with Mounted false and a reason when there is none.
 	Platform PlatformInfo `json:"platform"`
+	// Seal is whether the seal would run in this box now.
+	Seal SealStatus `json:"seal"`
 }
 
 // ErrorBody is the failure document boxctl prints to stdout and exits 1 with.

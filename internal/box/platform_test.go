@@ -604,7 +604,7 @@ func TestEnsurePlatformRefusesSymlinkChains(t *testing.T) {
 			victim := filepath.Join(filepath.Dir(dest), "victim")
 			require.NoError(t, os.MkdirAll(victim, 0o755))
 			b := &Box{m: m}
-			require.Error(t, b.unpackPlatform(archive, dest, sum))
+			require.Error(t, b.m.unpackPlatform(archive, dest, sum))
 			got, err := os.ReadDir(victim)
 			require.NoError(t, err)
 			require.Empty(t, got)
@@ -621,9 +621,9 @@ func TestUnpackPlatformKeepsCompleteDirectory(t *testing.T) {
 	archive, sum := writeBundle(t, t.TempDir(), bundleFiles("1.0.0"))
 	dest := m.PlatformDir(sum)
 	b := &Box{m: m}
-	require.NoError(t, b.unpackPlatform(archive, dest, sum))
+	require.NoError(t, b.m.unpackPlatform(archive, dest, sum))
 	inUse := filepath.Join(dest, "in-use")
 	require.NoError(t, os.WriteFile(inUse, []byte("mounted"), 0o644))
-	require.NoError(t, b.unpackPlatform(archive, dest, sum))
+	require.NoError(t, b.m.unpackPlatform(archive, dest, sum))
 	require.FileExists(t, inUse)
 }

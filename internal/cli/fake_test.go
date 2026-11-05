@@ -19,12 +19,19 @@ import (
 
 // fakeClock is a clock that moves one step per read, so a wait loop finishes
 // deterministically instead of sleeping.
+//
+// A command that follows a task log reads it from a goroutine of its own, so the
+// clock is asked for the time from two goroutines: the lock is what makes the
+// same fake usable by both (the real clock is time.Now, which is safe).
 type fakeClock struct {
+	mu   sync.Mutex
 	now  time.Time
 	step time.Duration
 }
 
 func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	now := c.now
 	c.now = c.now.Add(c.step)
 	return now
@@ -505,6 +512,8 @@ func (c *fakeCluster) addNodeDiskLocked(nodeID, boxID string, used, virtual int6
 			totalUsed = n
 		case rest == "virtual_bytes":
 			totalVirtual = n
+		case rest == "free_bytes":
+			// The room left on the filesystem, not the footprint of a disk.
 		case strings.HasSuffix(rest, ".used_bytes"):
 			totalUsed += n
 		case strings.HasSuffix(rest, ".virtual_bytes"):
@@ -654,6 +663,15 @@ func (g *fakeGuest) Exec(ctx context.Context, opts ExecOpts) (int, error) {
 		g.recordStdin(opts)
 		return g.runExit, nil
 	}
+}
+
+// callLines is every command the fake guest ran, as one line each.
+func (g *fakeGuest) callLines() []string {
+	out := make([]string, 0, len(g.calls))
+	for _, call := range g.calls {
+		out = append(out, strings.Join(call, " "))
+	}
+	return out
 }
 
 // recordStdin keeps what a command was given on stdin, so a test can assert on it.

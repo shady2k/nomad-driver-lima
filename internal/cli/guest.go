@@ -9,7 +9,6 @@ import (
 	"io"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/hashicorp/nomad/api"
@@ -187,6 +186,16 @@ type BoxInfo struct {
 	Prepare *PrepareState `json:"prepare,omitempty"`
 	// Usage is the guest's load as boxd last measured it.
 	Usage *GuestUsage `json:"usage,omitempty"`
+	// Seal is whether the seal would run in this box now; a boxd that does not
+	// say leaves it out.
+	Seal *BoxSealStatus `json:"seal,omitempty"`
+}
+
+// BoxSealStatus is `boxctl info`'s answer about the seal: OK, or the reason the
+// seal would refuse (a running turn, a preparation in progress).
+type BoxSealStatus struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // GuestUsage is what the guest is doing: CPU, disk wait, memory and disk.
@@ -737,149 +746,4 @@ func (b *Boxctl) prepareCall(ctx context.Context, stdin io.Reader, args ...strin
 		return nil, err
 	}
 	return &st, nil
-}
-
-// SealImage is the image record a seal wrote: the box is an image now.
-type SealImage struct {
-	Schema   int    `json:"schema"`
-	Version  string `json:"version,omitempty"`
-	Name     string `json:"name"`
-	Arch     string `json:"arch,omitempty"`
-	Parent   string `json:"parent,omitempty"`
-	Platform string `json:"platform"`
-	Recipe   string `json:"recipe,omitempty"`
-	SealedAt string `json:"sealed_at"`
-}
-
-// SealResult is what `boxctl seal` reported: the image, and what the seal did.
-type SealResult struct {
-	Image  SealImage `json:"image"`
-	Steps  []string  `json:"steps"`
-	Files  int       `json:"files"`
-	Values int       `json:"values"`
-}
-
-// SealOptions are the arguments of `boxctl seal`.
-type SealOptions struct {
-	// Name, Version, Parent and Arch name the image the box becomes.
-	Name    string
-	Version string
-	Parent  string
-	Arch    string
-	// Recipe is the script that makes this environment from the parent image. It
-	// goes in on stdin, because it is a file on this host and a script in the
-	// guest.
-	Recipe []byte
-	// Say receives every progress line as it happens.
-	Say func(line string)
-}
-
-// Seal seals the box into an image, reporting the steps as they happen.
-//
-// A seal takes minutes: it deletes the work, the sessions and the credentials, and
-// then searches the disk for the credential values themselves. boxctl streams one
-// JSON document per line for that reason, and this reads them as they arrive.
-func (b *Boxctl) Seal(ctx context.Context, opts SealOptions) (*SealResult, error) {
-	args := []string{"seal", "--name", opts.Name}
-	if opts.Version != "" {
-		args = append(args, "--version", opts.Version)
-	}
-	if opts.Parent != "" {
-		args = append(args, "--parent", opts.Parent)
-	}
-	if opts.Arch != "" {
-		args = append(args, "--arch", opts.Arch)
-	}
-	var stdin io.Reader = strings.NewReader("")
-	if len(opts.Recipe) > 0 {
-		args = append(args, "--recipe", "-")
-		stdin = bytes.NewReader(opts.Recipe)
-	}
-	stream := &sealStream{say: opts.Say}
-	var stderr bytes.Buffer
-	code, err := b.tr.Exec(ctx, ExecOpts{Command: append([]string{boxctlPath}, args...),
-		Stdin: stdin, Stdout: stream, Stderr: &stderr})
-	if err != nil {
-		return nil, wrapf(err, "cannot run boxctl seal in the box")
-	}
-	if msg := stream.errorMessage(); msg != nil {
-		return nil, &Error{Code: exitCodeOf(code), Err: msg}
-	}
-	if code != 0 {
-		detail := oneLine(strings.TrimSpace(stderr.String()), 300)
-		if detail == "" {
-			detail = "no output"
-		}
-		return nil, errorf("boxctl seal exited with code %d: %s", code, detail)
-	}
-	if stream.result == nil {
-		return nil, errorf("boxctl seal printed no result: the seal is in the box's journal (`box logs`)")
-	}
-	return stream.result, nil
-}
-
-// sealStream reads boxctl seal's line-delimited JSON and reports the steps.
-type sealStream struct {
-	mu     sync.Mutex
-	buf    bytes.Buffer
-	say    func(line string)
-	result *SealResult
-	errMsg *BoxctlError
-}
-
-func (s *sealStream) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.buf.Write(p)
-	for {
-		line, err := s.buf.ReadString('\n')
-		if err != nil {
-			// A partial line waits for the rest.
-			s.buf.WriteString(line)
-			return len(p), nil
-		}
-		s.handleLine(line)
-	}
-}
-
-// handleLine reads one document of the stream.
-func (s *sealStream) handleLine(line string) {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return
-	}
-	var doc struct {
-		Line  string      `json:"line"`
-		Seal  *SealResult `json:"seal"`
-		Error *struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(line), &doc); err != nil {
-		return
-	}
-	switch {
-	case doc.Error != nil && doc.Error.Message != "":
-		s.errMsg = &BoxctlError{Code: doc.Error.Code, Message: doc.Error.Message}
-	case doc.Seal != nil:
-		s.result = doc.Seal
-	case doc.Line != "" && s.say != nil:
-		s.say(doc.Line)
-	}
-}
-
-// errorMessage is the error the seal reported, if it did.
-func (s *sealStream) errorMessage() *BoxctlError {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.errMsg
-}
-
-// exitCodeOf maps boxctl's exit code onto the command's own code.
-func exitCodeOf(code int) int {
-	if code == 0 {
-		return ExitError
-	}
-	return code
 }

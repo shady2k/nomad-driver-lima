@@ -93,11 +93,26 @@ func (a *App) nodeDisks(ctx context.Context, cache map[string]map[string]BoxDisk
 }
 
 // note writes a sentence for a human reader; JSON output skips it.
+//
+// Every write to ErrOut goes through errMu: `box bake` prints the task log of the
+// job it waits for from a goroutine of its own, beside the notes of the command,
+// and two writers that interleave lines would interleave bytes of a line.
 func (a *App) note(format string, args ...any) {
 	if a.JSON {
 		return
 	}
+	a.errMu.Lock()
+	defer a.errMu.Unlock()
 	fmt.Fprintf(a.ErrOut, format+"\n", args...)
+}
+
+// logWriter writes a log stream into ErrOut, one lock with the notes.
+type logWriter struct{ a *App }
+
+func (w *logWriter) Write(p []byte) (int, error) {
+	w.a.errMu.Lock()
+	defer w.a.errMu.Unlock()
+	return w.a.ErrOut.Write(p)
 }
 
 // shortID shortens an allocation or session id for a table.

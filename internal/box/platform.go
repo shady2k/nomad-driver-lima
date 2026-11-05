@@ -112,7 +112,24 @@ func (m *Manager) PlatformDir(sha256 string) string {
 // temporary directory and renamed into place, so a half download or a half
 // unpack is never mounted. The directory belongs to the runtime user, which runs
 // qemu and the lima hostagent: it has to read every file of it.
+// EnsurePlatform unpacks the bundle the node mounts at /opt/box and returns its
+// directory. It is on the Manager as well as on a Box, because a bake's clone
+// mounts the same bundle a box does and has no box spec of its own; rep receives
+// the progress lines (it may be nil).
+func (m *Manager) EnsurePlatform(ctx context.Context, spec PlatformSpec, rep Reporter) (string, error) {
+	report := func(kind, message string) {
+		if rep != nil {
+			rep(kind, message)
+		}
+	}
+	return m.ensurePlatform(ctx, spec, report)
+}
+
 func (b *Box) EnsurePlatform(ctx context.Context, spec PlatformSpec) (string, error) {
+	return b.m.EnsurePlatform(ctx, spec, b.event)
+}
+
+func (m *Manager) ensurePlatform(ctx context.Context, spec PlatformSpec, report Reporter) (string, error) {
 	want, err := normalizeSHA(spec.SHA256)
 	if err != nil {
 		return "", fmt.Errorf("platform %s: %w", spec.String(), err)
@@ -120,20 +137,20 @@ func (b *Box) EnsurePlatform(ctx context.Context, spec PlatformSpec) (string, er
 	if spec.URL == "" {
 		return "", fmt.Errorf("platform %s has no url", spec.String())
 	}
-	root := filepath.Join(b.m.opts.ImageCacheDir, platformDirName)
-	if err := b.m.opts.Identity.EnsureDir(root, 0o755); err != nil {
+	root := filepath.Join(m.opts.ImageCacheDir, platformDirName)
+	if err := m.opts.Identity.EnsureDir(root, 0o755); err != nil {
 		return "", fmt.Errorf("create platform cache %s: %w", root, err)
 	}
-	dest := b.m.PlatformDir(want)
+	dest := m.PlatformDir(want)
 
 	if ok, err := platformComplete(dest, want); err != nil {
 		return "", err
 	} else if ok {
-		b.event("platform", fmt.Sprintf("Using cached platform bundle %s", spec.String()))
+		report("platform", fmt.Sprintf("Using cached platform bundle %s", spec.String()))
 		return dest, nil
 	}
 
-	b.event("platform", fmt.Sprintf("Downloading platform bundle %s from %s", spec.String(), spec.URL))
+	report("platform", fmt.Sprintf("Downloading platform bundle %s from %s", spec.String(), spec.URL))
 	tmp, err := os.CreateTemp(root, want+".*.part")
 	if err != nil {
 		return "", fmt.Errorf("create temporary platform archive: %w", err)
@@ -144,7 +161,7 @@ func (b *Box) EnsurePlatform(ctx context.Context, spec PlatformSpec) (string, er
 		os.Remove(tmpName)
 	}()
 	sum, size, err := downloadTo(ctx, spec.URL, tmp, func(percent int) {
-		b.event("platform", fmt.Sprintf("Platform bundle download %d%%", percent))
+		report("platform", fmt.Sprintf("Platform bundle download %d%%", percent))
 	})
 	if err != nil {
 		return "", err
@@ -159,10 +176,10 @@ func (b *Box) EnsurePlatform(ctx context.Context, spec PlatformSpec) (string, er
 		return "", fmt.Errorf("platform bundle %s has sha256 %s, want %s", spec.URL, sum, want)
 	}
 
-	if err := b.unpackPlatform(tmpName, dest, want); err != nil {
+	if err := m.unpackPlatform(tmpName, dest, want); err != nil {
 		return "", fmt.Errorf("platform bundle %s: %w", spec.String(), err)
 	}
-	b.event("platform", fmt.Sprintf("Unpacked platform bundle %s into %s (%s, sha256 verified)", spec.String(), dest, humanBytes(size)))
+	report("platform", fmt.Sprintf("Unpacked platform bundle %s into %s (%s, sha256 verified)", spec.String(), dest, humanBytes(size)))
 	return dest, nil
 }
 
@@ -202,7 +219,7 @@ func platformComplete(dir, want string) (bool, error) {
 // absolute path, an absolute symlink, a symlink that points outside, a device or
 // a fifo) is refused: the guest reads this tree, and a path outside it is a path
 // into the node.
-func (b *Box) unpackPlatform(archive, dest, want string) error {
+func (m *Manager) unpackPlatform(archive, dest, want string) error {
 	parent := filepath.Dir(dest)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return err
@@ -320,13 +337,13 @@ func (b *Box) unpackPlatform(archive, dest, want string) error {
 	if err := makeBundleDirsReadable(stage); err != nil {
 		return err
 	}
-	if err := b.m.opts.Identity.ChownTree(stage); err != nil {
+	if err := m.opts.Identity.ChownTree(stage); err != nil {
 		return err
 	}
 	// Two boxes may start on one new bundle at once. The one that comes second
 	// keeps the directory of the first, whose VM may already run from it.
-	b.m.platformMu.Lock()
-	defer b.m.platformMu.Unlock()
+	m.platformMu.Lock()
+	defer m.platformMu.Unlock()
 	if ok, err := platformComplete(dest, want); err != nil {
 		return err
 	} else if ok {

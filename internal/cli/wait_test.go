@@ -36,3 +36,22 @@ func TestAllocFailureTextPrefersTheDriversOwnWord(t *testing.T) {
 	}}
 	require.Contains(t, allocFailureText(plain), "recipe")
 }
+
+// TestAllocFailureTextSkipsTheCleanupOfAFailedBake: a bake reports its steps as
+// driver events, and the last of them is the clone being deleted. The failure is
+// the event that says how the task ended, and that is the one a person needs.
+func TestAllocFailureTextSkipsTheCleanupOfAFailedBake(t *testing.T) {
+	alloc := &api.Allocation{TaskStates: map[string]*api.TaskState{
+		boxTaskName: {Events: []*api.TaskEvent{
+			{Type: "Driver", Details: map[string]string{"kind": "bake"}, DisplayMessage: "cloned box a into a-bake-1"},
+			{Type: "Driver", Details: map[string]string{"kind": "exit"},
+				DisplayMessage: "the seal of box a failed in the clone: guest/no-secrets.sh failed in this box: FAIL /home/user/auth.json"},
+			{Type: "Driver", Details: map[string]string{"kind": "bake"},
+				DisplayMessage: "deleted the clone a-bake-1: the copy of the box's disk is gone"},
+			{Type: "Terminated", DisplayMessage: "Exit Code: 1"},
+		}},
+	}}
+	text := allocFailureText(alloc)
+	require.Contains(t, text, "guest/no-secrets.sh failed in this box")
+	require.NotContains(t, text, "deleted the clone")
+}

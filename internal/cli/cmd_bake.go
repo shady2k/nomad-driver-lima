@@ -16,22 +16,25 @@ import (
 // `box bake` turns a box into an image, and `box bake --rebuild` replays an
 // image's recipe on a newer base image.
 //
-// A bake is three steps, in this order and for these reasons: the box is sealed
-// from inside (boxctl seal deletes the work, the sessions and the credentials and
-// proves the result), it is stopped (a seal leaves a box that must not be started
-// again), and the driver bakes its disk into the node's image cache as a draft
-// (the disk only exists on the node). The box is not deleted: its disk is the
-// image now, and `box rm` is the next step.
+// A bake does not empty the box: the driver copies the box's disk into a Lima
+// clone on the node, seals the clone, compresses it into the image cache and
+// deletes it. The box stops while that runs and starts again afterwards, with
+// /work and its sessions where they were. So the steps here are: check that the
+// seal would run at all (in the box, before anything stops), check that the node
+// has room for the copy, stop the box, register the bake job, wait for it, and
+// start the box again -- whatever the bake answered.
 
 const (
-	// DefaultBakeTimeout is how long `box bake` waits for the bake job. A disk of
-	// tens of gigabytes takes minutes to compress, and a node may be busy.
+	// DefaultBakeTimeout is how long `box bake` waits for the bake job. The job
+	// boots a clone of the box, seals it and compresses its disk: minutes.
 	DefaultBakeTimeout = 30 * time.Minute
 	// DefaultRebuildTimeout is how long a rebuild may take: it runs a project's
 	// whole recipe in a box and then bakes the result.
 	DefaultRebuildTimeout = time.Hour
-	// bakeStopTimeout bounds the stop of a sealed box before its bake.
+	// bakeStopTimeout bounds the stop of a box before its bake.
 	bakeStopTimeout = 3 * time.Minute
+	// bakeRestartTimeout bounds the start of a box a bake stopped.
+	bakeRestartTimeout = 10 * time.Minute
 )
 
 // bakeOutput is the JSON document of `box bake`.
@@ -48,19 +51,20 @@ type bakeOutput struct {
 	Node         string `json:"node,omitempty"`
 	// Draft is true for an image that exists on its node only.
 	Draft bool `json:"draft"`
+	// Restarted is true when the box ran before the bake and runs again after it.
+	Restarted bool `json:"restarted,omitempty"`
 	// RebuiltFrom names the image a rebuild started from.
 	RebuiltFrom string `json:"rebuilt_from,omitempty"`
 	// BoxKept is the temporary box a failed rebuild left behind.
 	BoxKept string `json:"box_kept,omitempty"`
 }
 
-// cmdBake seals a box into an image, or rebuilds an image on a newer base.
+// cmdBake bakes a box into an image, or rebuilds an image on a newer base.
 func (a *App) cmdBake(ctx context.Context, args []string) error {
 	fs := newFlagSet("bake")
 	name := fs.String("name", "", "the image's name: the project it belongs to (its versions are NAME-1, NAME-2, ...)")
 	recipe := fs.String("recipe", "", "the script that makes this environment from the parent image (a file on this host)")
 	noRecipe := fs.Bool("no-recipe", false, "bake without a recipe: such an image cannot be rebuilt later")
-	yes := fs.Bool("yes", false, "seal the box without asking: the seal deletes /work and every session")
 	timeout := fs.Duration("timeout", DefaultBakeTimeout, "how long to wait for the bake")
 	rebuild := fs.String("rebuild", "", "rebuild this image from its recipe on a newer base image")
 	base := fs.String("base", "", "the base image a rebuild starts from (default: the newest base image)")
@@ -81,10 +85,10 @@ func (a *App) cmdBake(ctx context.Context, args []string) error {
 			return usagef("box bake --rebuild takes --base and --timeout only: the image names itself, and its " +
 				"recipe is the one it carries")
 		}
-		return a.rebuildImage(ctx, *rebuild, *base, *yes, *timeout)
+		return a.rebuildImage(ctx, *rebuild, *base, *timeout)
 	}
 	if fs.NArg() != 1 {
-		return usagef("box bake needs a box: box bake <id> --name NAME [--recipe FILE | --no-recipe] [--yes] [--timeout D]")
+		return usagef("box bake needs a box: box bake <id> --name NAME [--recipe FILE | --no-recipe] [--timeout D]")
 	}
 	id := fs.Arg(0)
 	if strings.TrimSpace(*name) == "" {
@@ -112,7 +116,6 @@ func (a *App) cmdBake(ctx context.Context, args []string) error {
 		Name:     *name,
 		Recipe:   recipeData,
 		NoRecipe: *noRecipe,
-		Yes:      *yes,
 		Timeout:  *timeout,
 	})
 	if err != nil {
@@ -132,11 +135,13 @@ type bakeOptions struct {
 	// one.
 	Recipe   []byte
 	NoRecipe bool
-	Yes      bool
 	Timeout  time.Duration
+	// Temporary is a box the bake made for itself (a rebuild): it is stopped,
+	// baked, and left stopped, because the command deletes it.
+	Temporary bool
 }
 
-// bakeBox seals a box and bakes it into an image.
+// bakeBox bakes a box into an image and gives the box back.
 func (a *App) bakeBox(ctx context.Context, id string, opts bakeOptions) (*bakeOutput, error) {
 	box, job, err := a.findBox(ctx, id)
 	if err != nil {
@@ -157,10 +162,6 @@ func (a *App) bakeBox(ctx context.Context, id string, opts bakeOptions) (*bakeOu
 			"only an image with \"platform\": \"mount\" can be baked, because boxd and the executors are not in an "+
 			"image -- they are the node's bundle (see docs/guest-image.md)", id, dash(spec.ImageVersion))
 	}
-	if box.State != "running" {
-		return nil, errorf("box %s is %s: the seal runs inside the box and deletes its work and its sessions, "+
-			"so it has to be running (`box start %s` brings it back on the same disk)", id, box.State, id)
-	}
 	recipe, err := a.bakeRecipe(spec, opts)
 	if err != nil {
 		return nil, err
@@ -173,38 +174,66 @@ func (a *App) bakeBox(ctx context.Context, id string, opts bakeOptions) (*bakeOu
 	if err != nil {
 		return nil, err
 	}
-	if !opts.Yes {
-		return nil, errorf("baking box %s seals it: the seal deletes /work and every session in it, and the box "+
-			"cannot be sealed twice. Push the work out of the box first, then bake it with --yes "+
-			"(the image is named %s, from the image %s)", id, version, dash(spec.ImageVersion))
+	wasRunning := box.State == "running"
+	// The seal's refusals -- a running turn, a preparation in progress -- are
+	// asked of the box before anything is stopped. They cannot be asked of the
+	// clone later: its boxd is a fresh daemon, and it would answer at once.
+	if wasRunning && !opts.Temporary {
+		if err := a.checkSealGate(ctx, id); err != nil {
+			return nil, err
+		}
 	}
-	return a.bakeSealed(ctx, box, spec, opts.Name, version, recipe, opts.Timeout)
+	// A clone is a full copy of the disk: the node must have room for it.
+	if err := a.checkBakeRoom(ctx, box, spec); err != nil {
+		return nil, err
+	}
+	if wasRunning {
+		if !a.JSON {
+			a.note("stopping box %s: a bake copies its disk, and a copy of a running box is a disk being written", id)
+		}
+		if err := a.Nomad.StopJob(ctx, BoxJobName(id), false); err != nil {
+			return nil, wrapf(err, "Nomad could not stop the job %s", BoxJobName(id))
+		}
+		if _, err := a.waitForBoxState(ctx, id, "stopped", bakeStopTimeout); err != nil {
+			return nil, wrapKeep(err, "box %s is still running, so nothing was baked; `box status %s` shows what "+
+				"Nomad reports, and `box bake %s --name %s` runs once it is stopped", id, id, id, opts.Name)
+		}
+	}
+	out, bakeErr := a.bakeStopped(ctx, box, spec, opts.Name, version, recipe, opts.Timeout)
+	if wasRunning && !opts.Temporary {
+		// Whatever the bake answered, the box goes back to work: it was running,
+		// and its work is still on its disk.
+		back, startErr := a.startBoxJob(ctx, id, spec, true, bakeRestartTimeout)
+		if startErr != nil {
+			msg := fmt.Sprintf("the box %s does not run again: %v. Its disk is untouched, so `box start %s` runs it "+
+				"again with /work and its sessions", id, startErr, id)
+			if bakeErr != nil {
+				return nil, wrapKeep(bakeErr, "%s (the bake failed too: %v)", msg, bakeErr)
+			}
+			return nil, wrapKeep(startErr, "%s", "")
+		}
+		_ = back
+		if out != nil {
+			out.Box = id
+			out.Restarted = true
+		}
+		if !a.JSON {
+			a.note("box %s runs again on the same disk: /work and the sessions are still there", id)
+		}
+	}
+	if bakeErr != nil {
+		return nil, bakeErr
+	}
+	if out == nil {
+		return nil, errorf("the bake of box %s reported no image", id)
+	}
+	return out, nil
 }
 
-// bakeSealed seals a running box, stops it and bakes its disk.
-//
-// It is the second half of every bake: `box bake <id>` and `box bake --rebuild`
-// both reach it with a box that should become an image.
-func (a *App) bakeSealed(ctx context.Context, box BoxRecord, spec BoxSpec, name, version string, recipe []byte, timeout time.Duration) (*bakeOutput, error) {
+// bakeStopped registers the bake job, waits for it and returns what it made.
+func (a *App) bakeStopped(ctx context.Context, box BoxRecord, spec BoxSpec, name, version string, recipe []byte, timeout time.Duration) (*bakeOutput, error) {
 	id := box.ID
-	if _, err := a.sealBox(ctx, box, spec, name, version, recipe); err != nil {
-		return nil, err
-	}
-	// The sealed box is stopped, not deleted: its disk is the image now.
-	if err := a.Nomad.StopJob(ctx, BoxJobName(id), false); err != nil {
-		return nil, wrapf(err, "the box %s is sealed but Nomad could not stop it; a sealed box must not keep running "+
-			"(`box stop %s`, then `box bake %s --name %s --yes` bakes it again)", id, id, id, name)
-	}
-	if _, err := a.waitForBoxState(ctx, id, "stopped", bakeStopTimeout); err != nil {
-		return nil, wrapKeep(err, "the box %s is sealed and its image is not made yet; `box stop %s` then "+
-			"`box bake %s --name %s --yes` finishes it", id, id, id, name)
-	}
-	out, err := a.runBakeJob(ctx, bakeJobSpecFor(id, spec, name, version, recipe), timeout)
-	if err != nil {
-		return nil, err
-	}
-	out.Box = id
-	return out, nil
+	return a.runBakeJob(ctx, bakeJobSpecFor(id, spec, name, version, recipe), timeout)
 }
 
 // takesPlatformBundle reports whether a box's image expects a platform bundle.
@@ -276,31 +305,64 @@ func (a *App) loadIndexOptional(ctx context.Context) (*ImageIndex, error) {
 	return index, nil
 }
 
-// sealBox runs boxctl seal in the box and reports its steps.
-func (a *App) sealBox(ctx context.Context, box BoxRecord, spec BoxSpec, name, version string, recipe []byte) (*SealResult, error) {
-	client, _, err := a.boxctlFor(ctx, box.ID)
+// checkSealGate asks the box whether the seal would run, through a boxctl call
+// that does not change anything. A box with a turn running or a preparation in
+// progress is refused here, before it is stopped: the clone the seal runs in has
+// a fresh boxd that knows nothing of that turn.
+func (a *App) checkSealGate(ctx context.Context, id string) error {
+	client, _, err := a.boxctlFor(ctx, id)
 	if err != nil {
-		return nil, wrapKeep(err, "box %s cannot be sealed: the seal runs inside it (`box start %s` brings it back)", box.ID, box.ID)
+		return wrapKeep(err, "box %s cannot be baked: the seal's refusals are checked inside the box first, and the "+
+			"guest did not answer; nothing was stopped and nothing was baked", id)
 	}
-	if !a.JSON {
-		a.note("sealing box %s into the image %s", box.ID, version)
-	}
-	res, err := client.Seal(ctx, SealOptions{
-		Name:    name,
-		Version: version,
-		Parent:  spec.ImageVersion,
-		Arch:    spec.Arch,
-		Recipe:  recipe,
-		Say: func(line string) {
-			a.note("  %s", line)
-		},
-	})
+	info, err := client.Info(ctx)
 	if err != nil {
-		// The seal's own exit code is the command's: a failure here is the
-		// failure boxctl reported, with its own words.
-		return nil, &Error{Code: ExitCode(err), Msg: fmt.Sprintf("the seal of box %s failed", box.ID), Err: err}
+		return wrapKeep(err, "box %s cannot be baked: boxctl info says: %v; nothing was stopped and nothing was baked", id, err)
 	}
-	return res, nil
+	if info.Seal == nil {
+		// A boxd that does not report the gate: the seal inside the clone refuses
+		// what it knows of, and the box is only stopped for the bake.
+		return nil
+	}
+	if !info.Seal.OK {
+		return errorf("box %s is busy: %s. Nothing was stopped and nothing was baked: `box bake %s --name ...` runs "+
+			"once the box is idle", id, info.Seal.Reason, id)
+	}
+	return nil
+}
+
+// checkBakeRoom refuses a bake whose clone would not fit: a clone is a full copy
+// of the box's disk, and both live on the node's filesystem.
+func (a *App) checkBakeRoom(ctx context.Context, box BoxRecord, spec BoxSpec) error {
+	if box.NodeID == "" {
+		return nil
+	}
+	nodes, err := a.nodeCapacities(ctx)
+	if err != nil {
+		return nil // an unreadable node is not proof of a missing disk
+	}
+	for _, node := range nodes {
+		if node.NodeID != box.NodeID {
+			continue
+		}
+		used := int64(0)
+		for _, disk := range node.Disks {
+			if disk.BoxID == box.ID {
+				used = disk.UsedBytes
+			}
+		}
+		if used == 0 || node.DiskFreeBytes == 0 {
+			return nil // the driver reports neither yet: the bake checks the room itself
+		}
+		if node.DiskFreeBytes < used {
+			return errorf("node %s has %s free where a bake writes the copy of the box's disk, and the copy of box "+
+				"%s's disk needs %s: a bake clones the disk before it seals it. Free that much space on the node "+
+				"(`box rm <id> --yes` deletes the disk of a box you no longer need), or bake a box with a smaller "+
+				"disk", node.Name, humanBytes(node.DiskFreeBytes), box.ID, humanBytes(used))
+		}
+		return nil
+	}
+	return nil
 }
 
 // bakeJobSpecFor is the job spec of a box's bake.
@@ -312,13 +374,25 @@ func bakeJobSpecFor(id string, spec BoxSpec, name, version string, recipe []byte
 		Parent:  spec.ImageVersion,
 		Arch:    spec.Arch,
 		Recipe:  encodeRecipe(recipe),
+		// The clone mounts the bundle the box mounts: its boxd, its boxctl and its
+		// guest/no-secrets.sh are the seal's.
+		PlatformVersion: spec.PlatformVersion,
+		PlatformURL:     spec.PlatformURL,
+		PlatformSHA256:  spec.PlatformSHA256,
+		// The bake boots a VM as big as the box in its own task, and then
+		// compresses a disk with one core: both have to be reserved, or the client
+		// kills the task for the memory it takes.
+		CPUShares: spec.TaskCPUShares() + bakeCPUShares,
+		MemoryMiB: spec.TaskMemoryMiB(),
 	}
 }
 
 // runBakeJob registers the bake job, waits for it and reads what it made.
 //
 // The job is purged afterwards: its one allocation is the evidence of the bake,
-// and the image's record on the node is what says the bake happened.
+// and the image's record on the node is what says the bake happened. The driver's
+// events are printed as they arrive, because the seal's steps are what a person
+// watches.
 func (a *App) runBakeJob(ctx context.Context, jobSpec BakeJobSpec, timeout time.Duration) (*bakeOutput, error) {
 	job, err := RenderBakeJob(jobSpec)
 	if err != nil {
@@ -336,7 +410,27 @@ func (a *App) runBakeJob(ctx context.Context, jobSpec BakeJobSpec, timeout time.
 	if !a.JSON {
 		a.note("baking %s on the node that holds its disk (job %s)", jobSpec.Version, jobID)
 	}
+	// The task's own log has the whole bake -- a seal prints more lines than
+	// Nomad keeps as task events -- so it is followed here and printed as it
+	// comes.
+	logCtx, stopLog := context.WithCancel(ctx)
+	defer stopLog()
+	logDone := make(chan struct{})
+	go func() {
+		defer close(logDone)
+		a.followWorkLog(logCtx, jobID, timeout)
+	}()
 	alloc, err := a.waitForJobDone(ctx, jobID, evalID, timeout)
+	// The follower is waited for before this command returns: a goroutine that
+	// printed after the command did would write into a terminal (or a test's
+	// buffer) nobody owns any more. The stream ends by itself once the task is
+	// done; a stream that does not is cut.
+	select {
+	case <-logDone:
+	case <-time.After(10 * time.Second):
+		stopLog()
+		<-logDone
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -346,8 +440,8 @@ func (a *App) runBakeJob(ctx context.Context, jobSpec BakeJobSpec, timeout time.
 			jobID, oneLine(purgeErr.Error(), 120), jobID)
 	}
 	if failed := allocFailureText(alloc); failed != "" && !allocSucceeded(alloc) {
-		return nil, errorf("the bake of %s failed: %s (`nomad alloc logs` of %s has the rest; the box is still there)",
-			jobSpec.Version, failed, shortID(alloc.ID))
+		return nil, errorf("the bake of %s failed: %s (`nomad alloc logs` of %s has the rest; the box's own disk is "+
+			"untouched)", jobSpec.Version, failed, shortID(alloc.ID))
 	}
 	res, ok := bakeResultOf(alloc)
 	if !ok {
@@ -365,6 +459,38 @@ func (a *App) runBakeJob(ctx context.Context, jobSpec BakeJobSpec, timeout time.
 		Node:         alloc.NodeName,
 		Draft:        true,
 	}, nil
+}
+
+// followWorkLog prints a bake job's task log while it runs.
+//
+// The log is the whole of what the driver did -- every step and every line of the
+// seal -- which Nomad's ten task events are too few to hold. A job whose
+// allocation is not placed yet has no log: this waits for it, and gives up when
+// the wait does.
+func (a *App) followWorkLog(ctx context.Context, jobID string, timeout time.Duration) {
+	if a.JSON || a.ErrOut == nil {
+		return
+	}
+	deadline := a.now().Add(timeout)
+	var alloc *api.Allocation
+	for {
+		byJob, err := a.jobAllocations(ctx)
+		if err == nil {
+			if newest := latestAllocation(byJob[jobID]); newest != nil {
+				if full, err := a.Nomad.Allocation(ctx, newest.ID); err == nil {
+					alloc = full
+					break
+				}
+			}
+		}
+		if !a.now().Before(deadline) {
+			return
+		}
+		if err := a.sleep(ctx, waitPollInterval); err != nil {
+			return
+		}
+	}
+	_ = a.streamLog(ctx, alloc, "stdout", true, &logWriter{a: a})
 }
 
 // allocSucceeded reports whether an allocation's task exited 0.
@@ -421,7 +547,7 @@ func (a *App) waitForJobDone(ctx context.Context, jobID, evalID string, timeout 
 // runs in it, and the result is baked as the next version of the same name. The
 // temporary box is deleted; on a failure it is kept, because what it ran is the
 // only way to see why.
-func (a *App) rebuildImage(ctx context.Context, named, base string, yes bool, timeout time.Duration) error {
+func (a *App) rebuildImage(ctx context.Context, named, base string, timeout time.Duration) error {
 	source, err := a.latestProjectImage(ctx, named)
 	if err != nil {
 		return err
@@ -473,9 +599,6 @@ func (a *App) rebuildImage(ctx context.Context, named, base string, yes bool, ti
 	if err != nil {
 		return err
 	}
-	if yes {
-		a.note("note: a rebuild needs no --yes: the only box it seals is its own temporary one")
-	}
 	if !a.JSON {
 		a.note("rebuilding %s: a temporary box %s from the base image %s, then its recipe", source.Version, boxID, parent.Version)
 	}
@@ -513,9 +636,19 @@ func (a *App) rebuildImage(ctx context.Context, named, base string, yes bool, ti
 	}
 	// The rebuilt image carries the recipe that made it, so it can be rebuilt
 	// again on an even newer parent.
-	baked, err := a.bakeSealed(ctx, created.Box, spec, source.Name, version, []byte(script), timeout)
+	baked, err := a.bakeBox(ctx, boxID, bakeOptions{
+		Name:      source.Name,
+		Recipe:    []byte(script),
+		Timeout:   timeout,
+		Temporary: true,
+	})
 	if err != nil {
 		return keep(err)
+	}
+	// The version was counted before the recipe ran, so the box's bake counts it
+	// again; keep the number this command promised.
+	if baked.Version != version {
+		a.note("note: the rebuilt image is %s, not %s: another version appeared while the recipe ran", baked.Version, version)
 	}
 	baked.RebuiltFrom = source.Version
 	// The temporary box has done its work: its disk is the image now.
@@ -595,7 +728,7 @@ func (a *App) latestProjectImage(ctx context.Context, named string) (*ImageArtif
 	}
 	if len(byVersion) == 0 {
 		return nil, notFoundf("no image is named %q: `box images` lists the published images and the drafts of the nodes, "+
-			"and `box bake <id> --name %s --yes` makes the first one", named, named)
+			"and `box bake <id> --name %s` makes the first one", named, named)
 	}
 	versions := make([]string, 0, len(byVersion))
 	for version := range byVersion {
@@ -704,8 +837,8 @@ func (a *App) printBake(out *bakeOutput) error {
 	if out.RebuiltFrom != "" {
 		a.note("  from    %s (rebuilt on %s)", out.RebuiltFrom, dash(out.Parent))
 	}
-	if out.Box != "" {
-		a.note("  box     %s is sealed and stopped; its disk is the image", out.Box)
+	if out.Box != "" && out.Restarted {
+		a.note("  box     %s keeps its work: it runs again on the same disk", out.Box)
 	}
 	a.note("")
 	a.note("next:")
@@ -715,10 +848,6 @@ func (a *App) printBake(out *bakeOutput) error {
 	}
 	a.note("  box create <id> --image %s --arch %s --disk-gib %s   (on node %s, no download)",
 		out.Version, out.Arch, disk, dash(out.Node))
-	if out.Box != "" {
-		a.note("  box rm %s --yes                              (the sealed box: starting it gives an empty, "+
-			"clean machine, not this work)", out.Box)
-	}
 	a.note("  box images publish %s --yes                   (to make the image available on every node)", out.Version)
 	return nil
 }

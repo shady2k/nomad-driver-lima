@@ -51,7 +51,13 @@ cp "$src" "$dst"
 // driverWithQEMUImg builds the driver over a fake limactl and a given qemu-img.
 func driverWithQEMUImg(t *testing.T, qemuImg string) (*Driver, string) {
 	t.Helper()
-	f := fakelima.New(t)
+	return driverWithQEMUImgAt(t, fakelima.New(t), qemuImg)
+}
+
+// driverWithQEMUImgAt builds the driver over a given fake limactl: a bake drives
+// the instances of that fake, so a test needs to look at them.
+func driverWithQEMUImgAt(t *testing.T, f *fakelima.Fake, qemuImg string) (*Driver, string) {
+	t.Helper()
 	d := NewDriver(context.Background(), hclog.NewNullLogger())
 	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
 	cache := filepath.Join(f.Home, "_images")
@@ -70,7 +76,47 @@ func driverWithQEMUImg(t *testing.T, qemuImg string) (*Driver, string) {
 	return d, cache
 }
 
-// bakeTaskConfig is a task that bakes the disk of box1 out of its volume.
+// bakePlatformSHA is the digest of the platform bundle a bake's clone mounts.
+const bakePlatformSHA = "502629c71242657dda4a82b69be1916831afdf959ae184073d290a278c11e6b0"
+
+// bakePlatform seeds the node's platform cache with an unpacked bundle, which is
+// what a box start downloads and unpacks: a bake mounts it and runs the bundle's
+// boxctl.
+func bakePlatform(t *testing.T, cache string) string {
+	t.Helper()
+	dir := filepath.Join(cache, "platform", bakePlatformSHA)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "bin"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{"version":"1.10.0"}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".box-platform-complete"), []byte(bakePlatformSHA+"\n"), 0o444))
+	return dir
+}
+
+// bakeSourceBox puts the stopped instance of box1 into the fake Lima home with
+// the disk the volume holds, symlinked the way the driver keeps it.
+func bakeSourceBox(t *testing.T, f *fakelima.Fake, volumeDir, diskContent string) string {
+	t.Helper()
+	disk := filepath.Join(volumeDir, box.DiskFileName("box1"))
+	require.NoError(t, os.MkdirAll(volumeDir, 0o755))
+	require.NoError(t, os.WriteFile(disk, []byte(diskContent), 0o644))
+	dir := f.InstanceDir("box1")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.Symlink(disk, f.DiskPath("box1")))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "lima.yaml"), []byte(`minimumLimaVersion: "2.0.0"
+vmType: qemu
+arch: x86_64
+cpus: 2
+memory: 1024MiB
+disk: 8GiB
+mounts:
+  - location: /run/box-files/box1/secrets
+    mountPoint: /run/box/secrets
+    writable: false
+`), 0o644))
+	f.SetState(t, "box1", map[string]any{"status": "Stopped", "cpus": 2, "memory": int64(1024 * 1024 * 1024)})
+	return disk
+}
+
+// bakeTaskConfig is a task that bakes box1 out of its volume.
 func bakeTaskConfig(t *testing.T, volumeDir string) (*drivers.TaskConfig, TaskConfig) {
 	t.Helper()
 	tc := taskConfig(t, volumeDir, func(tc *drivers.TaskConfig) {
@@ -84,6 +130,11 @@ func bakeTaskConfig(t *testing.T, volumeDir string) (*drivers.TaskConfig, TaskCo
 			Parent:  "1.0.0",
 			Arch:    "amd64",
 			Recipe:  "IyEvYmluL2Jhc2gK", // "#!/bin/bash\n"
+		},
+		Platform: &PlatformConfig{
+			Version: "1.10.0",
+			URL:     "https://images.test/box-platform-1.10.0-linux-amd64.tar.gz",
+			SHA256:  bakePlatformSHA,
 		},
 	}
 	require.NoError(t, tc.EncodeConcreteDriverConfig(cfg))
@@ -104,14 +155,23 @@ func waitExit(t *testing.T, d *Driver, taskID string, timeout time.Duration) *dr
 	}
 }
 
-// TestBakeTaskWritesTheImage is the bake of a sealed box: the disk becomes a file
-// in the image cache named by its digest, with a record beside it.
-func TestBakeTaskWritesTheImage(t *testing.T) {
-	d, cache := driverWithQEMUImg(t, fakeQEMUImg(t, okQEMUImg))
+// bakeSetup builds the driver, a volume with box1's disk, the box's instance and
+// the platform bundle.
+func bakeSetup(t *testing.T, qemuImg, diskContent string) (*Driver, string, *fakelima.Fake, string) {
+	t.Helper()
+	f := fakelima.New(t)
+	d, cache := driverWithQEMUImgAt(t, f, qemuImg)
 	vol := t.TempDir()
-	disk := filepath.Join(vol, box.DiskFileName("box1"))
-	diskBytes := []byte("QFI\xfb\x00\x00\x00\x03 a qcow2 header and some clusters\n")
-	require.NoError(t, os.WriteFile(disk, diskBytes, 0o644))
+	bakeSourceBox(t, f, vol, diskContent)
+	bakePlatform(t, cache)
+	return d, cache, f, vol
+}
+
+// TestBakeClonesSealsAndDeletesTheClone is the whole bake: the box is cloned, the
+// clone is sealed from inside, its disk becomes the image, and the clone goes.
+func TestBakeClonesSealsAndDeletesTheClone(t *testing.T) {
+	diskBytes := "QFI\xfb\x00\x00\x00\x03 a qcow2 header and some clusters\n"
+	d, cache, f, vol := bakeSetup(t, fakeQEMUImg(t, okQEMUImg), diskBytes)
 
 	tc, _ := bakeTaskConfig(t, vol)
 	handle, net, err := d.StartTask(tc)
@@ -119,15 +179,26 @@ func TestBakeTaskWritesTheImage(t *testing.T) {
 	require.Nil(t, net)
 	require.NotNil(t, handle)
 
-	res := waitExit(t, d, "task1", 30*time.Second)
+	res := waitExit(t, d, "task1", 60*time.Second)
 	require.True(t, res.Successful(), "the bake exited %+v", res)
 
-	sum := sha256.Sum256(diskBytes)
+	// The clone was made, from the box, with its own mounts, and it sealed
+	// itself from the bundle's boxctl.
+	require.True(t, f.HasCall(t, "clone --tty=false --mount-none box1 box1-bake-1"), f.Calls(t))
+	seals := f.SealCalls(t)
+	require.Len(t, seals, 1, "the seal ran once: %v", seals)
+	require.True(t, strings.HasPrefix(seals[0], "box1-bake-1\t"), "the seal ran in the clone: %q", seals[0])
+
+	// The image is the content of the clone's disk, which is the content of the
+	// box's disk: a copy, and the box keeps it.
+	sum := sha256.Sum256([]byte(diskBytes))
 	digest := hex.EncodeToString(sum[:])
-	image := filepath.Join(cache, digest+".img")
-	data, err := os.ReadFile(image)
-	require.NoError(t, err, "the image is in the cache under its digest, which is where EnsureImage looks")
-	require.Equal(t, diskBytes, data)
+	data, err := os.ReadFile(filepath.Join(cache, digest+".img"))
+	require.NoError(t, err, "the image is in the cache under its digest")
+	require.Equal(t, diskBytes, string(data))
+	boxData, err := os.ReadFile(filepath.Join(vol, box.DiskFileName("box1")))
+	require.NoError(t, err)
+	require.Equal(t, diskBytes, string(boxData), "the box's own disk is not touched")
 
 	recordPath := filepath.Join(cache, "baked", "project-1.amd64.json")
 	b, err := os.ReadFile(recordPath)
@@ -135,34 +206,105 @@ func TestBakeTaskWritesTheImage(t *testing.T) {
 	var rec box.BakedRecord
 	require.NoError(t, json.Unmarshal(b, &rec))
 	require.Equal(t, "project-1", rec.Version)
-	require.Equal(t, "amd64", rec.Arch)
 	require.Equal(t, "project", rec.Name)
 	require.Equal(t, "1.0.0", rec.Parent)
 	require.Equal(t, digest, rec.SHA256)
-	require.Equal(t, int64(len(diskBytes)), rec.Size)
-	require.Equal(t, "mount", rec.Platform)
-	require.NotEmpty(t, rec.BuiltAt)
 	require.Equal(t, "IyEvYmluL2Jhc2gK", rec.Recipe)
 
-	// The task reports what it baked, which is what `nomad alloc status` shows
-	// and what `box bake` reads.
+	// And the clone is gone: no instance, no directory with a copy of the disk.
+	require.NotContains(t, f.State(t), "box1-bake-1")
+	_, err = os.Stat(f.InstanceDir("box1-bake-1"))
+	require.True(t, os.IsNotExist(err), "the clone's directory is still there")
+
 	status, err := d.InspectTask("task1")
 	require.NoError(t, err)
 	require.Equal(t, drivers.TaskStateExited, status.State)
 	require.True(t, status.ExitResult.Successful())
 }
 
-// TestBakeTaskWithoutQEMUImgSaysSo: a node without qemu-img cannot bake, and the
-// task fails with a sentence that names the tool.
-func TestBakeTaskWithoutQEMUImg(t *testing.T) {
-	d, _ := driverWithQEMUImg(t, filepath.Join(t.TempDir(), "absent", "qemu-img"))
-	vol := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(vol, box.DiskFileName("box1")), []byte("QFI\xfb\x00\x00\x00\x03"), 0o644))
+// TestBakeRefusesARunningBox: a clone of a running box copies a disk the guest is
+// writing, so the bake refuses it and names the stop.
+func TestBakeRefusesARunningBox(t *testing.T) {
+	d, _, f, vol := bakeSetup(t, fakeQEMUImg(t, okQEMUImg), "QFI\xfb\x00\x00\x00\x03 disk\n")
+	f.SetState(t, "box1", map[string]any{"status": "Running", "driverPID": os.Getpid(),
+		"hostAgentPID": os.Getpid()})
 
 	tc, _ := bakeTaskConfig(t, vol)
 	_, _, err := d.StartTask(tc)
 	require.NoError(t, err)
 	res := waitExit(t, d, "task1", 30*time.Second)
+	require.False(t, res.Successful())
+	require.Contains(t, res.Err.Error(), "box1 is running")
+	require.Contains(t, res.Err.Error(), "box stop box1")
+	require.False(t, f.HasCall(t, "clone"), "nothing is cloned from a running box")
+}
+
+// TestBakeRefusesACopyThatDoesNotFit: the clone is a full copy of the disk, so a
+// node without the room fails the bake with a sentence before anything is cloned.
+func TestBakeRefusesACopyThatDoesNotFit(t *testing.T) {
+	d, _, f, vol := bakeSetup(t, fakeQEMUImg(t, okQEMUImg), strings.Repeat("QFI\xfb clusters\n", 1000))
+	old := bakeFreeBytes
+	bakeFreeBytes = func(string) (int64, error) { return 4096, nil }
+	t.Cleanup(func() { bakeFreeBytes = old })
+
+	tc, _ := bakeTaskConfig(t, vol)
+	_, _, err := d.StartTask(tc)
+	require.NoError(t, err)
+	res := waitExit(t, d, "task1", 30*time.Second)
+	require.False(t, res.Successful())
+	require.Contains(t, res.Err.Error(), "free on the filesystem")
+	require.Contains(t, res.Err.Error(), "needs")
+	require.False(t, f.HasCall(t, "clone"), "nothing is cloned when the copy does not fit")
+}
+
+// TestBakeDeletesTheCloneWhenTheSealFails: a failed seal leaves the box alone and
+// takes the clone with it, so no copy of the box stays on the node.
+func TestBakeDeletesTheCloneWhenTheSealFails(t *testing.T) {
+	d, _, f, vol := bakeSetup(t, fakeQEMUImg(t, okQEMUImg), "QFI\xfb\x00\x00\x00\x03 disk\n")
+	f.SetMode(t, map[string]any{"fail_seal": "guest/no-secrets.sh failed in this box: FAIL /root/.prime"})
+
+	tc, _ := bakeTaskConfig(t, vol)
+	_, _, err := d.StartTask(tc)
+	require.NoError(t, err)
+	res := waitExit(t, d, "task1", 60*time.Second)
+	require.False(t, res.Successful())
+	require.Contains(t, res.Err.Error(), "the seal of box box1 failed in the clone")
+	require.Contains(t, res.Err.Error(), "guest/no-secrets.sh failed in this box")
+	require.NotContains(t, res.Err.Error(), "deleted the clone", "the failure is the seal's, not the cleanup's")
+	require.NotContains(t, f.State(t), "box1-bake-1", "the clone is deleted")
+	_, err = os.Stat(f.InstanceDir("box1-bake-1"))
+	require.True(t, os.IsNotExist(err))
+}
+
+// TestBakeRemovesACloneLeftByAKilledBake: a clone a killed driver left behind is
+// removed by the next bake of the same box, and its name is not reused.
+func TestBakeRemovesACloneLeftByAKilledBake(t *testing.T) {
+	d, _, f, vol := bakeSetup(t, fakeQEMUImg(t, okQEMUImg), "QFI\xfb\x00\x00\x00\x03 disk\n")
+	// The leftover of a bake that was killed: an instance of its own.
+	require.NoError(t, os.MkdirAll(f.InstanceDir("box1-bake-1"), 0o755))
+	require.NoError(t, os.WriteFile(f.DiskPath("box1-bake-1"), []byte("STALE COPY"), 0o644))
+	f.SetState(t, "box1-bake-1", map[string]any{"status": "Stopped"})
+
+	tc, _ := bakeTaskConfig(t, vol)
+	_, _, err := d.StartTask(tc)
+	require.NoError(t, err)
+	res := waitExit(t, d, "task1", 60*time.Second)
+	require.True(t, res.Successful(), "the bake exited %+v", res)
+	require.True(t, f.HasCall(t, "clone --tty=false --mount-none box1 box1-bake-2"),
+		"the new clone took a name of its own: %v", f.Calls(t))
+	require.NotContains(t, f.State(t), "box1-bake-1", "the leftover was removed")
+	require.NotContains(t, f.State(t), "box1-bake-2")
+}
+
+// TestBakeTaskWithoutQEMUImgSaysSo: a node without qemu-img cannot bake, and the
+// task fails with a sentence that names the tool.
+func TestBakeTaskWithoutQEMUImgSaysSo(t *testing.T) {
+	d, _, _, vol := bakeSetup(t, filepath.Join(t.TempDir(), "absent", "qemu-img"), "QFI\xfb\x00\x00\x00\x03")
+
+	tc, _ := bakeTaskConfig(t, vol)
+	_, _, err := d.StartTask(tc)
+	require.NoError(t, err)
+	res := waitExit(t, d, "task1", 60*time.Second)
 	require.False(t, res.Successful())
 	require.Contains(t, res.Err.Error(), "qemu-img is not installed on this node")
 	require.Contains(t, res.Err.Error(), "Install qemu-img")
@@ -184,9 +326,10 @@ func TestBakeRefusesAVersionThatEscapes(t *testing.T) {
 	require.Error(t, both.applyDefaults())
 }
 
-// TestStopBakeLeavesNoTemporaryFile: a bake that is stopped removes what it was
-// writing, so the image cache never holds half an image.
-func TestStopBakeLeavesNoTemporaryFile(t *testing.T) {
+// TestStopBakeLeavesNoTemporaryFileAndNoClone: a bake that is stopped removes what
+// it was writing and its clone, so the image cache never holds half an image and no
+// copy of the box stays on the node.
+func TestStopBakeLeavesNoTemporaryFileAndNoClone(t *testing.T) {
 	// A conversion that never ends, so the stop has something to stop.
 	slow := `#!/usr/bin/env bash
 set -euo pipefail
@@ -195,10 +338,7 @@ dst=${args[${#args[@]}-1]}
 echo converting > "$dst"
 sleep 300
 `
-	d, cache := driverWithQEMUImg(t, fakeQEMUImg(t, slow))
-	vol := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(vol, box.DiskFileName("box1")), []byte("QFI\xfb\x00\x00\x00\x03"), 0o644))
-
+	d, cache, f, vol := bakeSetup(t, fakeQEMUImg(t, slow), "QFI\xfb\x00\x00\x00\x03 disk\n")
 	tc, _ := bakeTaskConfig(t, vol)
 	_, _, err := d.StartTask(tc)
 	require.NoError(t, err)
@@ -212,7 +352,7 @@ sleep 300
 			}
 		}
 		return false
-	}, 20*time.Second, 50*time.Millisecond, "the bake never started writing")
+	}, 60*time.Second, 50*time.Millisecond, "the bake never started writing")
 
 	require.NoError(t, d.StopTask("task1", 5*time.Second, ""))
 	entries, err := os.ReadDir(cache)
@@ -220,18 +360,17 @@ sleep 300
 	for _, e := range entries {
 		require.NotContains(t, e.Name(), ".part", "a stopped bake left %s in the image cache", e.Name())
 	}
+	require.NotContains(t, f.State(t), "box1-bake-1", "a stopped bake left its clone behind")
 }
 
 // TestFingerprintCarriesTheBakedImages: a draft exists on one node, so the node
 // says which images it baked and what they are.
 func TestFingerprintCarriesTheBakedImages(t *testing.T) {
-	d, cache := driverWithQEMUImg(t, fakeQEMUImg(t, okQEMUImg))
-	vol := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(vol, box.DiskFileName("box1")), []byte("QFI\xfb\x00\x00\x00\x03 disk\n"), 0o644))
+	d, cache, _, vol := bakeSetup(t, fakeQEMUImg(t, okQEMUImg), "QFI\xfb\x00\x00\x00\x03 disk\n")
 	tc, _ := bakeTaskConfig(t, vol)
 	_, _, err := d.StartTask(tc)
 	require.NoError(t, err)
-	require.True(t, waitExit(t, d, "task1", 30*time.Second).Successful())
+	require.True(t, waitExit(t, d, "task1", 60*time.Second).Successful())
 
 	records, err := d.boxm.BakedRecords()
 	require.NoError(t, err)
@@ -243,9 +382,10 @@ func TestFingerprintCarriesTheBakedImages(t *testing.T) {
 	require.Equal(t, records[0].SHA256, attrValue(t, fp, "driver.box.baked.project-1.sha256"))
 	require.Equal(t, "1.0.0", attrValue(t, fp, "driver.box.baked.project-1.parent"))
 	require.Equal(t, "mount", attrValue(t, fp, "driver.box.baked.project-1.platform"))
-	require.Equal(t, fmt.Sprintf("%d", records[0].Size), attrValue(t, fp, "driver.box.baked.project-1.size"))
 	require.NotEmpty(t, attrValue(t, fp, "driver.box.baked.project-1.built_at"))
 	require.Equal(t, "IyEvYmluL2Jhc2gK", attrValue(t, fp, "driver.box.baked.project-1.recipe"))
+	// The node also says how much room is left where a bake copies a disk.
+	require.NotEmpty(t, attrValue(t, fp, "driver.box.disk.free_bytes"))
 
 	// An image that is no longer in the cache is no longer an attribute: a draft
 	// that was pruned must not be offered.

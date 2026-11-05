@@ -489,3 +489,22 @@ func TestSpecFromJobKeepsTheReservation(t *testing.T) {
 	require.Equal(t, 1936, back.CPUMHzPerVCPU)
 	require.Equal(t, 3872, back.TaskCPUShares())
 }
+
+// TestCapacityCallsAStoppedBoxStopped: the driver reports any VM without a task
+// for ten minutes as an orphan, which is what every stopped box looks like to it.
+// `box capacity` gives the same answer as `box ls`: a box with a job or a stored
+// description is stopped, and only one with neither is an orphan.
+func TestCapacityCallsAStoppedBoxStopped(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.addBoxSpec(t, goodProjectSpec())
+	ta.stopBox("dev1")
+	ta.cluster.mu.Lock()
+	ta.cluster.nodes["node-1"].Attributes["driver.box.orphans"] = "dev1,lost"
+	ta.cluster.mu.Unlock()
+
+	require.Equal(t, ExitOK, ta.run(t, "capacity"), ta.errOut.String())
+	out := ta.errOut.String()
+	require.NotContains(t, out, "node-1/dev1: an orphan", "a stopped box is not an orphan")
+	require.Contains(t, out, "node-1/dev1: no box task, and the cluster knows this box as stopped")
+	require.Contains(t, out, "node-1/lost: an orphan", "a VM nothing describes is still an orphan")
+}

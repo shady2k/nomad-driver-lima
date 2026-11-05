@@ -12,6 +12,55 @@ import (
 	"time"
 )
 
+// TestSealStatusAnswersWithoutChangingAnything: `box bake` asks the box whether
+// the seal would run before it stops it, so a busy box is refused with no stop.
+func TestSealStatusAnswersWithoutChangingAnything(t *testing.T) {
+	g := newSealGuest(t)
+	g.fill(t)
+	m := g.manager(t)
+
+	if st := m.SealStatus(); !st.OK || st.Reason != "" {
+		t.Fatalf("an idle box would not be sealed: %+v", st)
+	}
+	// Nothing was deleted by the question.
+	if !g.exists("work/project/main.go") {
+		t.Fatal("asking whether a seal may run deleted the workspace")
+	}
+
+	s := mustSession(t, m, "prime", "acme/model")
+	sess := m.lookupSession(s.ID)
+	sess.mu.Lock()
+	sess.busy = true
+	sess.cur = &turnState{Turn: Turn{Session: s.ID, Turn: 2, State: TurnRunning}, done: make(chan struct{})}
+	sess.mu.Unlock()
+	st := m.SealStatus()
+	if st.OK {
+		t.Fatal("a box with a running turn says the seal would run")
+	}
+	if !strings.Contains(st.Reason, "running turn 2") {
+		t.Errorf("the reason does not name the turn: %q", st.Reason)
+	}
+	if strings.HasPrefix(st.Reason, "busy:") {
+		t.Errorf("the reason carries the error code: %q", st.Reason)
+	}
+	if !g.exists("work/project/main.go") {
+		t.Fatal("asking whether a seal may run deleted the workspace")
+	}
+
+	// A preparation in progress is the other refusal.
+	sess.mu.Lock()
+	sess.busy = false
+	sess.mu.Unlock()
+	m.prep.mu.Lock()
+	m.prep.st.State = PrepareRunning
+	m.prep.st.Step = "clone"
+	m.prep.mu.Unlock()
+	st = m.SealStatus()
+	if st.OK || !strings.Contains(st.Reason, "being prepared") {
+		t.Fatalf("a box being prepared says the seal would run: %+v", st)
+	}
+}
+
 // The seal turns a box into an image. Its test is a fake guest: the directories a
 // seal cleans, laid out the way a box has them, so the test can assert on what is
 // gone and what stayed.
@@ -52,8 +101,6 @@ func newSealGuest(t *testing.T) *sealGuest {
 	g := &sealGuest{root: root, cfg: cfg}
 	g.cfg.Seal = &SealPaths{
 		Workspace: filepath.Join(root, "work"),
-		DiskRoot:  root,
-		Skip:      []string{filepath.Join(root, "run"), filepath.Join(root, "opt"), filepath.Join(root, "proc")},
 		Homes: []string{
 			filepath.Join(root, "var/lib/boxd/homes/prime"),
 			filepath.Join(root, "home/user"),
@@ -140,8 +187,9 @@ func (g *sealGuest) fill(t *testing.T) {
 	g.write(t, "home/user/.npmrc", "registry=https://registry.example.com/\n//registry.example.com/:_authToken="+sealCredential+"\n")
 	g.write(t, "home/user/.gitconfig", "[user]\n\tname = A User\n[credential]\n\thelper = store\n[credential \"https://example.com\"]\n\thelper = cache\n")
 	g.write(t, "home/user/notes.txt", "keep me\n")
-	// The credential itself, in the secrets directory on the tmpfs.
-	g.write(t, "run/box/secrets/prime/auth.json", `{"acme":{"type":"api_key","key":"`+sealCredential+`"}}`)
+	// The secrets directory is empty: the guest a seal runs in is a clone with
+	// empty stand-ins (see TestSealRefusesAGuestWithCredentials), so this box has
+	// no credential mounted.
 	// boxd's own copies, derived from the secrets directory into the runtime
 	// directory (a tmpfs) so an executor can write its settings: they are boxd's,
 	// and a seal forgets them.
@@ -284,9 +332,6 @@ func TestSealRemovesTheWorkAndKeepsTheCaches(t *testing.T) {
 		"home/user/notes.txt",
 		"etc/ssh/sshd_config",
 		"opt/box/lib/no-secrets.sh",
-		// The driver's copy is the read-only mount of the host's tmpfs; the seal
-		// does not touch it.
-		"run/box/secrets/prime/auth.json",
 	} {
 		if !g.exists(kept) {
 			t.Errorf("%s was deleted; an image keeps it", kept)
@@ -354,40 +399,29 @@ func TestSealWritesTheImageRecord(t *testing.T) {
 	}
 }
 
-// TestSealFailsOnACopyOfTheCredential is the second proof: a file whose name says
-// nothing about what it holds is only found by searching for the value, and the
-// failure names the path and never the value.
-func TestSealFailsOnACopyOfTheCredential(t *testing.T) {
+// TestSealDoesNotSearchTheDiskForTheCredential is the owner's decision: the seal
+// no longer walks the disk looking for the credential values, so a file that
+// merely mentions one does not stop it. guest/no-secrets.sh is the proof that
+// stays, and it checks the places a credential is written into, not the text of
+// every file.
+func TestSealDoesNotSearchTheDiskForTheCredential(t *testing.T) {
 	g := newSealGuest(t)
 	g.fill(t)
-	copyPath := g.write(t, "home/user/src/notes/2026-02-01.txt", "the key was "+sealCredential+"\n")
+	// A file whose name says nothing and whose text holds the value: the search
+	// this seal used to run failed on exactly this.
+	note := g.write(t, "home/user/src/notes/2026-02-01.txt", "the key was "+sealCredential+"\n")
 	m := g.manager(t)
 
-	_, err := seal(t, m, sealRequest())
-	if err == nil {
-		t.Fatal("the seal succeeded although a home holds a copy of the credential")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, copyPath) {
-		t.Errorf("the error does not name %s: %s", copyPath, msg)
-	}
-	if strings.Contains(msg, sealCredential) {
-		t.Errorf("the error prints the credential itself: %s", msg)
-	}
-	if !strings.Contains(msg, "already gone") {
-		t.Errorf("the error does not say that part of the box is gone: %s", msg)
-	}
-	if CodeOf(err) != CodeInternal {
-		t.Errorf("the seal failed with code %s", CodeOf(err))
-	}
-
-	// Remove the copy and the same seal succeeds: what the error names is what
-	// the operator has to act on.
-	if err := os.Remove(copyPath); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := seal(t, m, sealRequest()); err != nil {
-		t.Fatalf("Seal after removing the copy: %v", err)
+		t.Fatalf("the seal searched the disk for the credential and failed: %v", err)
+	}
+	// And it did not delete the file either: a seal deletes what it knows is
+	// state, and this is the owner's own text.
+	if !g.exists("home/user/src/notes/2026-02-01.txt") {
+		t.Error("the seal deleted a file it only knew about from a value search")
+	}
+	if _, err := os.Stat(note); err != nil {
+		t.Errorf("%s is gone: %v", note, err)
 	}
 }
 
@@ -527,34 +561,16 @@ func TestSealRejectsAnUnusableName(t *testing.T) {
 	}
 }
 
-// TestSealWithoutCredentialsSaysSo: a box that never got a credential has nothing
-// to search for, and the seal says that instead of searching for nothing.
-func TestSealWithoutCredentials(t *testing.T) {
-	g := newSealGuest(t)
-	g.fill(t)
-	if err := os.RemoveAll(filepath.Join(g.root, "run/box/secrets")); err != nil {
-		t.Fatal(err)
-	}
-	m := g.manager(t)
-	res, err := seal(t, m, sealRequest())
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-	if res.Values != 0 {
-		t.Fatalf("the seal searched for %d value(s) in a box without a credential", res.Values)
-	}
-}
-
 // TestZeroFreeSpaceStopsAtItsLimit: the fallback for a guest without fstrim, with
 // a bound so that a test does not fill the machine it runs on.
 func TestZeroFreeSpaceStopsAtItsLimit(t *testing.T) {
 	g := newSealGuest(t)
-	s := &sealer{cfg: g.cfg, paths: g.cfg.sealPaths(), say: func(string) {}, zeroLimit: 3 << 20}
-	s.paths.DiskRoot = t.TempDir()
+	fillDir := t.TempDir()
+	s := &sealer{cfg: g.cfg, paths: g.cfg.sealPaths(), say: func(string) {}, zeroLimit: 3 << 20, zeroPath: fillDir}
 	if err := s.zeroFreeSpace(); err != nil {
 		t.Fatalf("zeroFreeSpace: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(s.paths.DiskRoot, "zero.fill")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(fillDir, "zero.fill")); !os.IsNotExist(err) {
 		t.Fatalf("the zero file was left behind: %v", err)
 	}
 }
@@ -583,7 +599,7 @@ func TestClientSealStreamsTheSteps(t *testing.T) {
 	if len(lines) < 5 {
 		t.Fatalf("the seal streamed %d line(s): %v", len(lines), lines)
 	}
-	if res.Image.Name != "project" || res.Files == 0 {
+	if res.Image.Name != "project" || len(res.Steps) == 0 {
 		t.Fatalf("the result is %+v", res)
 	}
 	joined := strings.Join(lines, "\n")
@@ -603,4 +619,43 @@ func waitForSocket(t *testing.T, socket string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("the daemon did not listen on %s", socket)
+}
+
+// TestSealRefusesAGuestWithCredentials: a seal makes an image, and an image must
+// never be made of a machine that holds the box's credentials. `box bake` seals a
+// clone whose secrets directory is an empty stand-in, so this is what keeps a
+// seal out of a box somebody works in.
+func TestSealRefusesAGuestWithCredentials(t *testing.T) {
+	g := newSealGuest(t)
+	g.fill(t)
+	g.write(t, "run/box/secrets/prime/auth.json", `{"acme":{"type":"api_key","key":"`+sealCredential+`"}}`)
+	m := g.manager(t)
+
+	_, err := seal(t, m, sealRequest())
+	if err == nil {
+		t.Fatal("the seal ran in a guest that has the credentials mounted")
+	}
+	if !strings.Contains(err.Error(), "credentials mounted") {
+		t.Errorf("the error does not say what stopped it: %s", err)
+	}
+	if !strings.Contains(err.Error(), "Bake the box instead") {
+		t.Errorf("the error does not say what to do: %s", err)
+	}
+	if CodeOf(err) != CodeInvalid {
+		t.Errorf("the refusal carries the code %s", CodeOf(err))
+	}
+	// Nothing was deleted: the refusal comes before the first removal.
+	if !g.exists("work/project/main.go") {
+		t.Error("the refused seal deleted the workspace")
+	}
+	// An empty secrets directory is what a bake's clone has: it is not a refusal.
+	if err := os.Remove(filepath.Join(g.root, "run/box/secrets/prime/auth.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(g.root, "run/box/secrets/prime")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seal(t, m, sealRequest()); err != nil {
+		t.Fatalf("the seal refused a guest whose secrets directory is empty: %v", err)
+	}
 }

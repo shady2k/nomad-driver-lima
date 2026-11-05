@@ -270,11 +270,11 @@ on the image's `PATH`.
 A base image is the machine a project starts from. A **project image** is that
 machine's environment, kept: an agent takes a box from a base image or from
 another project image, installs what its project needs -- a toolchain, a package
-set, the caches a build fills -- and the box is baked. Its disk becomes an
-immutable image with the dependencies and the caches and **without** the code, the
-task data or a credential. A new box is created from it and only brings its code
-in, so every box of that project starts minutes ahead instead of installing the
-same things again.
+set, the caches a build fills -- and the box is baked. A copy of its disk becomes
+an immutable image with the dependencies and the caches and **without** the code,
+the task data or a credential, and the box keeps the disk it was working on. A new
+box is created from it and only brings its code in, so every box of that project
+starts minutes ahead instead of installing the same things again.
 
 An image starts as a **draft**. The bake writes it into the image cache of the
 node that holds the box's disk, and no other node has it; the driver publishes
@@ -292,28 +292,47 @@ bundle.
 
 ### What a bake is
 
-A bake is one seal, one stop and one task of the driver:
+A bake works on a clone of the box, never on the box itself. The box is stopped
+while it runs, and it starts again afterwards.
 
-1. `boxctl seal` in the guest empties the box and proves the result (below). It
-   refuses while a turn runs or a preparation is in progress: both are work a seal
-   deletes out from under itself.
-2. The box is stopped. A sealed box is not started again: what it holds is the
-   image's files, not the work.
-3. A batch job `box-bake-<box id>` of the driver runs no VM. It mounts the box's
-   volume -- which also places it on the node that holds the disk -- reads the
-   qcow2, runs `qemu-img convert -c -O qcow2` into a temporary file in the node's
-   image cache as the runtime user, hashes the result and renames it to
-   `<image_cache_dir>/<sha256>.img`. The mount is read-write, although the task only
-   reads: Nomad places a read-only request of a dynamic host volume only when the
-   volume offers a read-only access mode, and a box's volume is
-   `single-node-writer`, so a read-only bake job is never placed at all. `qemu-img
-   convert` opens its source read-only, and the task writes nothing but the image
-   in the cache. That is the name and place `box.EnsureImage`
-   looks in, so a box on that node creates from the image without a download.
+1. `boxctl info` in the box, before anything is stopped, says whether the seal
+   would run: a turn running or a preparation in progress is refused there, with
+   nothing stopped. That question cannot be asked of the clone, whose `boxd` is a
+   fresh daemon that knows nothing of the box's turn.
+2. The node must have room for the copy. A clone is a full copy of the disk file,
+   written on the same Lima home, so less free space there than the box's disk
+   occupies refuses the bake with both numbers.
+3. The box is stopped, and a batch job `box-bake-<box id>` of the driver mounts the
+   box's volume -- which also places it on the node that holds the disk. The mount
+   is read-write, although the task only reads: Nomad places a read-only request of
+   a dynamic host volume only when the volume offers a read-only access mode, and a
+   box's volume is `single-node-writer`, so a read-only bake job is never placed at
+   all. One driver task does the rest: `limactl clone <id> <id>-bake-<n>` copies
+   the stopped box -- a full copy of the disk file, a new hostname and no snapshot
+   (measured with Lima 2.2.0) -- the clone is started, the seal runs in it through
+   `limactl shell`, the clone is stopped, and `qemu-img convert -c -O qcow2` writes
+   its disk into a temporary file in the node's image cache as the runtime user,
+   hashes the result and renames it to `<image_cache_dir>/<sha256>.img`. That is the
+   name and place `box.EnsureImage` looks in, so a box on that node creates from the
+   image without a download.
 4. Beside it, `<image_cache_dir>/baked/<version>.<arch>.json` records `version`,
    `arch`, `sha256`, `size`, `virtual_bytes`, `parent`, `name`, `built_at`,
    `recipe` and `platform`. That record is what `box create --image <version>` on
    that node reads, and what a publish uploads.
+
+The clone is the machine the seal empties, and it sees no credential: it mounts the
+platform bundle at `/opt/box` and two empty directories at `/run/box/secrets` and
+`/etc/box/local`, which is where `boxd.service` waits for a box's credentials and
+task files. `limactl clone --mount-none` removes the source's mounts, and
+`--mount`/`--mount-only` cannot name a guest path, so the driver writes those three
+into the clone's `lima.yaml` itself and reads the configuration back: a mount that
+is not one of them is refused, and so is a clone whose disk turns out to be a
+symlink to the box's disk, which is copied for real before anything starts.
+
+The clone is disposable: it is deleted in every case, also when a step fails or the
+task is stopped, and a clone a killed driver left behind is removed by the next bake
+of the same box -- until then the driver reports it as an orphan, because its disk
+is not on a volume.
 
 A stopped bake removes its temporary file, so a half image never stays in the
 cache. A node without `qemu-img` fails the task with a sentence: nothing is
@@ -321,6 +340,16 @@ compressed without it. The record carries the image's virtual size, which is the
 smallest disk a box made from it may have.
 
 ### What a seal removes
+
+A seal refuses a guest that has the box's credentials mounted. `/run/box/secrets`
+is the driver's read-only mount of the host's tmpfs, and when it holds any entry the
+seal stops before it deletes anything: an image must never be made of a machine that
+holds the credentials of the box it came from, and a guest that has them is a box
+somebody works in. Its answer ends "a seal is only for a guest that is about to
+become an image. Bake the box instead, which seals a clone with empty stand-ins for
+the credentials" (`docs/boxctl-contract.md` has the whole message). `box bake` is
+the way to an image, and its clone mounts an empty stand-in there (above), so a bake
+never meets this refusal.
 
 The seal closes every session and stops the executors, and the daemon forgets
 both: a sealed `boxd` starts no session, and the next write of its state
@@ -358,6 +387,15 @@ disk:
 
 `/run` and the mounts are not on the disk, so they are left where they are.
 
+That deletion by file name is narrow in a bake. The clone mounts an empty stand-in
+at `/run/box/secrets`, so it has no credential file whose base name could be matched
+against a file in a home, and a copy of a credential that sits there is not deleted
+by name. The proof is what catches it: `guest/no-secrets.sh` fails on an
+`auth.json`, `credentials.json` or `.credentials.json` below `/root`, `/home`,
+`/etc/box`, `/var/lib/boxd` or `/opt/box`, and the seal refuses the image. Measured:
+a planted `/home/user/auth.json` failed a bake with
+`FAIL credential files are in the image: /home/user/auth.json`.
+
 ### What a seal keeps
 
 The homes stay, and so does everything installed in them: toolchains, package
@@ -371,22 +409,22 @@ to an image.
 
 ### What a seal proves, and what it writes
 
-Two proofs run after the deletions, and either one can stop the seal:
+One proof runs after the deletions, and it can stop the seal: **the bundle's
+`lib/no-secrets.sh`** -- the same `guest/no-secrets.sh` the image build runs, and
+the one an operator runs in a box. A bundle that carries no copy is a seal that
+does not finish, and the error names the file it looked for.
 
-1. **the bundle's `lib/no-secrets.sh`** -- the same `guest/no-secrets.sh` the
-   image build runs, and the one an operator runs in a box. A bundle that carries
-   no copy is a seal that does not finish, and the error names the file it looked
-   for.
-2. **a search of the guest disk for the credential values themselves**: one
-   filesystem, skipping `/proc`, `/sys`, `/run`, `/dev` and `/opt/box`, looking
-   for every JSON string of 16 characters or more and every whole line of 16
-   characters or more of the files in the secrets directories. A hit names the
-   path, never the value.
+The seal used to search the guest disk for the credential values themselves. That
+search is gone on purpose: it read every file of a disk that can be tens of
+gigabytes, and what it proved was narrow -- the values of this box's secrets
+directory, as they were at that moment. `guest/no-secrets.sh` is the proof the seal
+keeps, and it is the same check an operator runs on an image before publishing it.
 
-A file named like a credential is not the only way a credential reaches a disk. A
-log line, a shell history, a build artifact and a database row carry the value
-with no name that says so, and a search for the value is the only check that
-finds them.
+The consequence, said plainly: a file that merely mentions a credential does not
+stop a seal. A log line, a shell history, a build artifact or a database row can
+carry a value into an image, and the file names and directories the script looks
+for are what this proof covers. A credential that does end up in an image is
+rotated and a new version is published, because a published version never changes.
 
 Then the seal releases the free blocks: `fstrim -a`, or a file of zeros written
 until the filesystem is full where `fstrim` is not available, and `sync`. A qcow2
@@ -401,9 +439,13 @@ The seal writes two files, and reads the first back before it says it is done:
   I" without the manifest at hand.
 - **`/etc/box/recipe.sh`**: the recipe itself, mode 0755.
 
-A failed seal leaves the box running, names what is left to remove, and says that
-some of the box is already gone and cannot be brought back. Fixing what it names
-and baking again finishes the image; nothing it deleted returns.
+A failed seal stops at the step that failed, and its message says what that means:
+"What it deleted is gone: a seal empties the machine it runs in, which for a bake is
+a clone of the box and never the box itself. Fix what is left and bake again". A
+failed proof says the same in its own words: "A seal empties the machine it runs in,
+which for a bake is a clone of the box and never the box itself: remove what it
+names in the box and bake again". Either way the box the owner works in was never
+sealed, it starts again with its work, and nothing the seal deleted returns.
 
 ### The recipe
 

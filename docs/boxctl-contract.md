@@ -113,7 +113,7 @@ timeout with the state as it is. `boxctl info` carries the same document as
 
 | command | stdin | result |
 | --- | --- | --- |
-| `boxctl info` | – | `{"boxd_version","executors":[ExecutorInfo],"sessions":N,"mem_total_mib","mem_free_mib","cpus","platform":PlatformInfo,"prepare","usage":Usage}` |
+| `boxctl info` | – | `{"boxd_version","executors":[ExecutorInfo],"sessions":N,"mem_total_mib","mem_free_mib","cpus","platform":PlatformInfo,"seal":SealStatus,"prepare","usage":Usage}` |
 | `boxctl session new --executor prime\|opencode\|claude --model <provider>/<model> [--cwd DIR] [--title T]` | – | `{"session":"<id>"}` |
 | `boxctl session ls` | – | `{"sessions":[Session]}` |
 | `boxctl session get <id>` | – | `Session` |
@@ -129,8 +129,16 @@ timeout with the state as it is. `boxctl info` carries the same document as
 
 Empties the box and makes it an image (`docs/guest-image.md`, "Project images").
 It closes every session, stops the executors, deletes the work, the sessions and
-the credentials, runs the two proofs and releases the free blocks. `box bake` is
-what runs it, inside the box.
+the credentials, runs the bundle's `guest/no-secrets.sh` as its proof and releases
+the free blocks. `box bake` is what runs it, inside a clone of the box: the box
+itself keeps its disk and its work, and its own `boxctl info` is where the bake
+asks the seal's gate first (`seal` in the `info` result: `{"ok","reason"}`).
+
+Before it deletes anything it refuses a guest that has the box's credentials
+mounted: `/run/box/secrets` is the driver's read-only mount of the host's tmpfs, and
+any entry in it means a box somebody works in, not a machine about to become an
+image. That is `invalid_argument`, and the sentence says to bake the box instead. A
+bake's clone mounts empty stand-ins there, so a bake never meets this refusal.
 
 `--name` is required. `--arch` is `amd64` or `arm64`. The architecture, the
 version and the parent are recorded in `/etc/box/image.json` and used for nothing
@@ -146,20 +154,31 @@ The answer is a stream, one JSON object per line on stdout:
 {"line": "closed 2 session(s); no executor runs in the box now"}
 {"line": "the workspace: deleted /work (1.2 GiB)"}
 ...
-{"seal": {"image": {...}, "steps": ["..."], "files": 41867, "values": 6}}
+{"seal": {"image": {...}, "steps": ["..."]}}
 ```
 
 or, when it stops,
 
 ```json
 {"error": {"code": "internal",
-           "message": "the image would carry 1 credential value(s): /var/log/x.log (holds the credential from /run/box/secrets/prime/auth.json). The values themselves are not printed. Some of the box is already gone and cannot be brought back; the box still runs, so delete what is named there and bake it again (a credential that is in the image should be rotated as well)"}}
+           "message": "guest/no-secrets.sh failed in this box: FAIL  credential files are in the image:. A seal empties the machine it runs in, which for a bake is a clone of the box and never the box itself: remove what it names in the box and bake again"}}
+```
+
+or when it refuses a guest that holds the box's credentials, before it deletes
+anything,
+
+```json
+{"error": {"code": "invalid_argument",
+           "message": "this guest has the box's credentials mounted in /run/box/secrets (dev, prime), and a seal is only for a guest that is about to become an image. Bake the box instead, which seals a clone with empty stand-ins for the credentials (docs/guest-image.md)"}}
 ```
 
 `seal.image` is the record it wrote to `/etc/box/image.json`: `schema`,
 `version`, `name`, `arch`, `parent`, `platform` (`"mount"`), `recipe` (base64)
-and `sealed_at`. `steps` are the lines it printed, in order, and `files` and
-`values` say how much the credential search read and what it looked for.
+and `sealed_at`. `steps` are the lines it printed, in order. That is what the
+result carries: the seal runs no search of the disk for a credential value, so
+there is no count of the files it read or the values it looked for. Both failure
+sentences name the machine they emptied, because in a bake it is the clone and the
+box the owner works in keeps its work.
 
 A refusal is a document and exit 1, like every boxctl failure, because the steps
 before it are the useful part and they are what a person reads. The codes:
@@ -167,7 +186,7 @@ before it are the useful part and they are what a person reads. The codes:
 | code | when |
 | --- | --- |
 | `busy` | a turn runs (`box cancel <box> <session>` stops it) or a preparation is in progress (`box prepare <box> --cancel` stops it) |
-| `invalid_argument` | the name, the version, the architecture or the recipe is not one a seal accepts |
+| `invalid_argument` | the name, the version, the architecture or the recipe is not one a seal accepts, or the guest has the box's credentials mounted (`/run/box/secrets` holds an entry: a seal is only for a guest that is about to become an image) |
 | `internal` | a step failed, a proof failed, or the bundle carries no `lib/no-secrets.sh` |
 | `boxd_unavailable` | nothing listens on the socket |
 
@@ -186,6 +205,14 @@ answers "which bundle is this box on".
 credentials and configuration for it in `/run/box/secrets/<name>/`. `configured`
 is omitted when the binary is missing, because `available` already says
 everything. `reason` is the sentence a person reads when something is missing.
+
+`SealStatus`: `{"ok","reason"}` -- whether the seal's gate would let `boxctl seal`
+run in this box now. `ok` is false while a turn runs or a preparation is in
+progress, and `reason` is the sentence the seal would refuse with. That is the gate
+and not the whole seal: a guest with the box's credentials mounted is refused by
+the seal itself, when it runs (`invalid_argument` above). `box bake` reads this
+before it stops anything, because the question is about this box and the clone the
+seal runs in has a `boxd` of its own that knows nothing of the box's turn.
 
 `Session`: `{"id","executor","model","cwd","title","state","created_at","last_turn","executor_session","pid"}`
 with `state` one of `idle`, `running`, `starting`, `dead`, `closed`.
@@ -252,13 +279,11 @@ five seconds; `box top` and `box status` print it.
   because a process of a running turn cannot be told from the work it was asked to
   do. A scan that fails leaves it out and says so once in the log.
 
-`SealResult`: `{"image":ImageRecord,"steps":["..."],"files":N,"values":N}` -- what
-a seal wrote and what it did to get there. `ImageRecord` is
+`SealResult`: `{"image":ImageRecord,"steps":["..."]}` -- what a seal wrote and what
+it did to get there. `ImageRecord` is
 `{"schema","version","name","arch","parent","platform","recipe","sealed_at"}`,
 the document at `/etc/box/image.json`; `recipe` is base64 and empty for an image
-without one. `steps` are the lines the seal printed, in order; `files` is how many
-files its credential search read, `values` how many credential values it looked
-for.
+without one. `steps` are the lines the seal printed, in order.
 
 Session ids are short and stable, generated by boxd (`s-7f3a2c`).
 

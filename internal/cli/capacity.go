@@ -56,6 +56,10 @@ const (
 	boxDiskAttrPrefix    = "driver.box.disk."
 	boxDiskUsedSuffix    = ".used_bytes"
 	boxDiskVirtualSuffix = ".virtual_bytes"
+	// boxDiskFreeAttr is the space free on the filesystem the node writes its box
+	// disks to (the Lima home): a bake copies a whole disk there before it seals
+	// it, so this is the number that decides whether it can.
+	boxDiskFreeAttr = boxDiskAttrPrefix + "free_bytes"
 )
 
 // boxDisksFromAttributes reads the driver's per-box disk attributes of a node.
@@ -279,6 +283,9 @@ type NodeCapacity struct {
 	DiskUsedBytes int64 `json:"disk_used_bytes"`
 	// DiskVirtualBytes is the size they may grow to, in bytes.
 	DiskVirtualBytes int64 `json:"disk_virtual_bytes"`
+	// DiskFreeBytes is the space free on the filesystem the node writes its box
+	// disks to, as the box driver measures it: a bake copies a whole disk there.
+	DiskFreeBytes int64 `json:"disk_free_bytes"`
 	// Instances is every live Lima instance on the node, with its size and
 	// whether a running task owns it.
 	Instances []BoxInstance `json:"box_instances,omitempty"`
@@ -390,6 +397,7 @@ func BuildCapacity(node *api.Node, allocs []*api.Allocation) *NodeCapacity {
 		Driver:   driver,
 	}
 	cap.Disks, cap.DiskUsedBytes, cap.DiskVirtualBytes = boxDisksFromAttributes(attrs)
+	cap.DiskFreeBytes, _ = strconv.ParseInt(strings.TrimSpace(attrs[boxDiskFreeAttr]), 10, 64)
 	cap.Instances = boxInstancesFromAttributes(attrs)
 	var uncountedVCPUs int64
 	for _, inst := range cap.Instances {

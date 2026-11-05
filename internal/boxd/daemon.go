@@ -375,6 +375,7 @@ func (d *Daemon) Info(ctx context.Context) Info {
 		Platform:    readPlatform(d.cfg.platformDir()),
 		Sessions:    d.mgr.Count(),
 		CPUs:        runtime.NumCPU(),
+		Seal:        d.mgr.SealStatus(),
 	}
 	total, free := memoryMiB()
 	info.MemTotalMiB, info.MemFreeMiB = total, free

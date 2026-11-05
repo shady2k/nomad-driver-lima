@@ -146,6 +146,13 @@ func readLines(t testing.TB, path string) []string {
 	return out
 }
 
+// SealCalls returns every `boxctl seal` the fake ran, as
+// "instance<TAB>bytes-of-recipe<TAB>sha256-of-recipe".
+func (f *Fake) SealCalls(t testing.TB) []string {
+	t.Helper()
+	return readLines(t, f.path(".fake-seal.log"))
+}
+
 // ResetCalls forgets the recorded calls.
 func (f *Fake) ResetCalls(t testing.TB) {
 	t.Helper()

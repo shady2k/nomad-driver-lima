@@ -7,6 +7,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -44,6 +45,9 @@ type App struct {
 	// shorten it rather than wait twenty seconds.
 	GuestTimeout time.Duration
 
+	// errMu serialises the writes to ErrOut: a command that follows a task log
+	// prints from a goroutine while it notes its own steps.
+	errMu sync.Mutex
 	// indexURL is the image index location; main sets it from the
 	// environment, the tests set it directly.
 	indexURL string

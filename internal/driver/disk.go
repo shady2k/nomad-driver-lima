@@ -4,7 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"syscall"
+
+	"github.com/hashicorp/nomad/plugins/drivers"
+	"github.com/hashicorp/nomad/plugins/shared/structs"
 
 	"github.com/shady2k/nomad-driver-lima/internal/box"
 	"github.com/shady2k/nomad-driver-lima/internal/limactl"
@@ -26,6 +30,11 @@ const (
 	// the same.
 	diskTotalUsed    = diskAttributePrefix + "used_bytes"
 	diskTotalVirtual = diskAttributePrefix + "virtual_bytes"
+	// diskFreeBytes is the space free on the filesystem the node writes its box
+	// disks to (its Lima home). A bake copies a whole disk there before it seals
+	// it, so `box bake` reads this to refuse a copy that does not fit -- with a
+	// sentence, before it stops the box.
+	diskFreeBytes = diskAttributePrefix + "free_bytes"
 )
 
 // DiskUsage is the host footprint of one box disk.
@@ -88,4 +97,15 @@ func boxDiskUsages(instances []*limactl.Instance) []DiskUsage {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].BoxID < out[j].BoxID })
 	return out
+}
+
+// setDiskFree publishes the space free where this node writes its box disks.
+//
+// It is one statfs per fingerprint.
+func setDiskFree(fp *drivers.Fingerprint, limaHome string) {
+	free, err := box.FreeBytes(limaHome)
+	if err != nil {
+		return
+	}
+	fp.Attributes[diskFreeBytes] = structs.NewStringAttribute(strconv.FormatInt(free, 10))
 }
