@@ -429,6 +429,9 @@ log "removing the build account and the build artifacts from the guest"
 lima shell "$NAME" sudo bash -c '
   rm -rf /var/lib/box-image-build
   userdel -f -r builder >/dev/null 2>&1 || true
+  # Lima lingers the user it logs in as. Left behind, the entry makes logind fail
+  # its user enumeration at every boot of the image.
+  rm -f /var/lib/systemd/linger/builder
   getent passwd | awk -F: "\$3 >= 1000 && \$3 < 60000 {printf \"%s \", \$1}"
 ' > "$WORK/guest-users.txt" 2>/dev/null || true
 if grep -q . "$WORK/guest-users.txt"; then

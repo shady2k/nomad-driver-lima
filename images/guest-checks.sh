@@ -158,6 +158,8 @@ for unit in apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service;
 done
 check "needrestart leaves boxd alone" "present" \
   "$(grep -q 'boxd' /etc/needrestart/conf.d/box.conf 2>/dev/null && echo present || echo missing)"
+check "logind has no lingering user that does not exist" "absent" \
+  "$([[ -e /var/lib/systemd/linger/builder ]] && echo present || echo absent)"
 
 # --- the guest booted ---------------------------------------------------------
 printf '\n== the guest\n'
