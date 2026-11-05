@@ -329,12 +329,11 @@ func boxRecordStored(job *api.Job, doc boxSpecDocument, volume *api.HostVolumeSt
 		rec.VolumeCapacityBytes = volume.CapacityBytes
 		rec.NodeID = volume.NodeID
 	}
-	switch {
-	case volume == nil:
+	if volume == nil {
 		rec.State = "gone"
 		rec.Note = fmt.Sprintf("the disk of the box is gone: there is no volume %s, and only the description in "+
 			"the variable %s is left; `box rm %s --yes` removes it", BoxVolumeName(rec.ID), BoxSpecVariable(rec.ID), rec.ID)
-	default:
+	} else {
 		rec.Note = fmt.Sprintf("the box is stopped: Nomad no longer has its job, and its description is in the "+
 			"variable %s; `box start %s` runs it again on the same disk", BoxSpecVariable(rec.ID), rec.ID)
 	}

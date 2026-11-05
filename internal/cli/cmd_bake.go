@@ -589,7 +589,7 @@ func (a *App) latestProjectImage(ctx context.Context, named string) (*ImageArtif
 	}
 	for i := range drafts {
 		draft := drafts[i].Artifact()
-		if draft == draft && (draft.Version == named || draft.Name == named) {
+		if draft.Version == named || draft.Name == named {
 			add(draft)
 		}
 	}

@@ -570,7 +570,7 @@ func TestClientSealStreamsTheSteps(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go d.Serve(ctx)
+	go func() { _ = d.Serve(ctx) }()
 	t.Cleanup(d.shutdown)
 	waitForSocket(t, g.cfg.Socket)
 

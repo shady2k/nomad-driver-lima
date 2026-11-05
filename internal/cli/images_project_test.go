@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -225,7 +226,7 @@ func TestStoreSetAndShow(t *testing.T) {
 
 	require.Equal(t, ExitOK, ta.run(t, "store", "set", "--url", "https://store.example.com/",
 		"--from-file", tokenFile), ta.errOut.String())
-	v, err := ta.cluster.VariableRead(nil, boxStoreVariable)
+	v, err := ta.cluster.VariableRead(context.Background(), boxStoreVariable)
 	require.NoError(t, err)
 	require.Equal(t, "https://store.example.com", v.Items["url"], "the trailing slash goes")
 	require.Equal(t, "a-store-token", v.Items["token"])
@@ -247,7 +248,7 @@ func TestStoreSetAndShow(t *testing.T) {
 	ta.errOut.Reset()
 	require.Equal(t, ExitOK, ta.run(t, "store", "set", "--url", "https://store.example.com",
 		"--template", templateFile), ta.errOut.String())
-	v, err = ta.cluster.VariableRead(nil, boxStoreVariable)
+	v, err = ta.cluster.VariableRead(context.Background(), boxStoreVariable)
 	require.NoError(t, err)
 	_, plain := v.Items["token"]
 	require.False(t, plain, "a template replaces the plain item: one token, one way")
@@ -381,4 +382,15 @@ func (ta *testApp) drafts(t *testing.T) []DraftImage {
 	drafts, err := ta.nodeDrafts(t.Context())
 	require.NoError(t, err)
 	return drafts
+}
+
+// The tenth bake of a project is newer than the ninth.
+func TestProjectVersionsOrderByNumber(t *testing.T) {
+	if !versionLess("proj-9", "proj-10") {
+		t.Fatal("proj-10 must be newer than proj-9")
+	}
+	next, err := NextImageVersion("proj", []string{"proj-9", "proj-10"})
+	if err != nil || next != "proj-11" {
+		t.Fatalf("next = %q, %v; want proj-11", next, err)
+	}
 }
