@@ -14,6 +14,8 @@
 //	"hang"          never finish until cancelled
 //	"crash"         emit a tool call, then exit 3 mid-turn
 //	"fail"          answer the prompt with a JSON-RPC error
+//	"leave-bg"      start "sh -c 'sleep 300 & wait'" in the background, answer,
+//	                and leave it running: the tool that outlives its turn
 //	"say:<text>"    answer with <text>
 //	anything else   echo the prompt back
 //
@@ -28,6 +30,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -311,6 +314,17 @@ func (a *agent) turn(m rpcMsg) {
 		a.stream("done")
 		a.reply(m.ID, map[string]any{"stopReason": "end_turn"})
 		return
+	case strings.Contains(text, "leave-bg"):
+		// A tool call that starts something which outlives the answer: the
+		// command runs here as the executor's child, as a tool's command does,
+		// and nothing waits for it after the turn.
+		if err := a.leaveRunning(); err != nil {
+			a.replyErr(m.ID, -32603, "fakeacp: "+err.Error())
+			return
+		}
+		a.stream("started it in the background")
+		a.reply(m.ID, map[string]any{"stopReason": "end_turn"})
+		return
 	case strings.Contains(text, "tool"):
 		a.stream("let me look")
 		a.update(map[string]any{
@@ -340,6 +354,19 @@ func (a *agent) turn(m rpcMsg) {
 	}
 	a.stream("echo: " + text)
 	a.reply(m.ID, map[string]any{"stopReason": "end_turn"})
+}
+
+// leaveRunning starts the background command the test looks for: a shell that
+// keeps a sleep alive for five minutes under it.
+func (a *agent) leaveRunning() error {
+	cmd := exec.Command("/bin/sh", "-c", "sleep 300 & wait")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	fmt.Fprintf(os.Stderr, "fakeacp: left a background command running, pid %d\n", cmd.Process.Pid)
+	return nil
 }
 
 // stream emits one assistant message chunk.

@@ -326,6 +326,15 @@ description - a box made before boxes kept one - is shown as `orphan`: `box rm
 One box in detail: state, task events (default 10), the platform bundle it
 mounts, the guest and its executors, the sessions, the disk.
 
+When processes are running in the guest and no turn is in progress in any
+session, the guest's block carries one line for them: `12 work process(es) are
+running with no turn in progress: cc1 -c big.c (pid 341, 3h2m, 2 children,
+1120.4s CPU); ...`. They are what an earlier turn, an earlier `boxd` or a person
+left running, and what the box's sessions do not account for: a box can be busy
+with every session idle. The field is `leftover` under `--json`
+(`{"count","processes","more"}`). While a turn runs the line is not printed at
+all: a process of a running turn cannot be told from the work it was asked to do.
+
 The guest is asked with a 20 second bound. A guest that does not answer - what a
 guest out of memory does - costs one line ("the guest does not answer (no reply in
 20s): ...", `guest_error` under `--json`) instead of the status: everything Nomad
@@ -448,6 +457,20 @@ avg10), the disk's use, and the three processes with the most resident memory.
 `-f` prints it again every five seconds; `box status` shows the same line as
 `usage`.
 
+Under the summary line it prints, without needing a flag:
+
+- the busiest processes, five of them, each with its pid, the share of one core
+  it used since boxd's last sample, the memory it holds and its command cut
+  short: a summary line alone says the box is busy and not what makes it busy;
+- a process that has used a whole core for ten minutes or more, with the pid and
+  how long: `systemd-logind (pid 851) has used a whole core for 4h12m`. boxd also
+  writes that to the journal once, and says when it stops. It is what the box
+  did, not a fault: a long compile is a whole core for ten minutes too;
+- the work running with **no turn in progress** (see `box status`).
+
+`--json` carries all three as `usage.processes`, `usage.hogs` and
+`usage.leftover` (`docs/boxctl-contract.md`, `Usage`).
+
 A guest that does not answer within 20 seconds fails the command with exit code
 `4` and a sentence that says what to look at (`box logs`, `box status`); under
 `--json` the document carries `guest_error`. `box session ls` behaves the same
@@ -476,14 +499,46 @@ Stops the executor process and keeps the history.
 Starts one turn and returns at once. A second send while a turn runs answers
 `busy`.
 
-### `box wait <id> <session> [--timeout D] [--turn N]`
+### `box wait <id> <session> [--timeout D] [--turn N] [--json]`
 
 Waits for the turn and prints its final text. On timeout it exits 4 and the turn
 keeps running. `--turn N` waits for an older turn instead of the running one.
 
+When the turn ends with processes still running in the box, the warning comes
+after the text, on stderr, and the exit code stays the turn's:
+
+```
+the turn ended, but these processes it may have started are still running in the box:
+  go build ./... (pid 123, 4m10s, 4 children, 12.5s CPU)
+  and 2 more
+`box top dev1` shows what the guest is doing and `box run dev1 -- ps -ef` lists the processes;
+when they are done, `box send dev1 s-7f3a2c` starts the next turn, or ask the session to wait for them.
+```
+
+**A done turn with processes still running is not finished work.** The executor
+ended its turn (ACP `end_turn`) and the command a tool started did not: taking
+the answer as the result of a build, a test run or a server start that is still
+going is how a coordinator reports work that was never done. Look before you go
+on, and say what you saw. `--json` carries the same list as `still_running`
+(`docs/boxctl-contract.md`, `Turn`); nothing is printed on stderr then, and the
+field is missing when the turn left nothing running.
+
 ### `box events <id> <session> [--since N] [--limit N] [-f]`
 
 The session's event feed. `--since` is a resumable cursor; `-f` follows it.
+
+One call returns at most `--limit` events (200). When there are more, the command
+says so on stderr and gives the cursor that continues them:
+
+```
+2 of 9 events, more with --since 3
+```
+
+That line is not an error: the feed is longer than one call, and `--since` with
+that number reads the rest. `--json` carries the same fact as one more document
+on stdout, after the events: `{"more":true,"next_since":3}`. `--since` reads that
+event again, so reading by pages gives every event once and loses none at a page
+boundary.
 
 ### `box cancel <id> <session>`
 

@@ -286,14 +286,19 @@ func cmdEvents(ctx context.Context, c *Client, args []string, out, errw io.Write
 	if fs.NArg() > 0 {
 		return printError(out, errw, Errorf(CodeInvalid, "unexpected argument %q", fs.Arg(0)))
 	}
-	evs, next, err := c.Events(ctx, id, *since, *limit)
+	page, err := c.Events(ctx, id, *since, *limit)
 	if err != nil {
 		return printError(out, errw, err)
 	}
-	if evs == nil {
-		evs = []Event{}
+	if page.Events == nil {
+		page.Events = []Event{}
 	}
-	return printJSON(out, map[string]any{"events": evs, "next": next})
+	if page.More {
+		// Say that this is a page and not the feed: a caller that reads the
+		// limit as the end of the events takes a busy session for a quiet one.
+		fmt.Fprintf(errw, "%d of %d events, more with --since %d\n", len(page.Events), page.Total, page.Next)
+	}
+	return printJSON(out, map[string]any{"events": page.Events, "next": page.Next, "total": page.Total, "more": page.More})
 }
 
 func cmdCancel(ctx context.Context, c *Client, args []string, out, errw io.Writer) int {

@@ -46,6 +46,9 @@ type DaemonConfig struct {
 	// "journalctl"); a test names its own, or a guest images without fstrim.
 	Fstrim     string
 	Journalctl string
+	// ProcRoot is where the guest's process table is read (default /proc); a
+	// test points it at a tree of its own (stillrunning.go).
+	ProcRoot string
 	// ProgressEvery is how long a running turn may be silent in the journal
 	// before it writes a progress line (default two minutes).
 	ProgressEvery time.Duration
@@ -106,6 +109,16 @@ func (c DaemonConfig) fstrimBin() string {
 	return "fstrim"
 }
 
+// procRoot is where the guest's process table is read (default /proc). A test
+// gives a tree of its own, so a scan reads what the test put there and not
+// whatever else the machine runs.
+func (c DaemonConfig) procRoot() string {
+	if c.ProcRoot != "" {
+		return c.ProcRoot
+	}
+	return "/proc"
+}
+
 // journalctlBin is the binary the seal rotates and vacuums the journal with.
 func (c DaemonConfig) journalctlBin() string {
 	if c.Journalctl != "" {
@@ -160,6 +173,12 @@ type Manager struct {
 
 	// prep is the box's preparation (prepare.go); sessions wait for it.
 	prep *preparer
+
+	// stillRunningErr makes a scan of the guest's process table (stillrunning.go)
+	// say its failure once, not once per turn, and leftoverErr the same for the
+	// work running with no turn in progress.
+	stillRunningErr sync.Once
+	leftoverErr     sync.Once
 
 	// sealed is set by a seal: the box is an image now, so the daemon keeps no
 	// session and starts none. Without it, the shutdown that follows the seal
@@ -654,6 +673,24 @@ func (m *Manager) lookupSession(id string) *session {
 // number matches "session ls").
 func (m *Manager) Count() int { return len(m.List()) }
 
+// TurnInProgress reports whether any session of this box is running a turn. It
+// is what decides whether boxd can tell the work left in the guest apart from
+// the work a turn is doing (stillrunning.go).
+func (m *Manager) TurnInProgress() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range m.order {
+		s := m.sessions[id]
+		s.mu.Lock()
+		busy := s.busy
+		s.mu.Unlock()
+		if busy {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) lookup(id string) (*session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -808,12 +845,17 @@ func (s *session) finishTurn(ts *turnState, state, stopReason, text, errMsg stri
 			stopReason = "cancelled"
 		}
 		ended := s.m.cfg.now()
+		// What the turn left running is measured at the moment it ended, and
+		// outside every lock: a scan that fails says nothing and never fails the
+		// turn (stillrunning.go).
+		still := s.m.stillRunningAt(ts.StartedAt, ended)
 		s.mu.Lock()
 		ts.State = state
 		ts.StopReason = stopReason
 		ts.Text = text
 		ts.Error = errMsg
 		ts.EndedAt = &ended
+		ts.StillRunning = still
 		s.busy = false
 		if s.cur == ts {
 			s.cur = nil
@@ -854,6 +896,13 @@ func (s *session) finishTurn(ts *turnState, state, stopReason, text, errMsg stri
 			"state":       state,
 			"stop_reason": stopReason,
 		})
+		// One line after the turn's own: what it left running in the guest. The
+		// turn stays what the executor said it is; this says what was seen, so
+		// a person reads "a done turn" and "a build still running" together.
+		if still != nil {
+			s.log.journalLine(cur.Turn, fmt.Sprintf("finished, and %d process(es) it started are still running", still.Count()),
+				strings.Join(still.Lines(), "; "))
+		}
 		s.m.persist(s)
 		close(ts.done)
 	})
@@ -909,10 +958,17 @@ func (s *session) findTurnLocked(turn int) *turnState {
 	return nil
 }
 
-// Events returns the session's event feed after a cursor.
+// Events returns the session's event feed from a cursor.
 func (m *Manager) Events(id string, since int64, limit int) ([]Event, int64, error) {
+	events, next, _, err := m.EventsPage(id, since, limit)
+	return events, next, err
+}
+
+// EventsPage is Events with the number of events there are after the cursor, so
+// a caller can say that it was given a page of them and not the whole feed.
+func (m *Manager) EventsPage(id string, since int64, limit int) ([]Event, int64, int, error) {
 	if _, err := m.lookup(id); err != nil {
-		return nil, since, err
+		return nil, since, 0, err
 	}
 	return m.store.ReadEvents(id, since, limit)
 }

@@ -270,12 +270,36 @@ func (a *App) cmdWait(ctx context.Context, args []string) error {
 			a.note("the agent ended the turn without a final message; `box events %s %s` shows what it did", id, sessionID)
 		}
 	}
+	// What the turn left running is said after the turn's own words, and it
+	// changes neither the turn's state nor the exit code below: when the turn
+	// ended is the executor's decision.
+	a.noteStillRunning(turn.StillRunning, id, sessionID)
 	// A script tells a failed turn from a good one by the exit code alone.
 	if turn.State != "done" {
 		return errorf("the turn %d of session %s ended %s%s; `box events %s %s` shows what happened",
 			turn.Turn, sessionID, dash(turn.State), turnSuffix(turn), id, sessionID)
 	}
 	return nil
+}
+
+// noteStillRunning says what a finished turn left running in the box, how to
+// look at it and how to go on.
+//
+// A done turn with processes still running is not finished work: the executor
+// ended its turn, and the build or the server it started did not. The wording
+// is boxd's -- these are processes it saw, not a verdict on the work -- and
+// the exit code stays the turn's.
+func (a *App) noteStillRunning(still *StillRunning, box, sessionID string) {
+	if still == nil || still.Count() == 0 {
+		return
+	}
+	a.note("the turn ended, but these processes it may have started are still running in the box:")
+	for _, line := range still.Lines() {
+		a.note("  %s", line)
+	}
+	a.note("`box top %s` shows what the guest is doing and `box run %s -- ps -ef` lists the processes;", box, box)
+	a.note("when they are done, `box send %s %s` starts the next turn, or ask the session to wait for them.",
+		box, sessionID)
 }
 
 func turnSuffix(turn *Turn) string {
@@ -308,25 +332,52 @@ func (a *App) cmdEvents(ctx context.Context, args []string) error {
 	}
 	cursor := *since
 	for {
-		events, next, err := client.Events(ctx, sessionID, EventsOptions{Since: cursor, Limit: *limit})
+		page, err := client.Events(ctx, sessionID, EventsOptions{Since: cursor, Limit: *limit})
 		if err != nil {
 			return wrapf(err, "the guest could not read the events of session %s", sessionID)
 		}
-		for _, event := range events {
+		for _, event := range page.Events {
 			if err := a.printEvent(event); err != nil {
 				return err
 			}
 		}
-		if next > cursor {
-			cursor = next
+		if page.Next > cursor {
+			cursor = page.Next
 		}
 		if !*follow {
+			// A page is not the feed. Saying so is what keeps a limit from
+			// reading as a hang: the next call, with --since, is the rest.
+			a.noteMoreEvents(page, cursor)
 			return nil
 		}
 		if err := a.sleep(ctx, 2*time.Second); err != nil {
 			return nil
 		}
 	}
+}
+
+// noteMoreEvents says that the events printed were a page of the feed and not
+// all of it, with the cursor that continues them.
+//
+// An agent that reads 200 events and stops takes the end of the page for the end
+// of the feed and waits for events that are already there. With --json the same
+// fact is the last document on stdout, one line after the events; a reader that
+// lives on the text reads it on stderr.
+func (a *App) noteMoreEvents(page EventPage, cursor int64) {
+	if !page.More {
+		return
+	}
+	if a.JSON {
+		// One line, like the events before it: a document per line is what a
+		// reader of a JSON stream expects.
+		data, err := json.Marshal(map[string]any{"next_since": cursor, "more": true})
+		if err != nil {
+			return
+		}
+		fmt.Fprintln(a.Out, string(data))
+		return
+	}
+	a.note("%d of %d events, more with --since %d", len(page.Events), page.Total, cursor)
 }
 
 // printEvent writes one event: a JSON object per line with --json, otherwise a

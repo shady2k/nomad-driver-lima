@@ -96,20 +96,31 @@ func TestBoxctlEventsCursor(t *testing.T) {
 		  {"seq":5,"ts":"2026-11-02T10:00:01Z","session":"s-1","turn":1,"kind":"tool","summary":"read a file"}
 		],"next":6}`,
 	}, nil)
-	events, next, err := boxctl.Events(context.Background(), "s-1", EventsOptions{Since: 4, Limit: 50})
+	page, err := boxctl.Events(context.Background(), "s-1", EventsOptions{Since: 4, Limit: 50})
 	require.NoError(t, err)
-	require.Len(t, events, 2)
-	require.Equal(t, int64(5), events[1].Seq)
-	require.Equal(t, "tool", events[1].Kind)
-	require.Equal(t, int64(6), next)
+	require.Len(t, page.Events, 2)
+	require.Equal(t, int64(5), page.Events[1].Seq)
+	require.Equal(t, "tool", page.Events[1].Kind)
+	require.Equal(t, int64(6), page.Next)
+	require.False(t, page.More, "a whole feed is not a page of one")
 
 	// Without "next" the cursor is the highest sequence number plus one.
 	boxctl, _ = guestFor(t, map[string]string{
 		"events s-1": `{"events":[{"seq":9,"kind":"turn_end","summary":"done"}]}`,
 	}, nil)
-	_, next, err = boxctl.Events(context.Background(), "s-1", EventsOptions{})
+	page, err = boxctl.Events(context.Background(), "s-1", EventsOptions{})
 	require.NoError(t, err)
-	require.Equal(t, int64(10), next)
+	require.Equal(t, int64(10), page.Next)
+
+	// A page says how much of the feed it is.
+	boxctl, _ = guestFor(t, map[string]string{
+		"events s-1 --limit 2": `{"events":[{"seq":1},{"seq":2}],"next":3,"total":9,"more":true}`,
+	}, nil)
+	page, err = boxctl.Events(context.Background(), "s-1", EventsOptions{Limit: 2})
+	require.NoError(t, err)
+	require.Len(t, page.Events, 2)
+	require.Equal(t, 9, page.Total)
+	require.True(t, page.More)
 }
 
 func TestBoxctlCancelAndClose(t *testing.T) {

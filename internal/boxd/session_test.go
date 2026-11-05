@@ -1,10 +1,13 @@
 package boxd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -506,4 +509,136 @@ func readArgvLines(t *testing.T, m *Manager, id string) []string {
 	}
 	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
 	return lines
+}
+
+// TestTurnReportsWhatItLeftRunning: a turn whose executor left a command
+// running says so, and the turn itself stays what the executor said it was --
+// done, with its own stop reason. The scan is the boxd one, against this
+// machine's /proc, so the report holds whatever else the machine runs; what it
+// must hold is the background command the fake executor started.
+func TestTurnReportsWhatItLeftRunning(t *testing.T) {
+	cfg := testConfig(t)
+	journal := &strings.Builder{}
+	cfg.Journal = journal
+	m := newManager(t, cfg)
+	s := mustSession(t, m, "prime", "fake/model-1")
+	if _, err := m.Send(s.ID, "leave-bg"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	done := waitTurn(t, m, s.ID, 1)
+	if done.State != TurnDone || done.StopReason != "end_turn" {
+		t.Fatalf("turn = %q/%q (%s), want done/end_turn: a report must not change the turn", done.State, done.StopReason, done.Error)
+	}
+	if done.StillRunning == nil || len(done.StillRunning.Processes) == 0 {
+		t.Fatal("the turn left a background command running and reported nothing")
+	}
+	var found *StillRunningProcess
+	for i, p := range done.StillRunning.Processes {
+		if strings.Contains(p.Command, "sleep 300") {
+			found = &done.StillRunning.Processes[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("the background command is not in the report: %+v", done.StillRunning.Processes)
+	}
+	// `sh -c 'sleep 300 & wait'` and the sleep under it are one line with one
+	// child, not two lines.
+	if found.Children != 1 {
+		t.Fatalf("line = %q, want the sleep counted as its child", found.Line())
+	}
+	if found.Pid == 0 || found.AgeSeconds < 0 || found.CPUSeconds < 0 {
+		t.Fatalf("line = %+v, want a pid and a measurement", found)
+	}
+	// The executor's own program is the box, not the work.
+	for _, p := range done.StillRunning.Processes {
+		if strings.Contains(p.Command, "fakeacp") {
+			t.Fatalf("the report names the executor itself: %+v", done.StillRunning.Processes)
+		}
+	}
+	// The journal says it on its own line, after the turn's own line.
+	lines := strings.Split(strings.TrimSpace(journal.String()), "\n")
+	finished := -1
+	for i, line := range lines {
+		if strings.Contains(line, "turn 1") && strings.Contains(line, " finished: ") {
+			finished = i
+		}
+	}
+	if finished < 0 {
+		t.Fatalf("no finished line in the journal:\n%s", journal.String())
+	}
+	if finished+1 >= len(lines) {
+		t.Fatalf("the finished line has nothing after it:\n%s", journal.String())
+	}
+	next := lines[finished+1]
+	// Whatever else this machine ran in the same cgroup is in the count; what
+	// matters here is that the line is the one after the turn's and that it
+	// names the background command.
+	if !regexp.MustCompile(`^session \S+ turn 1: finished, and \d+ process\(es\) it started are still running: `).MatchString(next) {
+		t.Fatalf("the line after the turn's is %q", next)
+	}
+	if !strings.Contains(next, "sleep 300") {
+		t.Fatalf("the line after the turn's does not name the command: %q", next)
+	}
+	// The turn is persisted like every other turn: the field survives a reload.
+	if b, err := os.ReadFile(filepath.Join(cfg.StateDir, "state.json")); err != nil {
+		t.Fatalf("read state: %v", err)
+	} else if !strings.Contains(string(b), `"still_running"`) {
+		t.Fatalf("state.json does not carry still_running:\n%s", b)
+	}
+	// Nothing is left behind for the rest of the run.
+	t.Cleanup(func() {
+		_ = syscall.Kill(-found.Pid, syscall.SIGKILL)
+		_ = syscall.Kill(found.Pid, syscall.SIGKILL)
+	})
+}
+
+// TestTurnWithoutLeftoversHasNoField: a turn that leaves nothing running has no
+// field at all, so a person reads "done" and nothing else. The scan reads a tree
+// of this test's own, because the /proc of a shared machine has other work in it
+// and this is about the turn that started none.
+func TestTurnWithoutLeftoversHasNoField(t *testing.T) {
+	cfg := testConfig(t)
+	f := newFakeProc(t, time.Now().UTC())
+	cfg.ProcRoot = f.root
+	journal := &strings.Builder{}
+	cfg.Journal = journal
+	m := newManager(t, cfg)
+	s := mustSession(t, m, "prime", "fake/model-1")
+	if _, err := m.Send(s.ID, "reply with pong"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	done := waitTurn(t, m, s.ID, 1)
+	if done.State != TurnDone {
+		t.Fatalf("turn = %q (%s)", done.State, done.Error)
+	}
+	if done.StillRunning != nil {
+		t.Fatalf("a turn that left nothing reports %+v", done.StillRunning)
+	}
+	if strings.Contains(journal.String(), "still running") {
+		t.Fatalf("the journal says something is still running:\n%s", journal.String())
+	}
+	// A turn whose end could not be scanned keeps the field empty too, and says
+	// so once in the log.
+	cfg2 := testConfig(t)
+	cfg2.ProcRoot = filepath.Join(t.TempDir(), "no-such-proc")
+	var logged []string
+	cfg2.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	m2 := newManager(t, cfg2)
+	s2 := mustSession(t, m2, "prime", "fake/model-1")
+	if _, err := m2.Send(s2.ID, "reply with pong"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if done := waitTurn(t, m2, s2.ID, 1); done.State != TurnDone || done.StillRunning != nil {
+		t.Fatalf("turn with a failed scan = %q/%+v, want done and no report", done.State, done.StillRunning)
+	}
+	var failures []string
+	for _, line := range logged {
+		if strings.Contains(line, "process table") {
+			failures = append(failures, line)
+		}
+	}
+	if len(failures) != 1 {
+		t.Fatalf("the failed scan was logged %d times, want once: %v", len(failures), logged)
+	}
 }

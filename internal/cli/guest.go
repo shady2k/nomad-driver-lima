@@ -205,6 +205,100 @@ type GuestUsage struct {
 	DiskTotalMiB   uint64         `json:"disk_total_mib"`
 	DiskFreeMiB    uint64         `json:"disk_free_mib"`
 	Top            string         `json:"top,omitempty"`
+	// Processes are the guest's busiest processes by CPU, most first: box top
+	// prints them without a flag. A boxd that cannot read the process table
+	// leaves them out.
+	Processes []GuestProcess `json:"processes,omitempty"`
+	// Hogs are the processes that have used a whole core for ten minutes.
+	Hogs []GuestHog `json:"hogs,omitempty"`
+	// Leftover is the work running with no turn in progress; a boxd that does
+	// not report it leaves it out.
+	Leftover *Leftover `json:"leftover,omitempty"`
+}
+
+// GuestProcess is one of the guest's busiest processes, as box top shows it: the
+// share of one core it used since boxd's last sample, the memory it holds and
+// what it runs.
+type GuestProcess struct {
+	Pid        int     `json:"pid"`
+	Command    string  `json:"command"`
+	CPUPercent float64 `json:"cpu_percent"`
+	MemMiB     uint64  `json:"mem_mib"`
+}
+
+// Line is one process the way box top prints it.
+func (p GuestProcess) Line() string {
+	return fmt.Sprintf("pid %d  %.1f%% of a core  %d MiB  %s", p.Pid, p.CPUPercent, p.MemMiB, p.Command)
+}
+
+// GuestHog is a process that has used a whole core for ten minutes or more, as
+// boxd measured it. It is what a box that lost a core says, and only that: a long
+// compile is a whole core held for ten minutes too.
+type GuestHog struct {
+	Pid        int     `json:"pid"`
+	Command    string  `json:"command"`
+	CPUPercent float64 `json:"cpu_percent"`
+	ForSeconds int     `json:"for_seconds"`
+}
+
+// Line says what was seen: who holds a core, and for how long.
+func (h GuestHog) Line() string {
+	return fmt.Sprintf("%s (pid %d) has used a whole core for %s", h.Command, h.Pid,
+		span(time.Duration(h.ForSeconds)*time.Second))
+}
+
+// span is a span the way a person reads it: minutes for the minutes, and
+// seconds only below a minute.
+func span(d time.Duration) string {
+	if d < time.Minute {
+		return d.Round(time.Second).String()
+	}
+	d = d.Round(time.Minute)
+	h, m := int(d/time.Hour), int(d%time.Hour/time.Minute)
+	if h > 0 {
+		return fmt.Sprintf("%dh%dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
+}
+
+// Leftover is what the guest is running with no turn in progress: work an earlier
+// turn, an earlier boxd or a person started, and that nothing is waiting for. boxd
+// reports it only while no session runs a turn, and leaves it out otherwise.
+type Leftover struct {
+	// Count is how many work processes are alive, the ones listed and the rest.
+	Count int `json:"count"`
+	// Processes are the heaviest of them, in the same lines a turn's report uses.
+	Processes []StillRunningProcess `json:"processes"`
+	// More is how many processes the lines leave out.
+	More int `json:"more,omitempty"`
+}
+
+// leftoverShown is how many leftover processes the one line of box status and box
+// top names: the line says there are more, and the rest is the count.
+const leftoverShown = 3
+
+// Summary is the one line box status and box top print when work is running in
+// the guest that no turn is waiting for.
+func (l *Leftover) Summary() string {
+	if l == nil || l.Count == 0 {
+		return ""
+	}
+	shown := l.Processes
+	if len(shown) > leftoverShown {
+		shown = shown[:leftoverShown]
+	}
+	parts := make([]string, 0, len(shown))
+	for _, p := range shown {
+		parts = append(parts, p.Line())
+	}
+	s := fmt.Sprintf("%d work process(es) are running with no turn in progress", l.Count)
+	if len(parts) > 0 {
+		s += ": " + strings.Join(parts, "; ")
+	}
+	if rest := l.Count - len(shown); rest > 0 {
+		s += fmt.Sprintf("; and %d more", rest)
+	}
+	return s
 }
 
 // GuestPressure is how much of the last ten seconds the guest was stalled on
@@ -258,6 +352,65 @@ type Turn struct {
 	StopReason string `json:"stop_reason,omitempty"`
 	Text       string `json:"text,omitempty"`
 	Error      string `json:"error,omitempty"`
+	// StillRunning is what the turn left running in the guest; nil, and left out
+	// of the JSON, when there was nothing.
+	StillRunning *StillRunning `json:"still_running,omitempty"`
+}
+
+// StillRunning is what a finished turn left running in the box: one entry per
+// process at the top of its own tree or process group, and how many more there
+// were than the lines it holds.
+type StillRunning struct {
+	Processes []StillRunningProcess `json:"processes"`
+	More      int                   `json:"more,omitempty"`
+}
+
+// StillRunningProcess is one process a finished turn left running.
+type StillRunningProcess struct {
+	Pid        int     `json:"pid"`
+	Command    string  `json:"command"`
+	AgeSeconds int     `json:"age_seconds"`
+	CPUSeconds float64 `json:"cpu_seconds"`
+	Children   int     `json:"children"`
+}
+
+// Count is how many processes a turn left running.
+func (s *StillRunning) Count() int {
+	if s == nil {
+		return 0
+	}
+	return len(s.Processes) + s.More
+}
+
+// Line is one process the way a person reads it: what it runs, how long it has
+// run, how much CPU it used and how many processes are in its tree.
+func (p StillRunningProcess) Line() string {
+	parts := []string{
+		fmt.Sprintf("pid %d", p.Pid),
+		(time.Duration(p.AgeSeconds) * time.Second).String(),
+	}
+	if p.Children == 1 {
+		parts = append(parts, "1 child")
+	} else if p.Children > 1 {
+		parts = append(parts, fmt.Sprintf("%d children", p.Children))
+	}
+	parts = append(parts, fmt.Sprintf("%.1fs CPU", p.CPUSeconds))
+	return fmt.Sprintf("%s (%s)", p.Command, strings.Join(parts, ", "))
+}
+
+// Lines are the lines of a report, ending with "and N more" when it was cut.
+func (s *StillRunning) Lines() []string {
+	if s == nil {
+		return nil
+	}
+	out := make([]string, 0, len(s.Processes)+1)
+	for _, p := range s.Processes {
+		out = append(out, p.Line())
+	}
+	if s.More > 0 {
+		out = append(out, fmt.Sprintf("and %d more", s.More))
+	}
+	return out
 }
 
 // Event is one line of a session's activity stream.
@@ -446,8 +599,20 @@ type EventsOptions struct {
 	Limit int
 }
 
-// Events returns the events of a session and the next sequence number.
-func (b *Boxctl) Events(ctx context.Context, id string, opts EventsOptions) ([]Event, int64, error) {
+// EventPage is one page of a session's event feed: the events from the cursor,
+// where to resume, and whether the feed holds more than this page.
+type EventPage struct {
+	Events []Event
+	Next   int64
+	// Total is how many events there are from the cursor, returned and left.
+	Total int
+	// More says that the feed holds more events than this page. A boxd that does
+	// not report it leaves it false, which reads as "nothing more".
+	More bool
+}
+
+// Events returns the events of a session from a cursor and the next one.
+func (b *Boxctl) Events(ctx context.Context, id string, opts EventsOptions) (EventPage, error) {
 	args := []string{"events", id}
 	if opts.Since > 0 {
 		args = append(args, "--since", strconv.FormatInt(opts.Since, 10))
@@ -457,24 +622,29 @@ func (b *Boxctl) Events(ctx context.Context, id string, opts EventsOptions) ([]E
 	}
 	out, err := b.call(ctx, nil, args...)
 	if err != nil {
-		return nil, 0, err
+		return EventPage{}, err
 	}
 	resp, err := decodeJSON[struct {
 		Events []Event `json:"events"`
 		Next   int64   `json:"next"`
+		Total  int     `json:"total"`
+		More   bool    `json:"more"`
 	}](out, "boxctl events")
 	if err != nil {
-		return nil, 0, err
+		return EventPage{}, err
 	}
-	next := resp.Next
-	if next == 0 {
-		for _, event := range resp.Events {
-			if event.Seq >= next {
-				next = event.Seq + 1
+	page := EventPage{Events: resp.Events, Next: resp.Next, Total: resp.Total, More: resp.More}
+	if page.Next == 0 {
+		for _, event := range page.Events {
+			if event.Seq >= page.Next {
+				page.Next = event.Seq + 1
 			}
 		}
 	}
-	return resp.Events, next, nil
+	if page.Total < len(page.Events) {
+		page.Total = len(page.Events)
+	}
+	return page, nil
 }
 
 // Cancel cancels the running turn of a session.

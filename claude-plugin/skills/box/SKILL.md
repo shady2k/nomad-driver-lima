@@ -130,6 +130,11 @@ box's environment an image instead of repeating it.
   scripts around a box, and do not poll `box status` in a loop.
 - **`box wait` exits 1 when the turn ended in an error or was cancelled**, with
   the turn's error; 0 means the turn is done.
+- **A done turn with processes still running is not finished work.** `box wait`
+  says so on stderr when the turn left a command running in the box (a build, a
+  test run, a server); the exit code stays 0, because when its turn ends is the
+  executor's decision. Look before you take the result or start the next step:
+  `box top <id>`, `box run <id> -- ps -ef`, and wait for them.
 - **One turn at a time per session.** A `busy` answer means a turn is running:
   `box wait` for it, or `box cancel` to stop it; do not send a second prompt and
   do not restart the box.
@@ -231,6 +236,11 @@ starts, so no key lands on a disk.
   appear as `prime log ...` lines, a failed download names its URL. Retrying
   blind repeats the same wait; a closed session's background setup may still
   be running.
+- **Kill a process in a box by pid, not by pattern.** `pkill -f pattern` inside a
+  `box run` matches the command line that is running it (the pattern is in it) and
+  kills its own `box run`; `box top <id>` or `box run <id> -- ps -ef` gives the
+  pid, and `kill <pid>` is exact. When only a pattern will do, bracket one
+  character so the pattern does not match itself: `pkill -f '[g]o build'`.
 - **`box run` returns when its command exits, and takes the command's output
   with it.** A background process left writing to that output dies of SIGPIPE, so
   start a daemon detached, with its output in a file:
