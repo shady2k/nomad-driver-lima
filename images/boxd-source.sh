@@ -36,6 +36,8 @@
 # -trimpath, and the version stamped into internal/version.Version (a release
 # asset already carries the version release.yml stamped, which is the tag).
 set -euo pipefail
+# shellcheck source=images/portable.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
@@ -205,7 +207,7 @@ fi
 
 BOX_SHA=$(sha256_of "$BOX_IN")
 [[ -s $BOX_IN ]] || die "the resolved boxd binary is empty"
-log "boxd $BOX_IN ($(stat -c %s "$BOX_IN") bytes, sha256 $BOX_SHA)"
+log "boxd $BOX_IN ($(file_size "$BOX_IN") bytes, sha256 $BOX_SHA)"
 
 # The record of the source. build.sh puts this into the image manifest and into
 # the image itself (/etc/box/image.json), so "which boxd is in this image" is
@@ -221,7 +223,7 @@ record = {
     "url": "${url:-}",
     "version": "$version",
     "sha256": "$BOX_SHA",
-    "size": $(stat -c %s "$BOX_IN"),
+    "size": $(file_size "$BOX_IN"),
     "dirty": "$([[ $dirty == true ]] && echo true || echo false)" == "true",
 }
 json.dump(record, open(sys.argv[1], "w"), indent=2, sort_keys=False)

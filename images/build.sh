@@ -90,6 +90,8 @@
 # by name through limactl under the explicit $LIMA_HOME of this build.
 
 set -euo pipefail
+# shellcheck source=images/portable.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
@@ -463,7 +465,7 @@ log "flattening $(basename "$DISK_FILE") into $(basename "$IMAGE_OUT")"
 mv "$IMAGE_OUT.tmp" "$IMAGE_OUT"
 ( cd "$OUT" && sha256sum "$(basename "$IMAGE_OUT")" > "$(basename "$SHA_OUT")" )
 SHA256=$(cut -d' ' -f1 "$SHA_OUT")
-SIZE=$(stat -c %s "$IMAGE_OUT")
+SIZE=$(file_size "$IMAGE_OUT")
 GUEST_VIRTUAL=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['virtual-size'])" "$WORK/disk-info.json")
 
 # --- manifest ----------------------------------------------------------------

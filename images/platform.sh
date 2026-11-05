@@ -59,6 +59,8 @@
 #
 # Nothing here publishes anything, and nothing kills a process.
 set -euo pipefail
+# shellcheck source=images/portable.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
@@ -124,7 +126,7 @@ BOX_ARCH=$ARCH
 # built_at: an input like any other, so that a rebuild gives the same bytes.
 if [[ -z $BUILT_AT ]]; then
   if [[ -n ${SOURCE_DATE_EPOCH:-} ]]; then
-    BUILT_AT=$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ) \
+    BUILT_AT=$(date_of "$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ) \
       || die "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH is not a number of seconds"
   else
     BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -427,7 +429,7 @@ mv "$ARCHIVE.part" "$ARCHIVE"
 ( cd "$OUT" && sha256sum "$(basename "$ARCHIVE")" > "$(basename "$ARCHIVE").sha256" ) \
   || die "cannot write the .sha256 of $ARCHIVE"
 SHA=$(cut -d' ' -f1 "$ARCHIVE.sha256")
-SIZE=$(stat -c %s "$ARCHIVE")
+SIZE=$(file_size "$ARCHIVE")
 [[ $SHA =~ ^[0-9a-f]{64}$ ]] || die "cannot hash $ARCHIVE"
 
 # The index entry, as one line on stdout: images/publish.sh --platform reads it,

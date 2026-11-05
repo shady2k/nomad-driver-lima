@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -293,7 +294,7 @@ func (c *BakeClone) verifyDisk() error {
 		target = filepath.Join(filepath.Dir(disk), target)
 	}
 	tmp := disk + ".box-copy"
-	if out, err := c.m.childCommand(context.Background(), "cp", "--sparse=always", target, tmp).CombinedOutput(); err != nil {
+	if out, err := c.m.childCommand(context.Background(), "cp", append(sparseCopyFlags(), target, tmp)...).CombinedOutput(); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("copy the disk of box %s into the clone %s: %w: %s", c.Source, c.Name, err, strings.TrimSpace(string(out)))
 	}
@@ -483,6 +484,15 @@ func (c *BakeClone) Stop(ctx context.Context, timeout time.Duration) error {
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// sparseCopyFlags keeps a thin disk thin: GNU cp on Linux, and an APFS clone on
+// macOS, whose cp has no --sparse.
+func sparseCopyFlags() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"-c"}
+	}
+	return []string{"--sparse=always"}
 }
 
 // Delete removes the clone: the instance directory with the copy of the disk

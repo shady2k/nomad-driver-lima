@@ -71,6 +71,8 @@
 # published to the same way.
 
 set -euo pipefail
+# shellcheck source=images/portable.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
@@ -354,14 +356,14 @@ upload_put() {
   code=$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 2 \
     "${CURL_AUTH[@]}" -X PUT --upload-file "$file" "$url" || true)
   case $code in
-    2*) printf 'PUT %s %s (%s bytes)\n' "$label" "$code" "$(stat -c %s "$file")"; return 0 ;;
+    2*) printf 'PUT %s %s (%s bytes)\n' "$label" "$code" "$(file_size "$file")"; return 0 ;;
     413)
-      log "the store refused $(stat -c %s "$file") bytes (HTTP 413); retrying $label in chunked form"
+      log "the store refused $(file_size "$file") bytes (HTTP 413); retrying $label in chunked form"
       code=$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 --retry-delay 2 \
         "${CURL_AUTH[@]}" -H 'Transfer-Encoding: chunked' \
         -X PUT -H "$BINARY_BODY" --data-binary @- "$url" < "$file" || true)
       case $code in
-        2*) printf 'PUT %s %s (chunked, %s bytes)\n' "$label" "$code" "$(stat -c %s "$file")"; return 0 ;;
+        2*) printf 'PUT %s %s (chunked, %s bytes)\n' "$label" "$code" "$(file_size "$file")"; return 0 ;;
       esac
       die "uploading $label failed: HTTP $code even in chunked form"
       ;;
@@ -369,7 +371,7 @@ upload_put() {
   die "uploading $label failed: HTTP $code"
 }
 
-log "uploading $ARTIFACT_NAME ($(stat -c %s "$ARTIFACT") bytes)"
+log "uploading $ARTIFACT_NAME ($(file_size "$ARTIFACT") bytes)"
 upload_put "$ARTIFACT" "$REPO_URL/$VERSION_PATH/$ARTIFACT_NAME" "$ARTIFACT_NAME"
 lock_refresh
 log "uploading $SHA_NAME"
@@ -385,8 +387,8 @@ TMP_DL=$WORK_DIR/download
 curl -fL --retry 3 -sS -o "$TMP_DL" "${CURL_AUTH[@]}" "$REPO_URL/$VERSION_PATH/$ARTIFACT_NAME"
 GOT_SHA=$(sha256sum "$TMP_DL" | cut -d' ' -f1)
 [[ $GOT_SHA == "$SHA256" ]] || die "the published $ARTIFACT_NAME has sha256 $GOT_SHA, want $SHA256: index.json was not touched"
-[[ $(stat -c %s "$TMP_DL") == $(stat -c %s "$ARTIFACT") ]] \
-  || die "the published $ARTIFACT_NAME is $(stat -c %s "$TMP_DL") bytes, want $(stat -c %s "$ARTIFACT"): index.json was not touched"
+[[ $(file_size "$TMP_DL") == $(file_size "$ARTIFACT") ]] \
+  || die "the published $ARTIFACT_NAME is $(file_size "$TMP_DL") bytes, want $(file_size "$ARTIFACT"): index.json was not touched"
 rm -f "$TMP_DL"
 
 compare_small_file() {
@@ -406,7 +408,7 @@ INDEX_FRESH=$WORK_DIR/index-fresh.json
 read_index "$INDEX_FRESH"
 NEW_INDEX=$WORK_DIR/index-new.json
 python3 - "$MODE" "$INDEX_FRESH" "$MANIFEST" "$NEW_INDEX" "$REPO_URL" "$VERSION_PATH" "$VERSION" "$ARCH" \
-  "$ARTIFACT_NAME" "$SHA_NAME" "$MANIFEST_NAME" "$SHA256" "$(stat -c %s "$ARTIFACT")" <<'PY'
+  "$ARTIFACT_NAME" "$SHA_NAME" "$MANIFEST_NAME" "$SHA256" "$(file_size "$ARTIFACT")" <<'PY'
 import datetime, json, os, sys
 
 (
@@ -549,6 +551,6 @@ cat <<EOF
 published $VERSION $ARCH ($WHAT)
   $WHAT    $REPO_URL/$VERSION_PATH/$ARTIFACT_NAME
   sha256   $SHA256
-  size     $(stat -c %s "$ARTIFACT") bytes
+  size     $(file_size "$ARTIFACT") bytes
   index    $REPO_URL/$INDEX_PATH
 EOF

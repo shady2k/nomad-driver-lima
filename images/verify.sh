@@ -53,6 +53,8 @@
 # by name through limactl under the explicit $LIMA_HOME of this run.
 
 set -euo pipefail
+# shellcheck source=images/portable.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
