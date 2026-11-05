@@ -32,6 +32,12 @@ type storeOutput struct {
 	// "template" (a template that reads it at render time) or "" for a store that
 	// needs none. It never says the token.
 	Token string `json:"token,omitempty"`
+	// Header is the request header the token goes in, "Authorization" unless the
+	// store says otherwise. It is not a secret.
+	Header string `json:"header,omitempty"`
+	// Scheme is the word in front of the token, "Bearer" unless the store says
+	// otherwise, and empty for a bare key header. It is not a secret either.
+	Scheme string `json:"scheme,omitempty"`
 	// Items are the item names of the variable, never their values.
 	Items []string `json:"items,omitempty"`
 	// Configured is false when no store is set.
@@ -50,6 +56,7 @@ func (a *App) cmdStore(ctx context.Context, args []string) error {
 		return a.cmdStoreShow(ctx, args[1:])
 	case "help", "-h", "--help":
 		fmt.Fprintf(a.ErrOut, "usage: box store set --url URL (--from-file FILE | --template FILE)\n"+
+			"                     [--token-header NAME] [--token-scheme WORD]\n"+
 			"       box store show\n\n"+
 			"The store is the Nomad variable %s: where an image is published, and the\n"+
 			"token that may write there. A publish job reads it through its own templates,\n"+
@@ -58,7 +65,11 @@ func (a *App) cmdStore(ctx context.Context, args []string) error {
 			"text that reads it at render time, for example\n"+
 			`  {{ with secret "kv/data/box/store" }}{{ .Data.data.token }}{{ end }}`+"\n"+
 			"which keeps even the Variable free of the value. `box store show` prints the url\n"+
-			"and the item names, never a value.\n", boxStoreVariable)
+			"and the item names, never a value.\n\n"+
+			"--token-header names the header the store reads the token in (Authorization by\n"+
+			"default) and --token-scheme the word in front of it (Bearer by default; give it\n"+
+			"empty for a store that wants a bare key). They are the BOX_STORE_TOKEN_HEADER\n"+
+			"and BOX_STORE_TOKEN_SCHEME of images/publish.sh.\n", boxStoreVariable)
 		return nil
 	}
 	return usagef("unknown store subcommand %q: use set or show", args[0])
@@ -71,6 +82,10 @@ func (a *App) cmdStoreSet(ctx context.Context, args []string) error {
 	fromFile := fs.String("from-file", "", "a file holding the store's write token (stored in the Variable)")
 	template := fs.String("template", "", "a file holding Nomad template text that reads the token at render time, "+
 		`for example {{ with secret "kv/data/box/store" }}{{ .Data.data.token }}{{ end }}`)
+	tokenHeader := fs.String("token-header", "", "the request header the token goes in "+
+		"(default: Authorization, as images/publish.sh uses)")
+	tokenScheme := fs.String("token-scheme", "", "the word in front of the token (default: Bearer); "+
+		"give it empty for a store that wants a bare key header")
 	if err := parseFlags(fs, args, 0); err != nil {
 		return err
 	}
@@ -85,6 +100,24 @@ func (a *App) cmdStoreSet(ctx context.Context, args []string) error {
 		return usagef("box store set: --from-file and --template are two ways to give the token, give one")
 	}
 	items := map[string]string{"url": storeURL}
+	if flagSet(fs, "token-header") {
+		header := strings.TrimSpace(*tokenHeader)
+		if !validHeaderName(header) {
+			return usagef("box store set --token-header %q is not an HTTP header name: it is the header the store reads "+
+				"the token in, for example Authorization or X-Api-Key", header)
+		}
+		items["header"] = header
+	}
+	// An empty scheme is a store that wants a bare key header, so the item is
+	// written when the flag is given, even empty: it is not the same as no item.
+	if flagSet(fs, "token-scheme") {
+		scheme := strings.TrimSpace(*tokenScheme)
+		if strings.ContainsAny(scheme, " \t") {
+			return usagef("box store set --token-scheme %q holds whitespace: it is the word in front of the token, "+
+				"for example Bearer, and empty for a bare key", scheme)
+		}
+		items["scheme"] = scheme
+	}
 	switch {
 	case *fromFile != "":
 		data, err := os.ReadFile(*fromFile)
@@ -123,6 +156,7 @@ func (a *App) cmdStoreSet(ctx context.Context, args []string) error {
 	}
 	out := storeOutput{URL: storeURL, Configured: true, Token: tokenKind(items)}
 	out.Items = itemNames(items)
+	out.Header, out.Scheme = storeTokenPlace(items)
 	if written != nil {
 		out.URL = strings.TrimSpace(written.Items["url"])
 	}
@@ -131,6 +165,7 @@ func (a *App) cmdStoreSet(ctx context.Context, args []string) error {
 	}
 	a.note("the image store is %s (variable %s)", out.URL, boxStoreVariable)
 	a.note("  token  %s", describeToken(out.Token))
+	a.note("  header %s", describeHeader(out.Header, out.Scheme))
 	a.note("a publish reads it: `box images publish <version> --yes`")
 	return nil
 }
@@ -155,6 +190,7 @@ func (a *App) cmdStoreShow(ctx context.Context, args []string) error {
 		out.URL = strings.TrimSpace(v.Items["url"])
 		out.Token = tokenKind(v.Items)
 		out.Items = itemNames(v.Items)
+		out.Header, out.Scheme = storeTokenPlace(v.Items)
 		out.Configured = out.URL != ""
 	}
 	if a.JSON {
@@ -166,6 +202,7 @@ func (a *App) cmdStoreShow(ctx context.Context, args []string) error {
 	}
 	a.note("the image store is %s (variable %s)", out.URL, boxStoreVariable)
 	a.note("  token  %s", describeToken(out.Token))
+	a.note("  header %s", describeHeader(out.Header, out.Scheme))
 	a.note("  items  %s", strings.Join(out.Items, ", "))
 	return nil
 }
@@ -179,6 +216,51 @@ func tokenKind(items map[string]string) string {
 		return "variable"
 	}
 	return ""
+}
+
+// The store's defaults for the token's header and scheme, the ones
+// images/publish.sh uses.
+const (
+	storeHeaderDefault = "Authorization"
+	storeSchemeDefault = "Bearer"
+)
+
+// storeTokenPlace is where the token goes and what comes before it, from the
+// Variable's items: a header or a scheme that is not there means the default, and
+// a scheme item that is there and empty means a bare key.
+func storeTokenPlace(items map[string]string) (header, scheme string) {
+	header, scheme = storeHeaderDefault, storeSchemeDefault
+	if value, ok := items["header"]; ok {
+		header = strings.TrimSpace(value)
+	}
+	if value, ok := items["scheme"]; ok {
+		scheme = strings.TrimSpace(value)
+	}
+	return header, scheme
+}
+
+// describeHeader renders where the token goes, in one line.
+func describeHeader(header, scheme string) string {
+	if scheme == "" {
+		return header + ", the token alone (a bare key)"
+	}
+	return header + ", as \"" + scheme + " <token>\""
+}
+
+// validHeaderName reports whether a string is an HTTP header name.
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", r):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // describeToken renders how the token reaches a publish task.

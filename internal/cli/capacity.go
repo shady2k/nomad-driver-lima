@@ -561,9 +561,6 @@ func (n *NodeCapacity) NodeProblem(req PlacementRequest) string {
 	if need := int64(req.DiskGiB) * 1024; need > 0 && n.Disk.Free < need {
 		return fmt.Sprintf("node %s has %d MiB of disk free, the box disk needs %d MiB", n.Name, n.Disk.Free, need)
 	}
-	if !req.Large {
-		return n.Oversized(req.CPUs, req.MemoryMiB, req.DiskGiB)
-	}
 	return ""
 }
 
@@ -584,35 +581,52 @@ type PlacementRequest struct {
 	DiskGiB           int
 	// Node is an explicit node name or id (--node).
 	Node string
-	// Large lets the box take more than LargeShare of the node (--large).
-	Large bool
 }
 
-// LargeShare is the part of a node one box may take without --large: a node
-// is shared by every agent's boxes, and a box that starts at the defaults and
-// grows with `box resize` when it has to leaves the rest of the node to them.
-const LargeShare = 4
+// quarterShare is the part of a node a box is worth a word about: a node is
+// shared by every agent's boxes, so a box that takes more than a quarter of its
+// CPU, memory or disk is said on stderr. It is not a refusal -- free resources
+// are there to be used, and a box the CLI will not create is work that does not
+// start -- so nothing here changes an exit code.
+const quarterShare = 4
 
-// Oversized says, in plain words, how a box of this size would take more than
-// a LargeShare of the node's CPU, memory or disk, or "" when it does not.
-func (n *NodeCapacity) Oversized(cpus, memoryMiB, diskGiB int) string {
+// ShareNote says, in plain words, how a box of this size takes more than a
+// quarter of the node's CPU, memory or disk, or "" when it does not.
+func (n *NodeCapacity) ShareNote(id string, cpus, memoryMiB, diskGiB int) string {
 	var over []string
-	if need := int64(cpus) * n.vcpuMHz(); n.CPU.Total/LargeShare > 0 && need > n.CPU.Total/LargeShare {
-		over = append(over, fmt.Sprintf("%d vCPU (%d MHz of %d MHz)", cpus, need, n.CPU.Total))
+	if vcpus := n.vcpus(); vcpus/quarterShare > 0 && int64(cpus) > vcpus/quarterShare {
+		over = append(over, fmt.Sprintf("%d of %d vCPU", cpus, vcpus))
 	}
-	if limit := n.Memory.Total / LargeShare; limit > 0 && int64(memoryMiB) > limit {
-		over = append(over, fmt.Sprintf("%d MiB of memory (of %d MiB)", memoryMiB, n.Memory.Total))
+	if limit := n.Memory.Total / quarterShare; limit > 0 && int64(memoryMiB) > limit {
+		over = append(over, shareMemory(int64(memoryMiB), n.Memory.Total)+" of memory")
 	}
-	if limit := n.Disk.Total / LargeShare; limit > 0 && int64(diskGiB)*1024 > limit {
-		over = append(over, fmt.Sprintf("a %d GiB disk (of %d GiB)", diskGiB, n.Disk.Total/1024))
+	if limit := n.Disk.Total / quarterShare; limit > 0 && int64(diskGiB)*1024 > limit {
+		over = append(over, fmt.Sprintf("%d of %d GiB of disk", diskGiB, n.Disk.Total/1024))
 	}
 	if len(over) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("on node %s the box would take more than a quarter of the node: %s; "+
-		"start at the defaults (%d vCPU, %d MiB, %d GiB) and grow it with `box resize` when the work needs it, "+
-		"or pass --large for a build or test run that does",
-		n.Name, strings.Join(over, ", "), defaultCPUs, defaultMemoryMiB, defaultDiskGiB)
+	return fmt.Sprintf("this box takes %s on node %s; the node is shared: `box stop %s` or `box rm %s --yes` it "+
+		"when the work is done", strings.Join(over, ", "), n.Name, id, id)
+}
+
+// shareMemory renders a pair of memory sizes in one unit, so that "8 of 16 GiB"
+// reads as the comparison it is.
+func shareMemory(taken, total int64) string {
+	if total >= 10*1024 {
+		return fmt.Sprintf("%.0f of %.0f GiB", float64(taken)/1024, float64(total)/1024)
+	}
+	return fmt.Sprintf("%d of %d MiB", taken, total)
+}
+
+// vcpus is how many vCPUs the node offers: its CPU total in the units one vCPU of
+// it reserves.
+func (n *NodeCapacity) vcpus() int64 {
+	mhz := n.vcpuMHz()
+	if mhz <= 0 {
+		return 0
+	}
+	return n.CPU.Total / mhz
 }
 
 // ChooseNode picks the node a new box goes to.

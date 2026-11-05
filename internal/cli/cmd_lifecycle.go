@@ -207,7 +207,6 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 	diskGiB := fs.Int("disk-gib", 0, "box disk size in GiB (it can only grow)")
 	timeout := fs.Duration("timeout", defaultWaitTimeout, "how long to wait for the box to come back")
 	wait := fs.Bool("wait", true, "wait until the box is running again")
-	large := fs.Bool("large", false, "allow more than a quarter of the node's CPU, memory or disk")
 	if err := parseFlags(fs, args, 1); err != nil {
 		return err
 	}
@@ -258,11 +257,7 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 		return a.printLifecycle(&out)
 	}
 	a.refreshCPUReservation(ctx, &spec, box.NodeID)
-	if !*large {
-		if err := a.checkShare(ctx, spec, box.NodeID); err != nil {
-			return err
-		}
-	}
+	note := a.shareNote(ctx, box.NodeID, id, spec.CPUs, spec.MemoryMiB, spec.DiskGiB)
 
 	spec.ExecutorItems = a.executorItems(ctx)
 	spec.VaultRole = a.vaultRoleFor(spec.VaultRole)
@@ -286,6 +281,7 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 	}
 	if !*wait {
 		out.Warn = "the box is being resized; `box status " + id + "` shows when it is back"
+		a.noteShare(note)
 		return a.printLifecycle(&out)
 	}
 	rec, err := a.waitForBoxRunning(ctx, id, evalID, *timeout)
@@ -294,7 +290,26 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 		return err
 	}
 	out.Box = rec
+	a.noteShare(note)
 	return a.printLifecycle(&out)
+}
+
+// shareNote says how a box of this size takes more than a quarter of its node's
+// CPU, memory or disk, or "" when it does not or the node cannot be described.
+func (a *App) shareNote(ctx context.Context, nodeID, id string, cpus, memoryMiB, diskGiB int) string {
+	nodes, err := a.nodeCapacities(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, n := range nodes {
+		if nodeID != "" && n.NodeID != nodeID {
+			continue
+		}
+		if note := n.ShareNote(id, cpus, memoryMiB, diskGiB); note != "" {
+			return note
+		}
+	}
+	return ""
 }
 
 // growStoppedVolume grows the volume of a box that is not running. Nomad refuses
@@ -511,24 +526,11 @@ func (a *App) refreshCPUReservation(ctx context.Context, spec *BoxSpec, nodeID s
 	}
 }
 
-// checkShare refuses a resize that would make the box take more than a
-// LargeShare of its node. A node Nomad cannot describe is not a reason to
-// refuse: the scheduler still has the last word.
-func (a *App) checkShare(ctx context.Context, spec BoxSpec, nodeID string) error {
-	if nodeID == "" {
-		nodeID = spec.NodeID
+// noteShare writes a box's share of its shared node to stderr. It is a note and
+// not a refusal: the command's exit code is the same with it and without it.
+func (a *App) noteShare(note string) {
+	if note == "" || a.ErrOut == nil {
+		return
 	}
-	nodes, err := a.nodeCapacities(ctx)
-	if err != nil {
-		return nil
-	}
-	for _, n := range nodes {
-		if nodeID == "" || n.NodeID != nodeID {
-			continue
-		}
-		if problem := n.Oversized(spec.CPUs, spec.MemoryMiB, spec.DiskGiB); problem != "" {
-			return usagef("box resize %s: %s", spec.ID, problem)
-		}
-	}
-	return nil
+	fmt.Fprintf(a.ErrOut, "note: %s\n", note)
 }

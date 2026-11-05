@@ -774,8 +774,8 @@ type testApp struct {
 func newTestApp(t *testing.T, indexBody string) *testApp {
 	t.Helper()
 	cluster := newFakeCluster()
-	// 32 GiB, so the default box (4 GiB of RAM plus the VM overhead) fits under
-	// the quarter-of-a-node rule without --large.
+	// 32 GiB, so the default box (4 GiB of RAM plus the VM overhead) fits in the
+	// free memory of the node.
 	cluster.addNode("node-1", "node-1", "amd64", 12000, 32768, 150000)
 	guest := newFakeGuest(t)
 	cluster.exec = guest

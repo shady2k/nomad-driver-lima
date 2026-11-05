@@ -47,7 +47,6 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	nodeName := fs.String("node", "", "pin the box to this node")
 	platformVersion := fs.String("platform", "", "platform bundle version to mount "+
 		"(default: the newest published for the box's architecture)")
-	large := fs.Bool("large", false, "allow more than a quarter of a node's CPU, memory or disk")
 	src := addPrepareFlags(fs)
 	prepTimeout := fs.Duration("prepare-timeout", defaultPrepareTimeout, "time limit of the preparation, and how long create waits for it")
 	vaultRole := fs.String("vault-role", a.VaultRole(), "the Vault role the box reads its secrets with "+
@@ -122,7 +121,7 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 
 	wantArch := NormalizeArch(*arch)
 	diskGiven := flagSet(fs, "disk-gib")
-	requested := PlacementRequest{Arch: wantArch, CPUs: *cpus, MemoryMiB: *memoryMiB, DiskGiB: *diskGiB, Node: *nodeName, Large: *large}
+	requested := PlacementRequest{Arch: wantArch, CPUs: *cpus, MemoryMiB: *memoryMiB, DiskGiB: *diskGiB, Node: *nodeName}
 
 	// Pick the architecture and the node together: the node decides which
 	// architecture is possible, the images decide which one there is.
@@ -259,6 +258,9 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// A box bigger than a quarter of its node says so, and runs: the note is what
+	// keeps a large box from being forgotten on a shared node.
+	a.noteShare(node.ShareNote(id, out.Box.CPUs, out.Box.MemoryMiB, out.Box.DiskGiB))
 	if !*wait || !src.given() {
 		return a.printCreate(out)
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,7 @@ type taskHandle struct {
 
 	boxID       string
 	volumeDir   string
+	vmPID       int
 	diskPath    string
 	instanceDir string
 	cgroupMode  string
@@ -141,6 +143,17 @@ func (h *taskHandle) currentInstanceDir() string {
 	return h.instanceDir
 }
 
+// noteVMPID records the pid of the VM process and reports whether it is new.
+func (h *taskHandle) noteVMPID(pid int) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if pid <= 0 || pid == h.vmPID {
+		return false
+	}
+	h.vmPID = pid
+	return true
+}
+
 func (h *taskHandle) taskStatus() *drivers.TaskStatus {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -156,6 +169,9 @@ func (h *taskHandle) taskStatus() *drivers.TaskStatus {
 	}
 	if h.instanceDir != "" {
 		attrs["instance_dir"] = h.instanceDir
+	}
+	if h.vmPID > 0 {
+		attrs["vm_pid"] = strconv.Itoa(h.vmPID)
 	}
 	return &drivers.TaskStatus{
 		ID:               h.tc.ID,

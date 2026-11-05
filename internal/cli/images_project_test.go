@@ -31,6 +31,10 @@ func TestImagesListsProjectImagesAndDrafts(t *testing.T) {
 	// The hint to create a box names a base image, never a project image.
 	require.Contains(t, ta.errOut.String(), "create a box with: box create <id> --image 2.0.0")
 	require.Contains(t, ta.errOut.String(), "box images publish project-2 --yes")
+	// The hint says how to size the box: the default is light work, a build needs
+	// more from the start, and the node is shared.
+	require.Contains(t, ta.errOut.String(), "a build or a test run needs more memory from the start")
+	require.Contains(t, ta.errOut.String(), "the node is shared, so give back what you do not use")
 
 	ta.out.Reset()
 	ta.errOut.Reset()
@@ -173,6 +177,32 @@ func TestImagesPublishRegistersTheJob(t *testing.T) {
 	require.Contains(t, out, "https://store.example.com/box-base/project-2/amd64/box-base-project-2-amd64.qcow2")
 	require.Contains(t, out, "every node can create a box from it now")
 	require.True(t, callCount(ta, "StopJob box-publish-project-2 purge=true") > 0)
+}
+
+// TestImagesPublishRendersTheTokenPlace: the header the token goes in and the
+// word in front of it reach a publish as their own files, so the driver sends the
+// token where this store reads it -- and an empty scheme is a file with nothing in
+// it, which is a bare key, not a missing file.
+func TestImagesPublishRendersTheTokenPlace(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	draft := ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	ta.cluster.variables[boxStoreVariable] = &api.Variable{Path: boxStoreVariable, Items: map[string]string{
+		"url":    "https://store.example.com",
+		"token":  "s3cret-token",
+		"header": "X-Api-Key",
+		"scheme": "",
+	}}
+	ta.finishWorkJobs(t, map[string]string{"kind": "publish", "version": "project-2", "arch": "amd64",
+		"sha256": draft.SHA256, "index": "https://store.example.com/box-base/index.json"}, "")
+
+	require.Equal(t, ExitOK, ta.run(t, "images", "publish", "project-2", "--yes"), ta.errOut.String())
+	templates := ta.workJob.TaskGroups[0].Tasks[0].Templates
+	var dests []string
+	for _, template := range templates {
+		dests = append(dests, derefStr(template.DestPath, ""))
+	}
+	require.Equal(t, []string{"store/url", "store/token", "store/header", "store/scheme"}, dests)
+	require.Nil(t, ta.workJob.TaskGroups[0].Tasks[0].Vault, "a plain token needs no Vault block")
 }
 
 // TestImagesPublishWithoutAStore: the store is a Variable, and its absence says

@@ -89,22 +89,34 @@ it asks its owner first.
 It reads the drafts of the nodes and refuses a version no node holds, naming the
 drafts there are. Then it registers a batch job `box-publish-<version>` of the
 driver, pinned to the node that baked the draft -- the image is in that node's
-cache and nowhere else -- and waits for it. The task:
+cache and nowhere else -- and waits for it. The task does what
+`images/publish.sh` does, in the same order and with the same lock:
 
-1. refuses the version when the store already holds any of its files, and when
+1. takes the store's lock, the object `box-base/.lock`: a record that says who
+   holds it and when, written and read back, refreshed after every upload, and
+   released at the end. A fresh lock stops the publish before anything is
+   written ("held by ..."), and a lock older than 30 minutes is taken over, so a
+   crashed run cannot block the store for ever;
+2. refuses the version when the store already holds any of its files, and when
    `index.json` already names it;
-2. uploads the image, its `.sha256` and its manifest under
-   `box-base/<version>/<arch>/`, with the names `images/publish.sh` writes;
-3. reads the image back and compares its sha256 (and its size, and the two small
+3. checks that the file in the node's cache still is the image its record names
+   -- a store that cannot take an upload back is not given a file that changed
+   under it -- then uploads the image, its `.sha256` and its manifest under
+   `box-base/<version>/<arch>/`, with the names `images/publish.sh` writes. A
+   store or proxy that answers 413 to a body of a declared size gets the same
+   bytes in chunked form;
+4. reads the image back and compares its sha256 (and its size, and the two small
    files byte for byte) before the index names it;
-4. re-reads `index.json`, merges the entry, writes it and reads it back: this
-   entry is there and every entry that was there before survived.
+5. re-reads `index.json`, merges the entry, writes it and reads it back: this
+   entry is there and every entry that was there before survived, with the
+   digest it had.
 
-The store's url and token reach the task as templated files, out of the variable
-`box store set` writes (below); the token is never in the job spec, in a task
-event or in a log. The job reads that variable through
-`deploy/acl/box-store.policy.hcl` attached to that job, never through a box's
-policy, and the job is purged when it ends.
+The store's url, its token, the header that token goes in and the scheme in front
+of it reach the task as templated files, out of the variable `box store set`
+writes (below); the token is never in the job spec, in a task event or in a log.
+
+The job reads that variable through `deploy/acl/box-store.policy.hcl` attached
+to that job, never through a box's policy, and the job is purged when it ends.
 
 It prints the version, the architecture, the sha256, the store, the image's url
 and the index's url, and the `box create` line for the image. `--json` gives
@@ -210,17 +222,27 @@ template text that reads the token at render time.
   token is then read from Vault when the publish task renders, and even the
   variable holds a path. The file must contain `{{`, and it must never contain the
   token; this is the form to prefer.
+- `--token-header NAME` names the request header the store reads the token in:
+  `Authorization` when it is left out.
+- `--token-scheme WORD` is the word in front of the token, `Bearer` when it is
+  left out. Give it empty (`--token-scheme ""`) for a store that wants a bare key
+  header; that is a store with a scheme item that is empty, which is not the same
+  as one without the item.
 
-Giving both is a usage error, and so is an empty file. The command prints the url,
-how the token reaches a publish (`read from Vault when the task renders`, `stored
-in the Variable`, or `none`), and the item names. It never prints a value.
+The two are `BOX_STORE_TOKEN_HEADER` and `BOX_STORE_TOKEN_SCHEME` of
+`images/publish.sh`, which publishes to the same store. Giving both `--from-file`
+and `--template` is a usage error, and so is an empty file. The command prints the
+url, how the token reaches a publish (`read from Vault when the task renders`,
+`stored in the Variable`, or `none`), the header and scheme it will use, and the
+item names. It never prints a value.
 
 ### `box store show`
 
-The same lines for the store that is configured, or one line saying there is none.
-`--json` gives `url`, `token` (`variable`, `template`, or empty for a store
-written without authentication), `items` and `configured`; the token is never a
-value here either.
+The same lines for the store that is configured, or one line saying there is none:
+the url, how the token reaches a publish, the header and scheme, and the item
+names. `--json` gives `url`, `token` (`variable`, `template`, or empty for a store
+written without authentication), `header`, `scheme`, `items` and `configured`; the
+token is never a value here either.
 
 A publish job reads that variable with a workload policy of its own
 (`deploy/acl/box-store.policy.hcl`); `deploy/acl/README.md` shows how it is
@@ -240,7 +262,6 @@ waits until the box is running.
 | `--memory-mib N` | 4096 | guest RAM: an agent session with its tools plus a build of the box's own work needs it, and a guest that runs out of memory stops answering its `boxctl` calls entirely |
 | `--disk-gib N` | 8 | disk size (it can only grow later) |
 | `--node NAME` | – | pin the box to this node |
-| `--large` | false | allow more than a quarter of the node's CPU, memory or disk |
 | `--vault-role ROLE` | `BOX_VAULT_ROLE`, else the cluster's default role | the Vault role the box reads its secrets with, used when the executors hold a template item (see "Executor credentials") |
 | `--timeout D` | 10m | how long to wait for it to run |
 | `--wait` | true | wait until it is running |
@@ -260,10 +281,24 @@ published images and the drafts.
 A box id is `[a-z0-9-]{1,40}`. A failed create removes the half-made box, so a
 failure leaves no disk behind.
 
-A node is shared by every agent's boxes, so one box takes at most a quarter of
-a node's CPU, memory or disk: a larger request names the node and what it asked
-for, and is refused unless `--large` is given. Start at the defaults and grow
-with `box resize`, which holds to the same quarter.
+**The node is shared, and free resources are there to be used.** A box is
+created whatever its size, as long as the node has the room: nothing here refuses
+a box for taking a large part of a node. When a box takes more than a quarter of
+its node's CPU, memory or disk, the command says so on stderr -- `this box takes
+8 of 16 vCPU on node X; the node is shared: box stop or box rm it when the work
+is done` -- and the exit code is the same as without the note.
+
+Choose the size for the task when the box is created. The default (2 vCPU,
+4096 MiB, 8 GiB) is for light work without a build; a build or a test run needs
+more memory from the start. When in doubt take more: a box can be stopped, but a
+guest out of memory cannot be noticed from inside -- it freezes, `box top` and
+`box status` stop answering, and the host loses several cores -- so do not wait
+for `box top` to show a shortage. `box resize` is for growth you can see coming,
+between turns, and for a box whose guest has gone silent (it restarts it; the disk
+is kept). Give back what you do not use: `box stop` an idle box and `box rm` a
+finished one, because a reservation held by an idle box keeps someone else's work
+from starting. If there is no room, stop your own idle boxes or tell the owner;
+do not wait silently.
 
 An image built for bundles gets one mounted at `/opt/box` without asking: the
 newest bundle for the box's architecture. `--platform <version>` picks an older
@@ -305,7 +340,9 @@ in use. If the volume cannot grow, the box runs again with its old size.
 
 Changes the size of a box. It is an **offline** change: the VM stops, is edited
 and starts again. Memory must be at least 256 MiB, and the disk can only grow.
-More than a quarter of the node needs `--large`, as with `box create`.
+A box that takes more than a quarter of its node is resized anyway and said on
+stderr, as with `box create`; grow a box between turns, and use `box resize` to
+bring back a guest that has gone silent (it restarts it, the disk is kept).
 
 ### `box upgrade <id> [--platform VERSION] [--timeout D] [--wait]`
 

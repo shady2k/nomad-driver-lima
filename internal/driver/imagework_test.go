@@ -267,8 +267,25 @@ type fakeStore struct {
 	corruptArtifact bool
 	// authHeaders records the Authorization header of every request.
 	authHeaders []string
+	// headers records every request's headers, so a test can see which header
+	// carried the credential.
+	headers []http.Header
+	// requests records "METHOD /path" in the order the store saw them.
+	requests []string
 	// putStatus refuses a PUT with this status.
 	putStatus int
+	// refuseDeclaredSize answers a PUT of a qcow2 that carries a Content-Length
+	// with HTTP 413, the way a proxy in front of a store applies a body-size
+	// limit: the publisher has to send the same bytes in chunked form.
+	refuseDeclaredSize bool
+	// declaredRefusals counts the PUTs refused for their declared size, and
+	// chunkedUploads the PUTs that arrived without a size.
+	declaredRefusals int
+	chunkedUploads   int
+	// requiredHeader and requiredValue are a credential the store insists on: a
+	// request that does not carry it is refused with HTTP 401.
+	requiredHeader string
+	requiredValue  string
 }
 
 func newFakeStore() *fakeStore {
@@ -281,12 +298,27 @@ func (s *fakeStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h := r.Header.Get("Authorization"); h != "" {
 		s.authHeaders = append(s.authHeaders, h)
 	}
+	s.headers = append(s.headers, r.Header.Clone())
+	s.requests = append(s.requests, r.Method+" "+r.URL.Path)
+	if s.requiredHeader != "" && r.Header.Get(s.requiredHeader) != s.requiredValue {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
 	key := r.URL.Path
 	switch r.Method {
 	case http.MethodPut:
 		if s.putStatus != 0 {
 			w.WriteHeader(s.putStatus)
 			return
+		}
+		if strings.HasSuffix(key, ".qcow2") {
+			if r.ContentLength < 0 {
+				s.chunkedUploads++
+			} else if s.refuseDeclaredSize {
+				s.declaredRefusals++
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				return
+			}
 		}
 		body := make([]byte, 0, 1024)
 		buf := make([]byte, 32*1024)

@@ -540,7 +540,10 @@ is set.
 
 A token is never an argument and never on stdout: it goes into a 0600 header file
 that `curl` reads. Whether it comes from a vault, a secret manager or a mounted
-file is the operator's business.
+file is the operator's business. `BOX_STORE_TOKEN_HEADER` and
+`BOX_STORE_TOKEN_SCHEME` say where a store reads the token and what comes before
+it, and the publish task of the driver has the same two settings in its
+`nomad/jobs/box-store` variable (`box store set --token-header/--token-scheme`).
 
 ## Publishing: the index
 
@@ -549,13 +552,17 @@ by `BOX_IMAGE_INDEX` or `--image-index`. There is no built-in default. The CLI
 fetches it with a 30 second timeout and reads at most 8 MiB; a 404 means "no
 images are published yet" and is reported as such.
 
-`images/publish.sh` writes that document for its store, and it is the only thing
-here that writes one: it refuses a version that already exists (a published
-version never changes), uploads the artifact, its `.sha256` and its manifest,
-reads them back, and only then merges the version into `index.json` under a lock.
-Images go under `"images"`, platform bundles under `"platforms"`, and publishing
-one leaves the other alone. `images/publish_test.py` exercises all of that
-against a local fake store.
+`images/publish.sh` writes that document for its store, and the `box images
+publish` task of the driver writes it too, in the same order and under the same
+lock (`box-base/.lock`, a record of who holds the store and when, taken over when
+it is 30 minutes old): a version that already exists is refused (a published
+version never changes), the artifact, its `.sha256` and its manifest are
+uploaded, all three are read back, and only then is the version merged into
+`index.json`. A store or a proxy that answers 413 to a body of a declared size
+gets the same bytes in chunked form. Images go under `"images"`, platform
+bundles under `"platforms"`, and publishing one leaves the other alone.
+`images/publish_test.py` exercises all of that against a local fake store, and
+the driver's side against a fake store of its own.
 
 The canonical shape is `schema`, `updated_at`, `images[<version>][<arch>]` and
 `platforms[<version>][<arch>]`. Each image entry holds `url`, `sha256` (`size`

@@ -119,6 +119,11 @@ func (a *App) cmdImages(ctx context.Context, args []string) error {
 	if newestBase != "" {
 		a.note("create a box with: box create <id> --image %s --arch %s --cpus %d --memory-mib %d --disk-gib %d",
 			newestBase, archOfFirst(bases), defaultCPUs, defaultMemoryMiB, defaultDiskGiB)
+		a.note("choose the size for the task: %d vCPU and %d MiB are for light work without a build, and a build "+
+			"or a test run needs more memory from the start", defaultCPUs, defaultMemoryMiB)
+		a.note("when in doubt take more: a box can be stopped, but a guest out of memory just stops answering " +
+			"(`box top` and `box status` go silent); `box resize --memory-mib` grows it, and it restarts with the disk kept")
+		a.note("the node is shared, so give back what you do not use: `box stop` an idle box, `box rm` a finished one")
 	}
 	if len(drafts) > 0 {
 		a.note("a draft is created from on its own node: box create <id> --image %s", drafts[0].Version)

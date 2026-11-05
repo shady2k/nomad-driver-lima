@@ -87,15 +87,23 @@ box's environment an image instead of repeating it.
   the job, so the box restarts and its disk is kept). A `boxd` or executor
   update therefore needs no new image, and a project image derived from a base
   image never has to be rebuilt for it.
-- **Start at the defaults (2 vCPU, 4096 MiB, 8 GiB) and grow when the work
-  shows it needs more.** They fit an agent session and a build of the box's
-  own work: a guest that runs out of memory stops answering `box status`,
-  `box top` and `box session ls`, which look like a hung box. The node is
-  shared with every other agent: `box resize` adds CPU or memory (a restart,
-  the disk is kept) and grows the disk, so there is no reason to ask for more
-  up front.
-  A box larger than a quarter of a node is refused without `--large`; pass it
-  only for a build or test run that you know needs it, and say why.
+- **The node is shared, and free resources are there to be used.** Choose the
+  size for the task when you create the box. The default (2 vCPU, 4096 MiB,
+  8 GiB) is for light work without a build; a build or a test run needs more
+  memory from the start, so say `--memory-mib 8192` (or more) when the task
+  compiles, installs or runs tests. When in doubt take more: a box can be
+  stopped, but a guest out of memory cannot be noticed from inside -- it
+  freezes, `box top` and `box status` stop answering, and the host loses several
+  cores -- so do not wait for `box top` to show a shortage. `box resize` is for
+  growth you can see coming, between turns, and for a box whose guest has gone
+  silent (it restarts it; the disk is kept). Several boxes are fine when the
+  work is really parallel and there is room; work on one task usually fits in
+  sessions of one box. Give back what you do not use: `box stop` an idle box and
+  `box rm` a finished one, because a reservation held by an idle box keeps
+  someone else's work from starting. If there is no room, stop your own idle
+  boxes or tell the owner; do not wait silently. A box that takes more than a
+  quarter of its node is created anyway and said on stderr: it fits, it is
+  yours to watch.
 - **The model is one the box's key may use**, as `<provider>/<model>`. The box
   asks its provider when a session starts, and `box session new` refuses any
   other model with the list there is; `box executors show` shows the staged list.
@@ -107,6 +115,9 @@ box's environment an image instead of repeating it.
   `box session new` for a second piece of work instead of a second VM: the
   disk, the toolchain and the git checkout are shared, the executors are not.
   Sessions are cheap; VMs are not.
+- **Give the node back.** `box stop` a box whose work is paused and `box rm
+  <id> --yes` one that is finished: an idle box holds its node's memory, and the
+  node is shared with every other agent's boxes.
 - **`box wait --timeout` instead of sleep loops.** A turn may take twenty
   minutes; `box wait` returns the moment it ends, and `box events --since`
   resumes a stream you already read. Do not write `while ...; sleep 60; done`
@@ -218,11 +229,16 @@ starts, so no key lands on a disk.
 
 ## For the coordinator agent
 
-1. `box capacity --json` once per task: read every node, per architecture.
+1. `box capacity --json` once per task: read every node, per architecture, and
+   see what the running boxes hold.
 2. Create one box per task (not per step), named after the task, with the
-   `--arch` the task needs and the newest image.
+   `--arch` the task needs, the newest image, and the size the work needs -- a
+   build or a test run gets more memory than the default from the start. Say on
+   a note when a box takes more than a quarter of its node, and that it will be
+   given back.
 3. Start one session per unit of work; send the prompt; `box wait` with a
    generous `--timeout`.
 4. Read the answer from `box wait` or `box events`, check it with `box run`,
    and copy results out with `box cp` or push a branch.
-5. `box stop` when the work pauses; `box rm --yes` when the task is done.
+5. `box stop` when the work pauses; `box rm --yes` when the task is done. A
+   finished box left running keeps someone else's work from starting.

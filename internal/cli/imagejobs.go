@@ -214,8 +214,10 @@ func RenderPublishJob(spec PublishJobSpec) (*api.Job, error) {
 const storeDirInTask = "store"
 
 // storeTemplateKeys are the items of the store Variable a publish renders, in the
-// order they are rendered.
-var storeTemplateKeys = []string{"url", "token", "token.tmpl"}
+// order they are rendered. header and scheme are not secrets: they are the header
+// the token goes in and the word in front of it, and an empty scheme item is a
+// store that wants a bare key.
+var storeTemplateKeys = []string{"url", "token", "token.tmpl", "header", "scheme"}
 
 // storeTemplates turns the items of the store Variable into one task template per
 // file, the way the executor credentials reach a box: a plain item is read out of

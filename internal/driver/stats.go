@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -196,8 +197,17 @@ func (d *Driver) sampleBox(ctx context.Context, h *taskHandle) (*drivers.TaskRes
 		return nil, fmt.Errorf("no VM process found: no %s, %s or ha.pid in %s, and limactl lists none",
 			box.DriverPIDFile(box.VMTypeQEMU), box.DriverPIDFile(box.VMTypeVZ), inst)
 	}
-	if pid := h.stats.hypervisor(boxPaths(inst, h.volumeDir)); pid > 0 && !slices.Contains(pids, pid) {
-		pids = append(pids, pid)
+	vmPID := h.stats.hypervisor(boxPaths(inst, h.volumeDir))
+	if vmPID > 0 && !slices.Contains(pids, vmPID) {
+		pids = append(pids, vmPID)
+	}
+	// On Linux the VM is the first pid file's qemu; elsewhere the pid files name
+	// the hostagent, so only a process that was found counts.
+	if vmPID == 0 && runtime.GOOS == "linux" && len(pids) > 0 {
+		vmPID = pids[0]
+	}
+	if h.noteVMPID(vmPID) && h.tc != nil && h.tc.AllocID != "" {
+		d.emit(h.tc, "stats", fmt.Sprintf("VM process of box %s: pid %d", h.boxID, vmPID))
 	}
 	usage, err := h.stats.sample(d.compute, pids)
 	if err != nil {

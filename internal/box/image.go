@@ -111,12 +111,13 @@ func (b *Box) EnsureImage(ctx context.Context, url, wantSHA256 string, progress 
 // A published image is compressed (images/build.sh converts with -c) to keep the
 // download small, and Lima builds a box disk out of it as it is: the disk of a
 // box then carries compressed clusters, and qemu inflates them again on every
-// read of a guest file. A box of 2 vCPU and 2 GiB that ran a large cgo build was
-// out of memory, the guest read its program files over and over, and qemu spent
-// about five host cores for twenty minutes inflating cluster after cluster of
-// its own disk, reading the host's page cache in 12 KiB pieces. An uncompressed
-// copy costs one conversion per image and the disk of every box made from it has
-// plain clusters from the first boot.
+// read of a guest file. A box of 2 vCPU and 2 GiB that ran a large cgo build read
+// its program files over and over -- memory was the likely cause, since the same
+// build passed in 4 GiB -- and qemu spent about five host cores for twenty
+// minutes inflating cluster after cluster of its own disk, reading the host's
+// page cache in 12 KiB pieces. An uncompressed copy costs one conversion per
+// image and the disk of every box made from it has plain clusters from the first
+// boot.
 //
 // If qemu-img is not installed the compressed image is handed back and a task
 // event says so: a box that starts from a compressed image is what this code did

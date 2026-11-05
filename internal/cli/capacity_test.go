@@ -119,6 +119,36 @@ func TestBoxDisksFromAttributes(t *testing.T) {
 	require.Zero(t, virtual)
 }
 
+// TestShareNoteNamesWhatIsOverAQuarter: the note says what the box takes of the
+// node it runs on, and says nothing about a resource it leaves alone. It is a
+// note, so a box that fits and a box that does not both come back from the same
+// call with a string, never with an error.
+func TestShareNoteNamesWhatIsOverAQuarter(t *testing.T) {
+	node := &NodeCapacity{
+		NodeID: "n1", Name: "node-1",
+		CPU:           ResourceUsage{Total: 12000},
+		Memory:        ResourceUsage{Total: 16384},
+		Disk:          ResourceUsage{Total: 32 * 1024},
+		CPUMHzPerVCPU: 1000,
+	}
+	require.Empty(t, node.ShareNote("dev1", 2, 1024, 1), "a box inside a quarter says nothing")
+
+	note := node.ShareNote("dev1", 8, 8192, 16)
+	require.Contains(t, note, "8 of 12 vCPU")
+	require.Contains(t, note, "8 of 16 GiB of memory")
+	require.Contains(t, note, "16 of 32 GiB of disk")
+	require.Contains(t, note, "on node node-1")
+	require.Contains(t, note, "the node is shared")
+	require.Contains(t, note, "`box stop dev1` or `box rm dev1 --yes`")
+
+	// Exactly a quarter is inside the quarter: the note is about taking more.
+	require.Empty(t, node.ShareNote("dev1", 3, 4096, 8))
+
+	// A node whose CPU Nomad cannot describe is not a note: nothing is known.
+	quiet := &NodeCapacity{Name: "node-2", Memory: ResourceUsage{Total: 16384}, Disk: ResourceUsage{Total: 8 * 1024 * 1024}}
+	require.Empty(t, quiet.ShareNote("dev1", 99, 1024, 1))
+}
+
 func TestBuildCapacityMissingPlugin(t *testing.T) {
 	node := &api.Node{
 		ID: "node-2", Name: "node-2", Status: "ready", SchedulingEligibility: "eligible",
@@ -145,7 +175,7 @@ func TestChooseNodePicksMostFreeMemory(t *testing.T) {
 		CPU: ResourceUsage{Total: 8000, Free: 7000}, Disk: ResourceUsage{Total: 200000, Free: 190000},
 		VolumePlugins: []VolumePluginInfo{{ID: boxVolumePluginID}}}
 
-	chosen, problems, err := ChooseNode([]*NodeCapacity{small, large}, PlacementRequest{Arch: "amd64", CPUs: 2, MemoryMiB: 1024, DiskGiB: 8, Large: true})
+	chosen, problems, err := ChooseNode([]*NodeCapacity{small, large}, PlacementRequest{Arch: "amd64", CPUs: 2, MemoryMiB: 1024, DiskGiB: 8})
 	require.NoError(t, err)
 	require.Empty(t, problems)
 	require.Equal(t, "large", chosen.Name)
