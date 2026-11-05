@@ -329,6 +329,15 @@ if [[ $FAILED -ne 0 ]]; then
   exit 1
 fi
 
+# --- what the driver gives a box ----------------------------------------------
+# boxd.service waits for the bundle and for the two task file mounts. The driver
+# mounts those from the node; this VM has no task, so a tmpfs stands in for each.
+log "standing in for the task file mounts"
+lima shell "$NAME" sudo sh -c 'for d in /run/box/secrets /etc/box/local; do
+  mkdir -p "$d"; mountpoint -q "$d" || mount -t tmpfs -o mode=0700 tmpfs "$d"
+done
+for i in $(seq 1 60); do [ "$(systemctl is-active boxd.service)" = active ] && exit 0; sleep 1; done'
+
 # --- the checks inside the guest ---------------------------------------------
 log "running the guest checks"
 lima cp "$ROOT/images/guest-checks.sh" "$NAME:/tmp/guest-checks.sh"
