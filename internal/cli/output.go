@@ -38,6 +38,12 @@ type BoxRecord struct {
 	// box driver reports it; DiskVirtualBytes is the size it may grow to.
 	DiskUsedBytes    int64 `json:"disk_used_bytes,omitempty"`
 	DiskVirtualBytes int64 `json:"disk_virtual_bytes,omitempty"`
+	// JobMissing is true when Nomad no longer holds the box's job: the box is its
+	// stored description (state "stopped") or only its disk (state "orphan").
+	JobMissing bool `json:"job_missing,omitempty"`
+	// SpecWrittenAt is when the stored description of the box was written, empty
+	// for a box that has none.
+	SpecWrittenAt string `json:"spec_written_at,omitempty"`
 	// Note explains a state that needs a sentence.
 	Note string `json:"note,omitempty"`
 }
@@ -311,6 +317,74 @@ func latestAllocation(allocs []*api.AllocationListStub) *api.AllocationListStub 
 	return best
 }
 
+// boxRecordStored is the record of a box whose job Nomad no longer holds: the box
+// is its stored description and its disk.
+func boxRecordStored(job *api.Job, doc boxSpecDocument, volume *api.HostVolumeStub, now time.Time) BoxRecord {
+	rec := boxRecord(job, nil, now)
+	rec.JobMissing = true
+	rec.State = "stopped"
+	rec.Volume = BoxVolumeName(rec.ID)
+	rec.SpecWrittenAt = doc.WrittenAt
+	if volume != nil {
+		rec.VolumeCapacityBytes = volume.CapacityBytes
+		rec.NodeID = volume.NodeID
+	}
+	switch {
+	case volume == nil:
+		rec.State = "gone"
+		rec.Note = fmt.Sprintf("the disk of the box is gone: there is no volume %s, and only the description in "+
+			"the variable %s is left; `box rm %s --yes` removes it", BoxVolumeName(rec.ID), BoxSpecVariable(rec.ID), rec.ID)
+	default:
+		rec.Note = fmt.Sprintf("the box is stopped: Nomad no longer has its job, and its description is in the "+
+			"variable %s; `box start %s` runs it again on the same disk", BoxSpecVariable(rec.ID), rec.ID)
+	}
+	return rec
+}
+
+// boxRecordVolumeOnly is the record of a disk nothing describes: a box made
+// before a box's description was stored, whose job Nomad has collected.
+func boxRecordVolumeOnly(id string, volume *api.HostVolumeStub) BoxRecord {
+	rec := BoxRecord{
+		ID:         id,
+		Job:        BoxJobName(id),
+		Volume:     BoxVolumeName(id),
+		State:      "orphan",
+		JobMissing: true,
+	}
+	if volume != nil {
+		rec.VolumeCapacityBytes = volume.CapacityBytes
+		rec.NodeID = volume.NodeID
+	}
+	rec.Note = fmt.Sprintf("this disk has no job and no description (the box was made before boxes stored one): "+
+		"`box start %s` cannot bring it back, and `box rm %s --yes` deletes the disk", id, id)
+	return rec
+}
+
+// boxVolumes indexes the dynamic host volumes by the box id their name carries.
+// A box has one disk, so the first volume of a name wins: a stale duplicate is
+// not worth a second row.
+func (a *App) boxVolumes(ctx context.Context) (map[string]*api.HostVolumeStub, error) {
+	volumes, err := a.Nomad.HostVolumes(ctx)
+	if err != nil {
+		return nil, wrapf(err, "cannot list the volumes")
+	}
+	out := map[string]*api.HostVolumeStub{}
+	for _, stub := range volumes {
+		if stub == nil || !strings.HasPrefix(stub.Name, boxVolumePrefix) {
+			continue
+		}
+		id := strings.TrimPrefix(stub.Name, boxVolumePrefix)
+		if id == "" {
+			continue
+		}
+		if _, ok := out[id]; ok {
+			continue
+		}
+		out[id] = stub
+	}
+	return out, nil
+}
+
 // collectBoxes returns every box on the cluster.
 func (a *App) collectBoxes(ctx context.Context) ([]BoxRecord, error) {
 	stubs, err := a.Nomad.JobList(ctx)
@@ -323,6 +397,7 @@ func (a *App) collectBoxes(ctx context.Context) ([]BoxRecord, error) {
 	}
 	now := a.now()
 	out := make([]BoxRecord, 0, len(stubs))
+	withJob := map[string]bool{}
 	for _, stub := range stubs {
 		if stub == nil {
 			continue
@@ -339,33 +414,86 @@ func (a *App) collectBoxes(ctx context.Context) ([]BoxRecord, error) {
 			}
 			return nil, wrapf(err, "cannot read job %s", stub.ID)
 		}
-		out = append(out, boxRecord(job, byJob[stub.ID], now))
+		rec := boxRecord(job, byJob[stub.ID], now)
+		withJob[rec.ID] = true
+		out = append(out, rec)
+	}
+
+	// A box is its volume and its disk, not its job: Nomad's job GC deletes a
+	// dead job after a few hours, so a stopped box shows up here as a volume and
+	// a stored description -- or, for a box made before descriptions existed, as
+	// a volume nothing describes.
+	volumes, err := a.boxVolumes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(volumes))
+	for id := range volumes {
+		if !withJob[id] {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		job, doc, err := a.storedBoxJob(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if job == nil {
+			out = append(out, boxRecordVolumeOnly(id, volumes[id]))
+			continue
+		}
+		out = append(out, boxRecordStored(job, doc, volumes[id], now))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 
 // findBox returns one box, or a not-found error that says what to do.
+//
+// The job is the first place to look, and for a stopped box whose job Nomad has
+// collected it is the stored description that answers -- the box is its volume
+// and its disk. A disk nothing describes comes back as an "orphan" with no job.
 func (a *App) findBox(ctx context.Context, id string) (BoxRecord, *api.Job, error) {
 	if err := ValidateBoxID(id); err != nil {
 		return BoxRecord{}, nil, err
 	}
 	job, err := a.Nomad.Job(ctx, BoxJobName(id))
-	if err != nil {
-		if isNotFoundErr(err) {
-			return BoxRecord{}, nil, a.noSuchBox(ctx, id)
+	switch {
+	case err == nil:
+		if !IsBoxJob(job) {
+			return BoxRecord{}, nil, notFoundf("the job %s exists but is not a box (it has no meta.box = \"true\"); `box ls` lists the boxes",
+				BoxJobName(id))
 		}
+		byJob, err := a.jobAllocations(ctx)
+		if err != nil {
+			return BoxRecord{}, nil, err
+		}
+		return boxRecord(job, byJob[BoxJobName(id)], a.now()), job, nil
+	case !isNotFoundErr(err):
 		return BoxRecord{}, nil, wrapf(err, "cannot read the job %s", BoxJobName(id))
 	}
-	if !IsBoxJob(job) {
-		return BoxRecord{}, nil, notFoundf("the job %s exists but is not a box (it has no meta.box = \"true\"); `box ls` lists the boxes",
-			BoxJobName(id))
+
+	// Nomad no longer has the job: the box is its description and its disk.
+	volumes, err := a.boxVolumes(ctx)
+	if err != nil {
+		return BoxRecord{}, nil, wrapf(err, "cannot tell what is left of box %s", id)
 	}
-	byJob, err := a.jobAllocations(ctx)
+	stored, doc, err := a.storedBoxJob(ctx, id)
 	if err != nil {
 		return BoxRecord{}, nil, err
 	}
-	return boxRecord(job, byJob[BoxJobName(id)], a.now()), job, nil
+	volume, hasVolume := volumes[id]
+	if stored == nil && !hasVolume {
+		return BoxRecord{}, nil, a.noSuchBox(ctx, id)
+	}
+	if stored == nil {
+		return boxRecordVolumeOnly(id, volume), nil, nil
+	}
+	if !hasVolume {
+		return boxRecordStored(stored, doc, nil, a.now()), stored, nil
+	}
+	return boxRecordStored(stored, doc, volume, a.now()), stored, nil
 }
 
 // noSuchBox builds the not-found error, listing the boxes that do exist.
@@ -387,12 +515,11 @@ func (a *App) noSuchBox(ctx context.Context, id string) error {
 // runningAlloc returns the running allocation of a box, fetching the full
 // record the exec API needs.
 func (a *App) runningAlloc(ctx context.Context, box BoxRecord) (*api.Allocation, error) {
+	if box.State != "running" {
+		return nil, boxNotRunning(box)
+	}
 	if box.AllocationID == "" {
 		return nil, errorf("the box %s has no allocation; run `box start %s` and try again", box.ID, box.ID)
-	}
-	if box.State != "running" {
-		return nil, errorf("the box %s is %s, not running; the guest cannot be reached. `box start %s` starts it again",
-			box.ID, box.State, box.ID)
 	}
 	alloc, err := a.Nomad.Allocation(ctx, box.AllocationID)
 	if err != nil {
@@ -440,4 +567,45 @@ func (a *App) boxctl(ctx context.Context, box BoxRecord) (*Boxctl, error) {
 // closed stream, which has nothing left to say.
 func writeAll(w io.Writer, data []byte) {
 	_, _ = w.Write(data)
+}
+
+// nodeNameFor returns the name of a node, from a cache of node id to name. A node
+// that cannot be read has no name here, which is a "-" in a table and not a
+// failure of the command.
+func (a *App) nodeNameFor(ctx context.Context, cache map[string]string, nodeID string) string {
+	if nodeID == "" {
+		return ""
+	}
+	if name, ok := cache[nodeID]; ok {
+		return name
+	}
+	name := ""
+	if node, err := a.Nomad.NodeInfo(ctx, nodeID); err == nil && node != nil {
+		name = node.Name
+	}
+	cache[nodeID] = name
+	return name
+}
+
+// boxNotRunning is what a guest command says about a box the guest cannot be
+// reached in: what the box is, and what to do about it. A stopped box is its
+// disk, so a start brings it back; an orphan has nothing to start from.
+func boxNotRunning(box BoxRecord) error {
+	switch {
+	case box.State == "orphan":
+		return orphanCannot(box.ID, "run a command in")
+	case box.State == "gone":
+		return errorf("the box %s is gone: its disk no longer exists, so there is nothing to start. `box rm %s --yes` "+
+			"removes what is left of it", box.ID, box.ID)
+	case box.JobMissing:
+		return errorf("the box %s is stopped: Nomad no longer has its job, and its disk is kept. `box start %s` runs "+
+			"it again", box.ID, box.ID)
+	case box.State == "stopped":
+		return errorf("the box %s is stopped: its disk is kept. `box start %s` runs it again", box.ID, box.ID)
+	case box.State == "starting":
+		return errorf("the box %s is starting; `box status %s` shows when the guest answers", box.ID, box.ID)
+	default:
+		return errorf("the box %s is %s, not running; the guest cannot be reached. `box start %s` starts it again",
+			box.ID, dash(box.State), box.ID)
+	}
 }

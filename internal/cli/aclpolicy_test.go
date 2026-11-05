@@ -72,8 +72,15 @@ func TestBoxOperatorPolicyGrantsWhatTheCommandNeeds(t *testing.T) {
 		require.True(t, operator.AllowVariableOperation("default", boxStoreVariable, op, nil),
 			"the operator must be able to %s %s", op, boxStoreVariable)
 	}
+	// The description of a box, where its job cannot be: create/start/resize/
+	// upgrade write it, ls/status/start read it, rm deletes it.
+	for _, op := range []string{acl.VariablesCapabilityRead, acl.VariablesCapabilityWrite, acl.VariablesCapabilityDestroy} {
+		require.True(t, operator.AllowVariableOperation("default", BoxSpecVariable("dev1"), op, nil),
+			"the operator must be able to %s %s", op, BoxSpecVariable("dev1"))
+	}
 	// And nothing else: no other variable, no listing, no other namespace.
-	require.False(t, operator.AllowVariableOperation("default", "nomad/jobs/box-dev1", acl.VariablesCapabilityWrite, nil))
+	require.False(t, operator.AllowVariableOperation("default", "nomad/jobs/other-dev1", acl.VariablesCapabilityWrite, nil),
+		"the description path is the box's own, not every job's")
 	require.False(t, operator.AllowVariableOperation("default", "other/secret", acl.VariablesCapabilityRead, nil))
 	require.False(t, operator.AllowVariableOperation("agent-workers", boxExecutorsVariable, acl.VariablesCapabilityRead, nil))
 
@@ -153,6 +160,13 @@ func TestDefaultWorkloadIdentityScopingDoesNotCoverTheSharedPath(t *testing.T) {
 	require.False(t, defaults.AllowVariableOperation("default", boxExecutorsVariable, acl.VariablesCapabilityRead, claim),
 		"nomad/jobs/box-executors is a sibling of nomad/jobs/box-dev1, not below it")
 	require.False(t, defaults.AllowVariableOperation("default", "nomad/jobs/box-other", acl.VariablesCapabilityRead, claim))
+
+	// The description of a box is a sibling of the paths a workload identity may
+	// read, so no box can read or write its own: the description is the CLI's, and
+	// a box does not need it -- it gets a rendered job, not a description.
+	require.False(t, defaults.AllowVariableOperation("default", BoxSpecVariable("dev1"), acl.VariablesCapabilityRead, claim))
+	require.False(t, defaults.AllowVariableOperation("default", BoxSpecVariable("dev1"), acl.VariablesCapabilityWrite, claim),
+		"a box must never be able to change what a start registers")
 }
 
 func TestACLPoliciesUseTheNamesTheCommandUses(t *testing.T) {

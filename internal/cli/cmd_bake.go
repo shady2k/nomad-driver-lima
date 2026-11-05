@@ -142,6 +142,9 @@ func (a *App) bakeBox(ctx context.Context, id string, opts bakeOptions) (*bakeOu
 	if err != nil {
 		return nil, err
 	}
+	if job == nil {
+		return nil, orphanCannot(id, "bake")
+	}
 	spec, err := SpecFromJob(job)
 	if err != nil {
 		return nil, err

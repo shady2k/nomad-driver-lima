@@ -26,6 +26,12 @@ func (a *App) cmdUpgrade(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if box.State == "orphan" || job == nil {
+		return orphanCannot(id, "upgrade")
+	}
+	if box.JobMissing {
+		return stoppedCannot(id, "box upgrade "+id)
+	}
 	spec, err := SpecFromJob(job)
 	if err != nil {
 		return err
@@ -93,6 +99,10 @@ func (a *App) cmdUpgrade(ctx context.Context, args []string) error {
 	evalID := ""
 	if resp != nil {
 		evalID = resp.EvalID
+	}
+	if err := a.storeBoxSpec(ctx, id, engineered); err != nil {
+		return wrapKeep(err, "the box %s is restarting on platform bundle %s, but its description was not stored, "+
+			"so `box start %s` would bring it back on the old one once Nomad collects its job", id, target.Version, id)
 	}
 	if !*wait {
 		out.Warn = fmt.Sprintf("the box is starting on platform bundle %s; `box status %s` shows when it is back",

@@ -40,6 +40,7 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 	}
 	capacity := map[string]int64{}
 	volumeNode := map[string]string{}
+	names := map[string]string{}
 	for _, stub := range volumes {
 		if stub != nil {
 			capacity[stub.Name] = stub.CapacityBytes
@@ -56,6 +57,10 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 		nodeID := boxes[i].NodeID
 		if nodeID == "" {
 			nodeID = volumeNode[boxes[i].Volume]
+		}
+		boxes[i].NodeID = nodeID
+		if boxes[i].Node == "" {
+			boxes[i].Node = a.nodeNameFor(ctx, names, nodeID)
 		}
 		byBox, err := a.nodeDisks(ctx, disks, nodeID)
 		if err != nil {

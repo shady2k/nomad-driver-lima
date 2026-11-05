@@ -128,6 +128,12 @@ func (a *App) waitRunning(ctx context.Context, box BoxRecord, timeout time.Durat
 
 // notRunning explains a box the guest cannot be reached in.
 func notRunning(box BoxRecord) error {
+	switch box.State {
+	case "stopped", "orphan", "gone":
+		// A box that is not running because it has no job is not a guest that
+		// went quiet: it is a disk, and the sentence that says so is boxNotRunning.
+		return boxNotRunning(box)
+	}
 	detail := ""
 	if box.Note != "" {
 		detail = " (" + box.Note + ")"

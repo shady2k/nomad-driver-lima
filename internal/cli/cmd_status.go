@@ -75,13 +75,15 @@ func (a *App) cmdStatus(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	spec, specErr := SpecFromJob(job)
-	if specErr != nil {
-		return specErr
-	}
-	out := &statusOutput{
-		Box: box,
-		Spec: &statusSpec{
+	out := &statusOutput{Box: box}
+	// An orphan has no job and no description: there is no spec to show, and the
+	// disk is all there is to look at.
+	if job != nil {
+		spec, specErr := SpecFromJob(job)
+		if specErr != nil {
+			return specErr
+		}
+		out.Spec = &statusSpec{
 			Image:      spec.ImageVersion,
 			ImageURL:   spec.ImageURL,
 			SHA256:     spec.ImageSHA256,
@@ -92,15 +94,15 @@ func (a *App) cmdStatus(ctx context.Context, args []string) error {
 			DiskGiB:    spec.DiskGiB,
 			TaskMemMiB: spec.TaskMemoryMiB(),
 			TaskCPUMHz: spec.TaskCPUShares(),
-		},
-	}
-	if keys := executorKeysFromJob(job); len(keys) > 0 {
-		items := make(map[string]string, len(keys))
-		for _, key := range keys {
-			items[key] = ""
 		}
-		out.Spec.ExecutorFiles = keys
-		out.Spec.Executors = executorsOf(executorFilesOf(items))
+		if keys := executorKeysFromJob(job); len(keys) > 0 {
+			items := make(map[string]string, len(keys))
+			for _, key := range keys {
+				items[key] = ""
+			}
+			out.Spec.ExecutorFiles = keys
+			out.Spec.Executors = executorsOf(executorFilesOf(items))
+		}
 	}
 
 	if volume := a.volumeFor(ctx, id); volume != nil {
@@ -239,22 +241,35 @@ func (a *App) printStatus(out *statusOutput) {
 	if out.Box.Note != "" {
 		a.note("  note    %s", out.Box.Note)
 	}
-	a.note("  spec    %s, task reserves %d MiB / %d MHz",
-		describeSpec(BoxSpec{CPUs: out.Spec.CPUs, MemoryMiB: out.Spec.MemoryMiB, DiskGiB: out.Spec.DiskGiB,
-			ImageVersion: out.Spec.Image, Arch: out.Spec.Arch}),
-		out.Spec.TaskMemMiB, out.Spec.TaskCPUMHz)
-	if out.Spec.Platform != "" {
+	if out.Spec != nil {
+		a.note("  spec    %s, task reserves %d MiB / %d MHz",
+			describeSpec(BoxSpec{CPUs: out.Spec.CPUs, MemoryMiB: out.Spec.MemoryMiB, DiskGiB: out.Spec.DiskGiB,
+				ImageVersion: out.Spec.Image, Arch: out.Spec.Arch}),
+			out.Spec.TaskMemMiB, out.Spec.TaskCPUMHz)
+	}
+	if out.Spec != nil && out.Spec.Platform != "" {
 		a.note("  platform %s (read-only mount at /opt/box)", out.Spec.Platform)
 	}
 	if out.Volume != nil {
-		a.note("  disk    volume %s (%s, %s) at %s", out.Volume.Name, dash(out.Volume.PluginID),
-			humanBytes(out.Volume.CapacityBytes), dash(out.Volume.HostPath))
+		a.note("  volume  %s (%s) at %s", out.Volume.Name, dash(out.Volume.PluginID), dash(out.Volume.HostPath))
+	}
+	// The disk's real size comes from the driver, which reads it out of the disk
+	// file. Nomad's volume record keeps the capacity the plugin reported when the
+	// volume was created: a dynamic host volume is never resized through the
+	// API, so a `box resize --disk-gib` cannot move that number.
+	switch {
+	case out.Box.DiskVirtualBytes > 0:
+		a.note("  disk    %s%s", humanBytes(out.Box.DiskVirtualBytes), volumeRecordNote(out))
+	case out.Volume != nil && out.Volume.CapacityBytes > 0:
+		a.note("  disk    %s, as Nomad records it for the volume", humanBytes(out.Volume.CapacityBytes))
 	}
 	if out.Box.DiskUsedBytes > 0 || out.Box.DiskVirtualBytes > 0 {
 		a.note("  usage   %s used of %s (the rest is free inside the box)", humanBytes(out.Box.DiskUsedBytes),
 			humanBytes(out.Box.DiskVirtualBytes))
 	}
-	if len(out.Spec.Executors) > 0 {
+	if out.Spec == nil {
+		a.note("  spec    nothing describes this disk: no job and no stored description")
+	} else if len(out.Spec.Executors) > 0 {
 		a.note("  exec    %s (%d file(s), from %s)", strings.Join(out.Spec.Executors, ", "),
 			len(out.Spec.ExecutorFiles), boxExecutorsVariable)
 	} else {
@@ -342,4 +357,24 @@ func (a *App) volumeFor(ctx context.Context, id string) *statusVolume {
 		return out
 	}
 	return nil
+}
+
+// volumeRecordNote explains, in one clause, the difference between the disk's
+// real size and the capacity Nomad records for its volume.
+//
+// A dynamic host volume keeps the capacity its plugin reported when the volume
+// was created: Nomad's register path never asks the plugin again, and the state
+// store writes the CapacityBytes the request carries, so an update cannot resize
+// it. A box that grew its disk with `box resize --disk-gib` therefore has a
+// volume record that says the old size; the disk in it does not.
+func volumeRecordNote(out *statusOutput) string {
+	if out.Volume == nil || out.Volume.CapacityBytes <= 0 || out.Box.DiskVirtualBytes <= 0 {
+		return ""
+	}
+	if out.Volume.CapacityBytes == out.Box.DiskVirtualBytes {
+		return ""
+	}
+	return fmt.Sprintf(" (Nomad records %s for the volume: a dynamic host volume keeps the capacity its plugin "+
+		"reported when it was created, and no update changes that; the disk itself is the size above)",
+		humanBytes(out.Volume.CapacityBytes))
 }

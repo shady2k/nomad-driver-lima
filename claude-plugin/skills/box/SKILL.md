@@ -36,9 +36,15 @@ box cp dev1:/root/repo/out ./out          # files out
 box status dev1                           # state, task events, guest, sessions, disk used
 box top dev1 -f                           # CPU, iowait, load, memory, disk, the biggest processes
 box stop dev1                             # keep the disk, free the RAM
-box start dev1                            # same disk, same files
+box start dev1                            # same disk, same files, also tomorrow
 box rm dev1 --yes                         # the disk is deleted
 ```
+
+A box is its disk, not its Nomad job: `box stop` keeps a description of the box
+in a Nomad variable, so `box start` brings it back on the same disk after Nomad
+has collected the dead job (its GC runs every few hours). A disk nothing
+describes - a box made before boxes kept one - shows as `orphan` and cannot be
+started again.
 
 `--json` on any command gives one JSON document to parse.
 
@@ -204,8 +210,10 @@ starts, so no key lands on a disk.
   refused it. Ask for less, or stop a box you own with `box stop`.
 - `Nomad rejected the box job ... the Nomad token needs ...` - the token lacks
   a rule, and the message names it. Tell the operator; do not retry.
-- `the box is stopped, not running` - `box start <id>` brings it back on its
-  disk.
+- `the box <id> is stopped` - `box start <id>` brings it back on its disk, also
+  when Nomad no longer has its job.
+- `the box <id> is an orphan` - its disk is there and nothing describes it, so it
+  cannot be started; `box rm <id> --yes` deletes the disk. Tell the owner.
 - `the guest did not answer boxctl info` - the box is up but `boxd` is not (yet);
   `box logs <id> -f` shows the guest log, `box status <id>` shows the task
   events.

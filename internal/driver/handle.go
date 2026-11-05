@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -169,9 +168,6 @@ func (h *taskHandle) taskStatus() *drivers.TaskStatus {
 	}
 	if h.instanceDir != "" {
 		attrs["instance_dir"] = h.instanceDir
-	}
-	if h.vmPID > 0 {
-		attrs["vm_pid"] = strconv.Itoa(h.vmPID)
 	}
 	return &drivers.TaskStatus{
 		ID:               h.tc.ID,

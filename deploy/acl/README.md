@@ -50,12 +50,21 @@ What it grants, and the command that needs it:
 | `host-volume-write` | `box create` makes the disk `box-<id>`, `box rm` deletes it, `box resize` raises it |
 | `host_volume "box-*"` `mount-readwrite` | `box create`, `start`, `resize`: a job that mounts its disk `box-<id>` is refused without it, whatever the namespace grants |
 | `node` `read` | `box capacity` |
+| `variables` `read`/`write`/`destroy` on `nomad/jobs/box-*` | `box create`, `start`, `resize` and `upgrade` write the description of a box (`nomad/jobs/box-<id>/spec`); `ls`, `status` and `start` read it; `rm` deletes it |
 | `variables` `read`/`write`/`destroy` on `nomad/jobs/box-executors` | `box executors set`, `show`, `delete` |
 | `variables` `read`/`write`/`destroy` on `nomad/jobs/box-store` | `box store set`, `box store show` (the operator's image store) |
 
 Nothing else: no agent, operator or ACL access, no node write, no other
 namespace, no other variable path. A token with `box-operator` alone can run
 every `box` command and nothing more.
+
+The description of a box is the rendered job as JSON, in
+`nomad/jobs/box-<id>/spec`. It exists because a box is its volume and its disk,
+not its job: Nomad deletes a dead job with its history after
+`job_gc_threshold` (4 hours by default), and without the description a box
+stopped yesterday could not be started today even with its disk intact. The
+variable holds no secret: the job names the files and the Vault paths an
+executor reads, and never a value.
 
 ## The box workloads
 

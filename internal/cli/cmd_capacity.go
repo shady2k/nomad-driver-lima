@@ -41,6 +41,21 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// A box is its disk, and a box Nomad has no job for still holds one: count
+	// the boxes from the boxes, not from the allocations, so that a listed disk
+	// is never a node with no boxes.
+	boxes, boxErr := a.collectBoxes(ctx)
+	if boxErr != nil {
+		a.note("note: the boxes could not be read, so BOXES counts only what Nomad's allocations say: %s", boxErr)
+	}
+	var byBox map[string]BoxRecord
+	if boxErr == nil {
+		countNodeBoxes(nodes, boxes)
+		byBox = make(map[string]BoxRecord, len(boxes))
+		for _, box := range boxes {
+			byBox[box.ID] = box
+		}
+	}
 	arches := summarizeArches(nodes)
 	if a.JSON {
 		return a.printJSON(capacityOutput{Nodes: nodes, Arches: arches})
@@ -82,7 +97,7 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 			uncountedSummary(node),
 			driver,
 			plugin,
-			fmt.Sprintf("%d", node.Boxes),
+			boxesCell(node),
 		})
 	}
 	a.printTable(headers, rows)
@@ -111,7 +126,8 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 	// the sum.
 	for _, node := range nodes {
 		for _, disk := range node.Disks {
-			a.note("%s/%s: %s used of %s", node.Name, disk.BoxID, humanBytes(disk.UsedBytes), humanBytes(disk.VirtualBytes))
+			a.note("%s/%s: %s used of %s%s", node.Name, disk.BoxID, humanBytes(disk.UsedBytes),
+				humanBytes(disk.VirtualBytes), diskBoxNote(byBox, disk.BoxID))
 		}
 	}
 
@@ -132,4 +148,75 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 		a.note("nodes that cannot take a new box: %s", strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// countNodeBoxes counts the boxes of every node by the node their disk is on,
+// and takes the place of the allocation-based count: a box Nomad has no job for
+// still holds a disk on its node, so a table that lists that disk must not say
+// the node holds no boxes.
+func countNodeBoxes(nodes []*NodeCapacity, boxes []BoxRecord) {
+	byNode := make(map[string]*NodeCapacity, len(nodes))
+	for _, node := range nodes {
+		byNode[node.NodeID] = node
+		node.Boxes, node.BoxesStopped, node.OrphanDisks = 0, 0, 0
+	}
+	for _, box := range boxes {
+		node := byNode[box.NodeID]
+		if node == nil {
+			continue
+		}
+		switch box.State {
+		case "orphan":
+			node.OrphanDisks++
+		case "deleted":
+			// A box `box rm` removed has no disk left to count.
+		default:
+			node.Boxes++
+			switch box.State {
+			case "stopped", "gone":
+				node.BoxesStopped++
+			}
+		}
+	}
+}
+
+// boxesCell renders the box count of a node, saying which of them are stopped and
+// which of its disks nothing describes.
+func boxesCell(node *NodeCapacity) string {
+	cell := fmt.Sprintf("%d", node.Boxes)
+	var extra []string
+	if node.BoxesStopped > 0 {
+		extra = append(extra, fmt.Sprintf("%d stopped", node.BoxesStopped))
+	}
+	if node.OrphanDisks > 0 {
+		extra = append(extra, fmt.Sprintf("%d orphan", node.OrphanDisks))
+	}
+	if len(extra) > 0 {
+		cell += " (" + strings.Join(extra, ", ") + ")"
+	}
+	return cell
+}
+
+// diskBoxNote says what a box disk on a node belongs to, so the disk lines and
+// the BOXES column of the table agree.
+func diskBoxNote(boxes map[string]BoxRecord, boxID string) string {
+	if boxes == nil {
+		// The boxes could not be read: the disks are what the driver reports,
+		// and nothing here knows what owns them.
+		return ""
+	}
+	box, ok := boxes[boxID]
+	if !ok {
+		return " (no box of this cluster owns this disk)"
+	}
+	switch box.State {
+	case "stopped":
+		return " (" + boxID + " is stopped: its disk is kept, and `box start " + boxID + "` runs it again)"
+	case "running":
+		return " (" + boxID + " is running)"
+	case "orphan":
+		return " (" + boxID + " is an orphan: nothing describes this disk, and `box rm " + boxID + " --yes` deletes it)"
+	default:
+		return " (" + boxID + " is " + dash(box.State) + ")"
+	}
 }

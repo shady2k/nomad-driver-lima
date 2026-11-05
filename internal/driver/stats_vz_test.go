@@ -3,7 +3,6 @@ package driver
 import (
 	"testing"
 
-	"github.com/hashicorp/nomad/plugins/drivers"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,14 +23,4 @@ func TestLsofHolds(t *testing.T) {
 	// A sibling that shares the prefix is another box.
 	require.False(t, lsofHolds(lsof, []string{"/Users/a/.box/volumes/x"}))
 	require.False(t, lsofHolds(lsof, []string{"/Users/a/.box/lima/a", ""}))
-}
-
-func TestVMPIDIsAnAttributeOnceKnown(t *testing.T) {
-	h := &taskHandle{tc: &drivers.TaskConfig{ID: "t"}, boxID: "b"}
-	require.NotContains(t, h.taskStatus().DriverAttributes, "vm_pid")
-	require.False(t, h.noteVMPID(0))
-	require.True(t, h.noteVMPID(21469))
-	require.False(t, h.noteVMPID(21469), "the same pid is no news")
-	require.Equal(t, "21469", h.taskStatus().DriverAttributes["vm_pid"])
-	require.True(t, h.noteVMPID(30000), "a restarted VM is")
 }

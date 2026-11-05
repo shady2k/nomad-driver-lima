@@ -336,3 +336,49 @@ func (ta *testApp) withDraftNoRecipe(t *testing.T, version, name, parent string)
 	draft.Recipe = ""
 	return draft
 }
+
+// TestImagesListsAPublishedDraftOnce: a publish leaves the draft in the cache of
+// the node that baked it, so the same image and architecture would be listed twice
+// -- once as published, once as "draft on node-1". It is one image.
+func TestImagesListsAPublishedDraftOnce(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.withDraft(t, "project-2", "project", "1.0.0", 12)
+	// Publishing writes the index; the node keeps the draft either way.
+	draft := ta.drafts(t)[0]
+	published := `{
+	  "schema": 1,
+	  "updated_at": "2026-11-02T12:00:00Z",
+	  "images": {
+	    "1.0.0": {"amd64": {"url": "https://images.test/box-base/1.0.0/amd64/box.qcow2", "sha256": "` +
+		strings.Repeat("5d", 32) + `", "size": 1024, "platform": "mount"}},
+	    "project-2": {"amd64": {"url": "https://images.test/box-base/project-2/amd64/box.qcow2", "sha256": "` +
+		draft.SHA256 + `", "size": ` + itoa(int(draft.Size)) + `, "kind": "project", "name": "project",
+	      "parent": "1.0.0", "platform": "mount"}}
+	  },
+	  "platforms": {"1.0.0": {"amd64": {"url": "https://images.test/p.tar.gz", "sha256": "` +
+		strings.Repeat("4a", 32) + `", "size": 1024, "boxd": "0.5.0"}}}
+	}`
+	ta.images.body = published
+	require.Equal(t, ExitOK, ta.run(t, "images"), ta.errOut.String())
+
+	require.Equal(t, 1, strings.Count(ta.out.String(), "project-2"), "the image is one row: %s", ta.out.String())
+	require.Contains(t, ta.out.String(), "published")
+	require.NotContains(t, ta.out.String(), "draft on node-1")
+	require.NotContains(t, ta.errOut.String(), "box images publish project-2 --yes",
+		"a published image has nothing left to publish")
+
+	ta.out.Reset()
+	ta.errOut.Reset()
+	require.Equal(t, ExitOK, ta.run(t, "images", "--json"), ta.errOut.String())
+	var doc imagesOutput
+	require.NoError(t, json.Unmarshal(ta.out.Bytes(), &doc))
+	require.Empty(t, doc.Drafts, "a published image is not a draft any more")
+}
+
+// drafts reads the drafts the fake cluster reports.
+func (ta *testApp) drafts(t *testing.T) []DraftImage {
+	t.Helper()
+	drafts, err := ta.nodeDrafts(t.Context())
+	require.NoError(t, err)
+	return drafts
+}

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad/plugins/drivers"
 	"github.com/stretchr/testify/require"
 
@@ -52,4 +53,36 @@ func TestSampleBoxSaysWhyThereIsNoSample(t *testing.T) {
 	h = newTaskHandle(&drivers.TaskConfig{ID: "t2"}, TaskConfig{BoxID: "box2"})
 	_, err = d.sampleBox(context.Background(), h)
 	require.ErrorContains(t, err, "instance directory")
+}
+
+// TestVMPIDIsAnEventAndNotAnAttribute: Nomad 2.0 consumes no DriverAttributes (its
+// TaskStatus has none since TaskHandle was removed), so an attribute is invisible
+// to every reader. The pid of the VM therefore reaches a reader as a task event,
+// which `box status` prints, and never as an attribute nobody reads.
+func TestVMPIDIsAnEventAndNotAnAttribute(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := NewDriver(ctx, hclog.NewNullLogger())
+	events, err := d.TaskEvents(ctx)
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	pid := strconv.Itoa(os.Getpid())
+	require.NoError(t, os.WriteFile(filepath.Join(dir, box.DriverPIDFile(box.VMTypeQEMU)), []byte(pid+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ha.pid"), []byte(pid), 0o644))
+
+	h := newTaskHandle(&drivers.TaskConfig{ID: "t1", Name: "box", AllocID: "alloc1"}, TaskConfig{BoxID: "box1"})
+	h.setBoxDetails(boxState{InstanceDir: dir})
+	_, err = d.sampleBox(ctx, h)
+	require.NoError(t, err)
+
+	select {
+	case event := <-events:
+		require.Contains(t, event.Message, "VM process of box box1: pid "+pid)
+		require.Equal(t, "stats", event.Annotations["kind"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("no task event named the pid of the VM")
+	}
+	require.NotContains(t, h.taskStatus().DriverAttributes, "vm_pid",
+		"an attribute is invisible through Nomad 2.0: the event is the record")
 }

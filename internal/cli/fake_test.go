@@ -77,6 +77,9 @@ type fakeCluster struct {
 	calls []string
 	// volumeRegisterErr fails the update of an existing volume.
 	volumeRegisterErr error
+	// variableWriteErr makes every VariableWrite fail, as a token without the
+	// variables capability sees it.
+	variableWriteErr error
 	// callsMu guards calls. The streaming calls (Exec, Logs) run in a goroutine
 	// of their own and must not take mu, so record has a lock of its own.
 	callsMu sync.Mutex
@@ -377,6 +380,9 @@ func (c *fakeCluster) VariableWrite(ctx context.Context, v *api.Variable) (*api.
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.record("VariableWrite " + v.Path)
+	if c.variableWriteErr != nil {
+		return nil, c.variableWriteErr
+	}
 	c.variables[v.Path] = v
 	return v, nil
 }
@@ -390,6 +396,26 @@ func (c *fakeCluster) VariableDelete(ctx context.Context, path string) error {
 	}
 	delete(c.variables, path)
 	return nil
+}
+
+// nomadGC does what `nomad system gc` does to a dead job: the job and its history
+// are deleted. The volume and the variable are Nomad's, not the job's, so they
+// stay -- which is the whole point of a box's stored description.
+func (c *fakeCluster) nomadGC() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id, job := range c.jobs {
+		if job.Stop == nil || !*job.Stop {
+			continue
+		}
+		c.record("GC " + id)
+		delete(c.jobs, id)
+		for allocID, alloc := range c.allocs {
+			if alloc.JobID == id {
+				delete(c.allocs, allocID)
+			}
+		}
+	}
 }
 
 // setExecutors puts the given items into the executors variable.

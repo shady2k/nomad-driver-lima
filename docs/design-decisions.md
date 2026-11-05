@@ -274,6 +274,24 @@ from what the box looked like from outside.
   task `box`) plus the volume `box-<id>` mounted as `disk`. `box start`
   re-renders the job from its own spec, so a hand-written box job is normalised on
   start. That is deliberate: one definition, in the CLI.
+- **A box is its volume; Nomad's job is not a durable record of a stopped box.**
+  `box stop` leaves the job dead, and Nomad's job GC deletes a dead job with its
+  history after `job_gc_threshold` (4 hours by default). On a real cluster a box
+  stopped at 02:16 answered "no such box" at 07:13, with its disk intact, while
+  `box stop` had promised that `box start` brings it back. The rendered job is
+  therefore kept where GC does not reach: the Nomad variable
+  `nomad/jobs/box-<id>/spec`, written by `create`, `start`, `resize` and `upgrade`
+  and deleted by `rm`. It is the job as JSON and nothing else, so it holds no
+  secret: a credential reaches a box through a template that names a Vault path or
+  reads the executors variable at render time, never as a value in the job.
+  Rejected: keeping the description in a file on the coordinator (a second state,
+  which the coordinator's loss would take with it) and in the volume directory on
+  the node (a node-side API the CLI does not have).
+- **A box with a description, a volume and no job is `stopped`; a volume with
+  neither is an orphan.** A box made before descriptions existed cannot be started
+  once its job is collected: there is no way back, so `box start` refuses it and
+  says that `box rm <id> --yes` deletes the disk. Inventing a job for such a disk
+  would run a VM nobody can account for.
 - **`box create` chooses the node itself and cleans up after a failure.** It needs
   a node with the driver, the volume plugin, the right architecture and enough
   free cpu, memory and disk, computed like the scheduler. It creates the volume on
@@ -301,8 +319,9 @@ from what the box looked like from outside.
 ## ACLs and credentials
 
 - **The CLI token is scoped to what the CLI does.** `box-operator` grants jobs,
-  host volumes, `alloc exec`, log reads, node read and read/write of the one
-  executors variable — and nothing else. A test parses the policy with Nomad's own
+  host volumes, `alloc exec`, log reads, node read, read/write of the one
+  executors variable and of the boxes' descriptions (`nomad/jobs/box-*/spec`) —
+  and nothing else. A test parses the policy with Nomad's own
   ACL engine and fails if the policy and the command set drift apart.
 - **A box's workload identity cannot read the shared variable.** Nomad scopes a
   workload identity to `nomad/jobs/<job>[/<group>[/<task>]]`, and

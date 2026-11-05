@@ -357,6 +357,16 @@ func (a *App) createBox(ctx context.Context, req boxRequest, wait bool, timeout 
 	if err != nil {
 		return nil, err
 	}
+	// The description of the box is the job as JSON, and Nomad's variable size
+	// limit is checked before anything is created: a job too large to describe
+	// would leave a box nobody can start again.
+	specDoc, err := encodeBoxSpec(job, a.now())
+	if err != nil {
+		return nil, err
+	}
+	if err := requireBoxSpecFits(id, specDoc); err != nil {
+		return nil, err
+	}
 
 	created, err := a.Nomad.CreateHostVolume(ctx, volume)
 	if err != nil {
@@ -400,6 +410,19 @@ func (a *App) createBox(ctx context.Context, req boxRequest, wait bool, timeout 
 	evalID := ""
 	if resp != nil {
 		evalID = resp.EvalID
+	}
+
+	// The description is what makes the box survive Nomad's job GC, so a create
+	// that cannot store it takes the box away again: a disk with no description
+	// is a box nobody can start, and `box create` must not leave one behind.
+	if err := a.writeBoxSpec(ctx, id, specDoc); err != nil {
+		if cleanupErr := a.discardBox(ctx, id, created); cleanupErr != nil {
+			return nil, &Error{Code: ExitCode(err), Msg: err.Error() + "; " + cleanupErr.Error() +
+				"; the box was not removed: `box start " + id + "` writes its description, and " +
+				"`box rm " + id + " --yes` removes it"}
+		}
+		return nil, wrapf(err, "box %s was not created: its description could not be stored, so the box and its "+
+			"disk were removed again", id)
 	}
 
 	if !wait {

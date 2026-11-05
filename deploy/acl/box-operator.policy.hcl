@@ -32,8 +32,15 @@
 #   node read          box capacity: node list, node info and a node's
 #                      allocations (the last one also needs read-job)
 #   variables write    box executors set/show/delete, on nomad/jobs/box-executors;
-#                      box store set/show on nomad/jobs/box-store (both paths
-#                      read/write/destroy, and no other)
+#                      box store set/show on nomad/jobs/box-store; the description
+#                      of every box on nomad/jobs/box-*/spec (all three
+#                      read/write/destroy, and no other path)
+#
+# nomad/jobs/box-<id>/spec is a box's description: the rendered job as JSON,
+# written by create/start/resize/upgrade and read by ls/status/start. A box is
+# its volume and its disk, so the record of how it was made has to outlive the
+# job Nomad deletes a few hours after a stop. It holds no secret: the job names
+# the files and the Vault paths an executor reads, never a value.
 #
 # Nothing else is granted: no agent, operator or ACL access, no other namespace,
 # no other variable path, no node write. The box workloads have their own
@@ -51,6 +58,14 @@ namespace "default" {
   ]
 
   variables {
+    # The description of every box, where Nomad's job GC does not reach:
+    # nomad/jobs/box-<id>/spec holds the rendered job as JSON. `box create`,
+    # `start`, `resize` and `upgrade` write it; `box ls`, `status` and `start`
+    # read it; `box rm` deletes it. It holds no secret -- a credential reaches a
+    # box through a template, never through a value in a job.
+    path "nomad/jobs/box-*" {
+      capabilities = ["read", "write", "destroy"]
+    }
     path "nomad/jobs/box-executors" {
       capabilities = ["read", "write", "destroy"]
     }

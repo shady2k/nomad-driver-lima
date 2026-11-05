@@ -263,8 +263,15 @@ type NodeCapacity struct {
 	Driver DriverInfo `json:"driver"`
 	// VolumePlugins are the dynamic host volume plugins of the node.
 	VolumePlugins []VolumePluginInfo `json:"volume_plugins,omitempty"`
-	// Boxes is the number of box jobs this node hosts.
+	// Boxes is the number of boxes whose disk is on this node: a stopped box
+	// holds its disk, so it counts, and a box Nomad has no job for still counts.
 	Boxes int `json:"boxes"`
+	// BoxesStopped is how many of Boxes are stopped or gone: no job, and no
+	// memory or vCPU taken.
+	BoxesStopped int `json:"boxes_stopped,omitempty"`
+	// OrphanDisks is how many disks on this node belong to no box: nothing
+	// describes them, and `box rm <id> --yes` deletes one.
+	OrphanDisks int `json:"orphan_disks,omitempty"`
 	// Disks is the host footprint of every box disk on the node, stopped boxes
 	// and orphans included.
 	Disks []BoxDisk `json:"box_disks,omitempty"`

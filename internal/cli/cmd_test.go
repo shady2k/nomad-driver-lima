@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/hashicorp/nomad/api"
@@ -443,54 +442,42 @@ func TestResizeCPUsAndMemory(t *testing.T) {
 	require.Equal(t, 2048+BoxMemoryOverheadMiB, *task.Resources.MemoryMB)
 }
 
-func TestResizeDisk(t *testing.T) {
+// The disk grows in the driver, from the job's disk_gib: Nomad's dynamic host
+// volume keeps the capacity its plugin reported when the volume was created, so
+// the resize re-registers the job and leaves the volume record alone.
+func TestResizeDiskGrowsTheJobAndLeavesTheVolumeAlone(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	ta.addBox(t, "dev1")
 	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
 	require.Equal(t, ExitOK, ta.run(t, "resize", "dev1", "--disk-gib", "16"), ta.errOut.String())
-	for _, volume := range ta.cluster.volumes {
-		require.Equal(t, int64(16)<<30, volume.CapacityBytes, "the volume grows with the disk")
-	}
+	require.Contains(t, ta.errOut.String(), "disk 8 -> 16 GiB")
 	require.Equal(t, 16, ta.cluster.jobs["box-dev1"].TaskGroups[0].Tasks[0].Config["disk_gib"])
-}
-
-// Nomad refuses to update a volume in use: a running box is stopped first, and
-// it runs again afterwards.
-func TestResizeDiskStopsARunningBoxFirst(t *testing.T) {
-	ta := newTestApp(t, indexJSON)
-	ta.addBox(t, "dev1")
-	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
-	require.Equal(t, ExitOK, ta.run(t, "resize", "dev1", "--disk-gib", "16"), ta.errOut.String())
-
-	stop, grow, register := -1, -1, -1
-	for i, call := range ta.cluster.calls {
-		switch {
-		case strings.HasPrefix(call, "StopJob box-dev1"):
-			stop = i
-		case strings.HasPrefix(call, "RegisterHostVolume"):
-			grow = i
-		case strings.HasPrefix(call, "RegisterJob"):
-			register = i
-		}
+	for _, volume := range ta.cluster.volumes {
+		require.Equal(t, int64(8)<<30, volume.CapacityBytes,
+			"the volume record keeps the size its plugin reported: a register cannot change it")
+		require.Equal(t, int64(8)<<30, volume.RequestedCapacityMaxBytes)
 	}
-	require.True(t, stop >= 0 && stop < grow && grow < register, "calls: %v", ta.cluster.calls)
-	require.Equal(t, ExitOK, ta.run(t, "status", "dev1"))
-	require.Contains(t, ta.errOut.String()+ta.out.String(), "running")
+	// No volume write at all, and no stop of the job first: the box restarts
+	// because its job changed, and the driver grows the disk then.
+	require.Zero(t, callCount(ta, "RegisterHostVolume"), "calls: %v", ta.cluster.calls)
+	require.Zero(t, callCount(ta, "StopJob"), "calls: %v", ta.cluster.calls)
 }
 
-// A volume that cannot grow leaves the box running as it was, and says so.
-func TestResizeDiskFailureRestartsTheBox(t *testing.T) {
+// The record and the disk disagree after a disk resize, and `box status` says
+// which is which instead of printing the stale number as the size of the disk.
+func TestStatusExplainsTheVolumeRecordAndTheDiskSize(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	ta.addBox(t, "dev1")
-	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
-	ta.cluster.volumeRegisterErr = errors.New("plugin said no")
+	// The driver reports a 16 GiB disk; the volume was created at 8 GiB.
+	ta.cluster.mu.Lock()
+	ta.cluster.addNodeDiskLocked("node-1", "dev1", 300<<20, int64(16)<<30)
+	ta.cluster.mu.Unlock()
 
-	require.NotEqual(t, ExitOK, ta.run(t, "resize", "dev1", "--disk-gib", "16"))
-	require.Contains(t, ta.errOut.String(), "started again with its old size")
-	require.Contains(t, ta.errOut.String(), "plugin said no")
-	job := ta.cluster.jobs["box-dev1"]
-	require.NotEqual(t, 16, job.TaskGroups[0].Tasks[0].Config["disk_gib"])
-	require.False(t, job.Stop != nil && *job.Stop)
+	require.Equal(t, ExitOK, ta.run(t, "status", "dev1"), ta.errOut.String())
+	out := ta.errOut.String()
+	require.Contains(t, out, "disk    16.0 GiB")
+	require.Contains(t, out, "Nomad records 8.0 GiB for the volume")
+	require.Contains(t, out, "no update changes that")
 }
 
 func TestResizeDiskCannotShrink(t *testing.T) {
@@ -634,7 +621,8 @@ func TestGuestCommandsNeedARunningBox(t *testing.T) {
 	ta.errOut.Reset()
 	rc := ta.run(t, "run", "dev1", "--", "true")
 	require.Equal(t, ExitError, rc)
-	require.Contains(t, ta.errOut.String(), "not running")
+	require.Contains(t, ta.errOut.String(), "the box dev1 is stopped")
+	require.Contains(t, ta.errOut.String(), "`box start dev1` runs it again")
 }
 
 func TestSessionCommands(t *testing.T) {

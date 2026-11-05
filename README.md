@@ -455,6 +455,7 @@ box send dev1 s-7f3a2c "make the tests pass; the repository is in /root/repo"
 box wait dev1 s-7f3a2c --timeout 15m          # returns the moment the turn ends
 
 box stop dev1                                # keep the disk, free the RAM
+box start dev1                               # same disk, also after Nomad's job GC
 box rm dev1 --yes                            # the disk is deleted
 ```
 

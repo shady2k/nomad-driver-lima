@@ -62,6 +62,9 @@ func (a *App) cmdImages(ctx context.Context, args []string) error {
 			bases = append(bases, image)
 		}
 	}
+	// A published image stays in the cache of the node that baked it, so its
+	// draft record outlives the publish: show the image once, as published.
+	drafts = prunePublishedDrafts(drafts, append(append([]*ImageArtifact{}, bases...), projects...))
 	if a.JSON {
 		out := imagesOutput{IndexURL: url, Available: index != nil, UpdatedAt: updated, Drafts: drafts,
 			Images: append(append([]*ImageArtifact{}, bases...), projects...), Platforms: platforms, Error: indexNote}
@@ -377,4 +380,29 @@ func shortSHA(sum string) string {
 		return sum
 	}
 	return sum[:12]
+}
+
+// prunePublishedDrafts drops the drafts a store already publishes: an image and
+// architecture that is in the index is created from there, and a second row for
+// the same pair says the image is in two places at once, which it is not.
+func prunePublishedDrafts(drafts []DraftImage, published []*ImageArtifact) []DraftImage {
+	if len(drafts) == 0 || len(published) == 0 {
+		return drafts
+	}
+	type key struct{ version, arch string }
+	have := make(map[key]bool, len(published))
+	for _, artifact := range published {
+		if artifact == nil {
+			continue
+		}
+		have[key{artifact.Version, NormalizeArch(artifact.Arch)}] = true
+	}
+	out := make([]DraftImage, 0, len(drafts))
+	for _, draft := range drafts {
+		if have[key{draft.Version, NormalizeArch(draft.Arch)}] {
+			continue
+		}
+		out = append(out, draft)
+	}
+	return out
 }

@@ -314,6 +314,13 @@ of what its image expects.
 Every box with its state, node, allocation, image, size, the disk it really
 occupies on the host, and its sessions.
 
+A box is its volume and its disk, not its job: Nomad deletes a dead job after
+`job_gc_threshold` (4 hours by default), and the box is still there. `box ls`,
+`box status` and `box capacity` show it as `stopped` from the description kept in
+the Nomad variable `nomad/jobs/box-<id>/spec`. A disk with neither a job nor a
+description - a box made before boxes kept one - is shown as `orphan`: `box rm
+<id> --yes` deletes it, and there is no way to start it again.
+
 ### `box status <id> [--events N]`
 
 One box in detail: state, task events (default 10), the platform bundle it
@@ -327,18 +334,26 @@ whole of what the status had to show.
 
 ### `box stop <id> [--timeout D]` / `box start <id> [--timeout D] [--wait]`
 
-Stop keeps the disk and frees the RAM. Start brings the same disk back.
+Stop keeps the disk and frees the RAM, and the box stays a box: the description
+of it is a Nomad variable (`nomad/jobs/box-<id>/spec`) that no garbage collection
+removes, so `box start` brings the same disk back tomorrow as well as in a minute.
+Start registers the stored job again, with the executor credentials that are
+staged now and the CPU reservation of the box's node; on a box that is already
+running it only refreshes that description.
 
 ### `box rm <id> [--yes] [--timeout D]`
 
 Deletes the box **and its disk**: the VM is stopped, the instance deleted, the
-volume and its directory removed. It asks first unless `--yes` is given, and it
-refuses to ask from a non-interactive shell.
+volume and its directory removed, and the stored description deleted with it. It
+works when Nomad no longer has the job, and on an `orphan` disk. It asks first
+unless `--yes` is given, and it refuses to ask from a non-interactive shell.
 
 ### `box resize <id> [--cpus N] [--memory-mib N] [--disk-gib N] [--timeout D] [--wait]`
 
-Growing the disk of a running box stops it first: Nomad does not update a volume
-in use. If the volume cannot grow, the box runs again with its old size.
+The disk grows in the driver, from the job's `disk_gib`. Nomad's dynamic host
+volume keeps the capacity its plugin reported when the volume was created - a
+re-registration of the volume never changes it - so the volume record goes on
+saying the old size, and `box status` prints both figures when they disagree.
 
 Changes the size of a box. It is an **offline** change: the VM stops, is edited
 and starts again. Memory must be at least 256 MiB, and the disk can only grow.

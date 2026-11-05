@@ -211,8 +211,9 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   for the box fails the create, so a draft on a full node waits until something
   there stops. Publishing is what makes the image available on every node.
 - **Drafts are never pruned.** The image cache keeps every baked image and its
-  record, and `box images` keeps listing it: nothing here expires an image, and a
-  full cache is the operator's to clean. A cache entry removed by hand is a draft
+  record, and `box images` lists it until a store publishes the same image and
+  architecture -- after that the published entry is the one row: nothing here
+  expires an image, and a full cache is the operator's to clean. A cache entry removed by hand is a draft
   whose record stays on the node: creating a box from it fails, and the driver's
   task event names the image it could not find.
 - **An arm64 box bakes an arm64 image, and a disk is not portable.** The bake job
@@ -288,6 +289,23 @@ where one is known, what would close it. Nothing here is a promise to fix it.
 
 ## Lifecycle and operations
 
+- **A box's description is a Nomad variable, and Nomad holds 64 KiB per
+  variable.** The rendered job is a few KiB, so a box fits with room to spare, but
+  a job with hundreds of executor templates does not: `box create` refuses such a
+  job before it creates the disk, with the size and the limit, and nothing is left
+  behind. `box stop` and `box start` refresh the executor files of a box without
+  storing a bigger job.
+- **A box made before boxes kept a description cannot survive the job GC.** Its
+  job is the only record of how it was made, so once Nomad collects it the box is
+  an `orphan`: `box ls` and `box status` say so, `box start` refuses it, and `box
+  rm <id> --yes` deletes the disk. There is no way back for such a box, by design.
+- **A dynamic host volume keeps the capacity its plugin reported at creation.**
+  Nomad's register path never asks the plugin again and its state store writes the
+  capacity the request carries, so `box resize --disk-gib` grows the disk in the
+  driver and leaves the volume record at the old size. `box status` prints the
+  disk's real size and, when the two disagree, says which number is which; nothing
+  schedules on a host volume's capacity, so the stale record costs a confusing
+  `nomad volume status` line, not a placement.
 - **`box rm` then `box create` with the same id fails for a while.** Nomad keeps
   the deleted volume record until its garbage collection threshold ("volume name
   already exists on this node"); a new id works at once.
@@ -299,6 +317,13 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   minutes, or without its disk, appears in the driver's fingerprint and as a line
   of `box capacity`; the operator removes it on the node with `limactl delete`.
   No command of this project does it.
+- **The VM's pid is not a driver attribute.** Nomad 2.0 consumes no
+  `DriverAttributes` at all (its `TaskStatus` has none since `TaskHandle` was
+  removed), so the pid an attribute would carry is invisible. It reaches a reader
+  as a task event instead: "Box <id> is running (pid N)" always, and "VM process
+  of box <id>: pid N" when the client sets
+  `telemetry.publish_allocation_metrics`, which is also what makes the driver
+  sample the VM at all. `box status <id>` prints the recent task events.
 - **Nomad keeps a node attribute the driver stops sending.** It removes one only
   when the new value is empty, so the driver sends a gone box's keys empty once
   and `box capacity` reads the driver's own attributes, not the node's. Keys a

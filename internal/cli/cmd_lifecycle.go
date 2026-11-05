@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/hashicorp/nomad/api"
 )
 
 // lifecycleOutput is the JSON document of stop, start, rm and resize.
@@ -65,12 +63,23 @@ func (a *App) cmdStart(ctx context.Context, args []string) error {
 	}
 	out := lifecycleOutput{Action: "start", Box: box, Volume: BoxVolumeName(id)}
 	if box.State == "running" {
-		out.Warn = "the box is already running"
+		// A start is also the moment to make sure the box can be started again
+		// after Nomad collects its job: a box created before descriptions were
+		// stored has none yet, and every start is a fresh one.
+		if err := a.storeBoxSpec(ctx, id, job); err != nil {
+			return wrapKeep(err, "the box %s runs, but its description was not stored, so `box start %s` could not "+
+				"bring it back once Nomad collects its job", id, id)
+		}
+		out.Warn = "the box is already running; its description in " + BoxSpecVariable(id) + " is up to date"
 		return a.printLifecycle(&out)
+	}
+	if box.State == "orphan" || job == nil {
+		return orphanCannot(id, "start")
 	}
 	if !a.volumeExists(ctx, id) {
 		return errorf("the disk of box %s is gone: the volume %s does not exist, so the box cannot start. "+
-			"`box rm %s --yes` removes the job, or `box create %s ...` makes a new box", id, BoxVolumeName(id), id, id)
+			"`box rm %s --yes` removes what is left of it, or `box create %s ...` makes a new box",
+			id, BoxVolumeName(id), id, id)
 	}
 	spec, err := SpecFromJob(job)
 	if err != nil {
@@ -92,6 +101,13 @@ func (a *App) cmdStart(ctx context.Context, args []string) error {
 	evalID := ""
 	if resp != nil {
 		evalID = resp.EvalID
+	}
+	// The description is what keeps the box after Nomad collects the job, so it
+	// is written before the wait: a box that times out is still a box that can be
+	// started again tomorrow.
+	if err := a.storeBoxSpec(ctx, id, engineered); err != nil {
+		return wrapKeep(err, "the box %s was registered, but its description was not stored, so `box start %s` "+
+			"cannot bring it back once Nomad collects its job", id, id)
 	}
 	if !*wait {
 		out.Warn = "the box is starting; `box status " + id + "` shows when it is ready"
@@ -121,7 +137,19 @@ func (a *App) cmdRemove(ctx context.Context, args []string) error {
 		return err
 	}
 	if !*yes {
-		ok, err := a.confirm(fmt.Sprintf("delete box %s and its disk (%d GiB of work)? [y/N] ", id, box.DiskGiB))
+		question := fmt.Sprintf("delete box %s and its disk (%d GiB of work)? [y/N] ", id, box.DiskGiB)
+		switch box.State {
+		case "orphan":
+			question = fmt.Sprintf("delete the disk %s of the orphan %s? Nothing describes it, so the disk is all "+
+				"that is left (%d GiB): [y/N] ", BoxVolumeName(id), id, box.DiskGiB)
+		case "stopped":
+			question = fmt.Sprintf("delete box %s and its disk (%d GiB of work)? The box is stopped, and "+
+				"`box start %s` would run it again: [y/N] ", id, box.DiskGiB, id)
+		case "gone":
+			question = fmt.Sprintf("delete what is left of box %s (the description in %s)? Its disk is gone: [y/N] ",
+				id, BoxSpecVariable(id))
+		}
+		ok, err := a.confirm(question)
 		if err != nil {
 			return err
 		}
@@ -137,12 +165,21 @@ func (a *App) cmdRemove(ctx context.Context, args []string) error {
 		return err
 	}
 	if len(deleted) == 0 {
-		out.Warn = "the job was deleted; there was no volume left to delete"
+		out.Warn = "there was no volume left to delete"
+	}
+	// The description goes with the disk: a box is the two of them, and a
+	// description without a disk would be a box `box start` cannot run.
+	forgot, err := a.forgetBoxSpec(ctx, id)
+	if err != nil {
+		return err
 	}
 	box.State = "deleted"
 	out.Box = box
 	if len(deleted) > 0 {
 		out.Changes = append(out.Changes, "deleted volume "+strings.Join(deleted, ", "))
+	}
+	if forgot {
+		out.Changes = append(out.Changes, "deleted the description "+BoxSpecVariable(id))
 	}
 	return a.printLifecycle(&out)
 }
@@ -218,6 +255,12 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if box.State == "orphan" || job == nil {
+		return orphanCannot(id, "resize")
+	}
+	if box.JobMissing {
+		return stoppedCannot(id, "box resize "+id)
+	}
 	spec, err := SpecFromJob(job)
 	if err != nil {
 		return err
@@ -241,14 +284,12 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 			spec.MemoryMiB = *memoryMiB
 		}
 	}
-	diskGrew := false
 	if *diskGiB > 0 {
 		if *diskGiB < spec.DiskGiB {
 			return usagef("the disk of box %s is %d GiB and can only grow, not shrink to %d GiB", id, spec.DiskGiB, *diskGiB)
 		}
 		if *diskGiB != spec.DiskGiB {
 			out.Changes = append(out.Changes, fmt.Sprintf("disk %d -> %d GiB", spec.DiskGiB, *diskGiB))
-			diskGrew = true
 			spec.DiskGiB = *diskGiB
 		}
 	}
@@ -266,11 +307,11 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if diskGrew {
-		if err := a.growStoppedVolume(ctx, box, job, spec.DiskGiB, *timeout); err != nil {
-			return err
-		}
-	}
+	// The disk grows in the driver, from the job's disk_gib: Nomad's dynamic host
+	// volume keeps the capacity its plugin reported when the volume was created,
+	// and a re-registration of the volume does not change it (see the note
+	// `box status` prints when the two disagree). So nothing here touches the
+	// volume record.
 	resp, err := a.Nomad.RegisterJob(ctx, engineered)
 	if err != nil {
 		return wrapf(err, "Nomad rejected the new size for box %s%s", id, registerDenied(err, BoxVolumeName(id)))
@@ -278,6 +319,10 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 	evalID := ""
 	if resp != nil {
 		evalID = resp.EvalID
+	}
+	if err := a.storeBoxSpec(ctx, id, engineered); err != nil {
+		return wrapKeep(err, "the box %s is restarting at its new size, but its description was not stored, so "+
+			"`box start %s` would bring it back at the old size once Nomad collects its job", id, id)
 	}
 	if !*wait {
 		out.Warn = "the box is being resized; `box status " + id + "` shows when it is back"
@@ -310,59 +355,6 @@ func (a *App) shareNote(ctx context.Context, nodeID, id string, cpus, memoryMiB,
 		}
 	}
 	return ""
-}
-
-// growStoppedVolume grows the volume of a box that is not running. Nomad refuses
-// to update a volume in use ("cannot update a volume in use"), and a resize
-// restarts the box anyway, so a running box is stopped first. If the volume then
-// cannot grow, the box goes back to running with its old size.
-func (a *App) growStoppedVolume(ctx context.Context, box BoxRecord, job *api.Job, diskGiB int, timeout time.Duration) error {
-	id := box.ID
-	running := box.State != "stopped"
-	if running {
-		if err := a.Nomad.StopJob(ctx, BoxJobName(id), false); err != nil {
-			return wrapf(err, "Nomad could not stop the job %s to grow its disk", BoxJobName(id))
-		}
-		if _, err := a.waitForBoxState(ctx, id, "stopped", timeout); err != nil {
-			return err
-		}
-	}
-	err := a.growVolume(ctx, id, diskGiB)
-	if err == nil || !running {
-		return err
-	}
-	if _, restartErr := a.Nomad.RegisterJob(ctx, job); restartErr != nil {
-		return wrapf(err, "the box %s is stopped and could not be started again (%v): `box start %s`", id, restartErr, id)
-	}
-	return wrapf(err, "the box %s was started again with its old size", id)
-}
-
-// growVolume raises the capacity Nomad records for the box disk.
-func (a *App) growVolume(ctx context.Context, id string, diskGiB int) error {
-	volumes, err := a.Nomad.HostVolumes(ctx)
-	if err != nil {
-		return wrapf(err, "cannot list the volumes")
-	}
-	for _, stub := range volumes {
-		if stub == nil || stub.Name != BoxVolumeName(id) {
-			continue
-		}
-		bytes := int64(diskGiB) * (1 << 30)
-		if stub.CapacityBytes >= bytes {
-			return nil
-		}
-		volume, err := a.Nomad.HostVolume(ctx, stub.ID)
-		if err != nil {
-			return wrapf(err, "cannot read the volume %s", stub.Name)
-		}
-		volume.RequestedCapacityMinBytes = bytes
-		volume.RequestedCapacityMaxBytes = bytes
-		if _, err := a.Nomad.RegisterHostVolume(ctx, volume); err != nil {
-			return wrapf(err, "Nomad could not raise the capacity of %s to %d GiB", stub.Name, diskGiB)
-		}
-		return nil
-	}
-	return notFoundf("the volume %s of box %s does not exist, so its disk cannot grow", BoxVolumeName(id), id)
 }
 
 // printLifecycle writes the result of a lifecycle command.
@@ -533,4 +525,21 @@ func (a *App) noteShare(note string) {
 		return
 	}
 	fmt.Fprintf(a.ErrOut, "note: %s\n", note)
+}
+
+// orphanCannot refuses a command that needs a box's job on a box whose disk
+// nothing describes. There is no way back for such a box: nothing says how it
+// was made, and inventing a job for it would run a VM on a disk nobody can
+// account for.
+func orphanCannot(id, action string) error {
+	return errorf("the box %s is an orphan: its disk %s is there, and neither a job nor a description says how the "+
+		"box was made, so `box %s` cannot act on it. `box rm %s --yes` deletes the disk, or `box create %s ...` "+
+		"makes a new box", id, BoxVolumeName(id), action, id, id)
+}
+
+// stoppedCannot refuses a command that changes a box whose job Nomad no longer
+// has. The box is its disk: a start brings it back, and the change can follow.
+func stoppedCannot(id, next string) error {
+	return errorf("the box %s is stopped: Nomad no longer has its job, and its disk is kept. `box start %s` runs it "+
+		"again, and `%s` works on it after that", id, id, next)
 }
