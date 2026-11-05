@@ -206,9 +206,11 @@ box fail (`-e box_runtime_user=dev` is the one variable a run must name).
   `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS` of that user into the unit's
   environment.
 - Everything Lima touches belongs to that user: the Lima home, the image cache, the
-  instance directory, the disk in the volume and its symlink, the per-start staging
-  directory of the task files (`<lima_home>/_staging`, a name Lima skips), and the
-  volume directory.
+  instance directory, the disk in the volume and its symlink, the per-box directory
+  of the task files the guest mounts (`/run/box-files/<box>` on Linux, a tmpfs of
+  the host), and the volume directory. The driver gives every level it creates on
+  the way to the Lima home and the image cache to that user, so a parent it had to
+  make is not a directory limactl cannot enter.
 
 **Every ancestor of those paths has to let that user in.** A directory the role
 creates can be perfectly right while the path above it is closed: on one node

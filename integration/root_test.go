@@ -256,18 +256,25 @@ func TestBoxRootLifecycle(t *testing.T) {
 		// staging directory the runtime user owns.
 		require.Equal(t, "root-check-local",
 			e.guestSh(t, allocID, "sudo -n cat /etc/box/local/root-local.txt"))
-		// The credentials are on the guest's tmpfs, never on the box disk.
+		// The credentials are on the host's tmpfs, mounted read-only into the
+		// guest, and never on the box disk: the guest sees the 9p mount of
+		// <files root>/<box>/secrets, not a tmpfs of its own (the bundle's
+		// guest/no-secrets.sh checks the same thing from inside).
 		require.Equal(t, "root-check-secrets",
 			e.guestSh(t, allocID, "sudo -n cat /run/box/secrets/root-check.txt"))
-		require.Equal(t, "tmpfs", e.guestSh(t, allocID, "findmnt -no FSTYPE --target /run/box/secrets"))
+		require.Equal(t, "9p", e.guestSh(t, allocID, "findmnt -no FSTYPE --target /run/box/secrets"))
 		require.Equal(t, "700", e.guestSh(t, allocID, "sudo -n stat -c %a /run/box/secrets"))
-		require.Equal(t, "root", e.guestSh(t, allocID, "sudo -n stat -c %U /run/box/secrets"))
+		// 9p shows the host's owner, so the guest sees the runtime user's uid on
+		// the mount (docs/known-limits.md: the box's default user has the same
+		// uid and reads its own executor's key anyway).
+		require.Equal(t, e.runtimeUser, e.guestSh(t, allocID, "sudo -n stat -c %U /run/box/secrets"))
 		require.Empty(t, e.guestSh(t, allocID, "sudo -n find / -xdev -name root-check.txt -path '*secrets*' 2>/dev/null"),
 			"a credential must not be on the box disk")
-		// The staging directory is removed again.
-		entries, err := os.ReadDir(filepath.Join(e.limaHome, "_staging"))
-		require.NoError(t, err)
-		require.Empty(t, entries, "the staging directory must be empty after a start")
+		// The task files are staged in the host's tmpfs (/run/box-files on
+		// Linux), not in the Lima home: the legacy `_staging` directory of a
+		// Lima home is removed by the driver and never written again.
+		_, err := os.Stat(filepath.Join(e.limaHome, "_staging"))
+		require.True(t, os.IsNotExist(err), "the legacy staging directory must be gone, got %v", err)
 
 		// The memory cap is a user scope of the runtime user.
 		cgroup, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", inst.DriverPID))

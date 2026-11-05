@@ -212,6 +212,11 @@ func TestChooseNodeReasons(t *testing.T) {
 		{"ineligible", func(n *NodeCapacity) { n.Eligible = false }, PlacementRequest{}, "not eligible", true},
 		{"no driver", func(n *NodeCapacity) { n.Driver.Installed = false }, PlacementRequest{}, "no box driver", true},
 		{"unhealthy", func(n *NodeCapacity) { n.Driver.HealthReported = true; n.Driver.Healthy = false }, PlacementRequest{}, "unhealthy", true},
+		{"unhealthy says why", func(n *NodeCapacity) {
+			n.Driver.HealthReported = true
+			n.Driver.Healthy = false
+			n.Driver.HealthDescription = "cannot list lima instances: cannot evaluate symlinks in /var/lib/box/lima: permission denied"
+		}, PlacementRequest{}, "unhealthy: cannot list lima instances: cannot evaluate symlinks in /var/lib/box/lima: permission denied", true},
 		{"no plugin", func(n *NodeCapacity) { n.VolumePlugins = nil }, PlacementRequest{}, "host volume plugin", true},
 		{"arch", func(n *NodeCapacity) {}, PlacementRequest{Arch: "arm64"}, "the box needs arm64", false},
 		{"memory", func(n *NodeCapacity) {}, PlacementRequest{MemoryMiB: 8000}, "memory free", false},

@@ -28,6 +28,10 @@ type DriverInfo struct {
 	// whether Nomad reported an opinion at all.
 	Healthy        bool `json:"healthy"`
 	HealthReported bool `json:"-"`
+	// HealthDescription is what the driver said when Nomad reports it unhealthy:
+	// the one sentence that names the thing to fix ("cannot list lima instances:
+	// ... permission denied"), which is why a placement failure prints it too.
+	HealthDescription string `json:"health_description,omitempty"`
 	// Version, Arch, OS, VMType, LimaVersion, Instances and Orphans come from
 	// the driver.box.* fingerprint attributes.
 	Version     string `json:"version,omitempty"`
@@ -381,6 +385,7 @@ func BuildCapacity(node *api.Node, allocs []*api.Allocation) *NodeCapacity {
 		driver.Installed = true
 		driver.Healthy = info.Healthy
 		driver.HealthReported = true
+		driver.HealthDescription = strings.TrimSpace(info.HealthDescription)
 	}
 	if driver.Version != "" {
 		driver.Installed = true
@@ -561,6 +566,9 @@ func (n *NodeCapacity) NodeProblem(req PlacementRequest) string {
 	case !n.Driver.Installed:
 		return fmt.Sprintf("node %s has no box driver installed", n.Name)
 	case n.Driver.Installed && n.Driver.HealthReported && !n.Driver.Healthy:
+		if reason := oneLine(n.Driver.HealthDescription, 240); reason != "" {
+			return fmt.Sprintf("the box driver on node %s is unhealthy: %s", n.Name, reason)
+		}
 		return fmt.Sprintf("the box driver on node %s is unhealthy", n.Name)
 	case !n.hasVolumePlugin(boxVolumePluginID):
 		return fmt.Sprintf("node %s has no %s host volume plugin, so it cannot hold a box disk", n.Name, boxVolumePluginID)
