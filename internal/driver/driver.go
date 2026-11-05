@@ -527,7 +527,7 @@ func (d *Driver) StartTask(tc *drivers.TaskConfig) (*drivers.TaskHandle, *driver
 	// The task files are on the host before the VM boots: the guest mounts
 	// them read-only, so they are there from its first second and after any
 	// reboot of its own.
-	n, err := b.StageTaskFiles(tc.TaskDir().LocalDir, tc.TaskDir().SecretsDir, tc.TaskDir().PrivateDir)
+	n, err := b.StageTaskFiles(tc.TaskDir().LocalDir, tc.TaskDir().SecretsDir, taskPrivateDir(tc))
 	if err != nil {
 		return nil, nil, fmt.Errorf("put the task files of box %s where the guest mounts them: %w", cfg.BoxID, err)
 	}

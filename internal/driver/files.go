@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/hashicorp/nomad/client/allocdir"
 	"github.com/hashicorp/nomad/plugins/drivers"
 
 	"github.com/shady2k/nomad-driver-lima/internal/box"
@@ -71,7 +72,7 @@ func (d *Driver) refreshTaskFiles(h *taskHandle, b *box.Box) {
 	if digest == "" || digest == h.filesDigest() {
 		return
 	}
-	n, err := b.StageTaskFiles(h.tc.TaskDir().LocalDir, h.tc.TaskDir().SecretsDir, h.tc.TaskDir().PrivateDir)
+	n, err := b.StageTaskFiles(h.tc.TaskDir().LocalDir, h.tc.TaskDir().SecretsDir, taskPrivateDir(h.tc))
 	if err != nil {
 		d.emit(h.tc, "files", fmt.Sprintf("Box %s: the task files changed, but they could not be put where the guest mounts them: %v", h.boxID, err))
 		return
@@ -91,4 +92,11 @@ func suffixStderr(stderr string) string {
 		return ""
 	}
 	return ": " + stderr
+}
+
+// taskPrivateDir is the task's private directory on the host. TaskConfig.TaskDir
+// leaves its PrivateDir empty, although Nomad makes the directory, so a host that
+// stages there has to name it itself.
+func taskPrivateDir(tc *drivers.TaskConfig) string {
+	return filepath.Join(tc.TaskDir().Dir, allocdir.TaskPrivate)
 }
