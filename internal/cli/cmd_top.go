@@ -54,6 +54,7 @@ func (a *App) cmdTop(ctx context.Context, args []string) error {
 			}
 		} else {
 			a.note("%s  %s", shortTime(info.Usage.At), info.Usage.Line())
+			a.printGuestProcesses(info.Usage)
 		}
 		if !*follow {
 			return nil
@@ -63,6 +64,31 @@ func (a *App) cmdTop(ctx context.Context, args []string) error {
 			return nil
 		case <-time.After(topEvery):
 		}
+	}
+}
+
+// printGuestProcesses prints what the guest's CPU and memory are going to, under
+// the line that says how much of them there is:
+//
+//   - the work running with no turn in progress, when there is any: a box whose
+//     earlier turn left a build behind has a core taken and nothing to show for
+//     it in its sessions;
+//   - the busiest processes by CPU, always: a summary line alone says the box is
+//     busy and not what makes it busy, which is what `box top` is asked for;
+//   - a process that has held a whole core for ten minutes, which boxd also said
+//     in the journal.
+func (a *App) printGuestProcesses(u *GuestUsage) {
+	if line := u.Leftover.Summary(); line != "" {
+		a.note("  %s", line)
+	}
+	if len(u.Processes) > 0 {
+		a.note("  the busiest processes:")
+		for _, p := range u.Processes {
+			a.note("    %s", p.Line())
+		}
+	}
+	for _, h := range u.Hogs {
+		a.note("  %s", h.Line())
 	}
 }
 

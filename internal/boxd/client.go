@@ -134,14 +134,39 @@ func (c *Client) Wait(ctx context.Context, id string, turn int, timeout time.Dur
 	return out, err
 }
 
-// Events fetches the event feed after a cursor.
-func (c *Client) Events(ctx context.Context, id string, since int64, limit int) ([]Event, int64, error) {
+// EventPage is one page of a session's event feed.
+type EventPage struct {
+	// Events are the events from the cursor, oldest first.
+	Events []Event
+	// Next is the cursor to resume from; it reads that event again.
+	Next int64
+	// Total is how many events there are from the cursor, returned and left.
+	Total int
+	// More says that Total is larger than what this page holds.
+	More bool
+}
+
+// Events fetches the event feed from a cursor.
+func (c *Client) Events(ctx context.Context, id string, since int64, limit int) (EventPage, error) {
 	var out struct {
 		Events []Event `json:"events"`
 		Next   int64   `json:"next"`
+		Total  int     `json:"total"`
+		More   bool    `json:"more"`
 	}
 	err := c.call(ctx, http.MethodGet, fmt.Sprintf("/v1/session/%s/events?since=%d&limit=%d", id, since, limit), nil, &out)
-	return out.Events, out.Next, err
+	page := EventPage{Events: out.Events, Next: out.Next, Total: out.Total, More: out.More}
+	if page.Next == 0 {
+		for _, event := range page.Events {
+			if event.Seq >= page.Next {
+				page.Next = event.Seq + 1
+			}
+		}
+	}
+	if page.Total < len(page.Events) {
+		page.Total = len(page.Events)
+	}
+	return page, err
 }
 
 // Cancel asks boxd to stop the running turn.

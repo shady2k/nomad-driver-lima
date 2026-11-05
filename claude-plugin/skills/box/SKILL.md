@@ -236,6 +236,11 @@ starts, so no key lands on a disk.
   appear as `prime log ...` lines, a failed download names its URL. Retrying
   blind repeats the same wait; a closed session's background setup may still
   be running.
+- **Kill a process in a box by pid, not by pattern.** `pkill -f pattern` inside a
+  `box run` matches the command line that is running it (the pattern is in it) and
+  kills its own `box run`; `box top <id>` or `box run <id> -- ps -ef` gives the
+  pid, and `kill <pid>` is exact. When only a pattern will do, bracket one
+  character so the pattern does not match itself: `pkill -f '[g]o build'`.
 - **`box run` returns when its command exits, and takes the command's output
   with it.** A background process left writing to that output dies of SIGPIPE, so
   start a daemon detached, with its output in a file:

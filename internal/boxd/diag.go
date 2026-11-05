@@ -378,6 +378,321 @@ func topProcesses(n int) string {
 	return strings.Join(parts, ", ")
 }
 
+// --- the guest's processes: what takes the CPU, and what holds a whole core ---
+
+const (
+	// usageProcesses is how many of the guest's busiest processes box top shows:
+	// enough to say what is doing the work, few enough to read.
+	usageProcesses = 5
+	// hogPercent is the share of one core a process has to use in every sample
+	// for its use to count as a whole core.
+	hogPercent = 90.0
+	// hogAfter is how long it has to use it before the journal hears of it. A
+	// compile holds a core for a minute and a test run for five, and neither is
+	// news; ten minutes of it is worth a line, and the line is a measurement.
+	hogAfter = 10 * time.Minute
+)
+
+// ProcessUsage is one of the guest's busiest processes, as box top shows it: the
+// share of one core it used since the last sample, the memory it holds, and what
+// it runs.
+type ProcessUsage struct {
+	Pid        int     `json:"pid"`
+	Command    string  `json:"command"`
+	CPUPercent float64 `json:"cpu_percent"`
+	MemMiB     uint64  `json:"mem_mib"`
+}
+
+// Line is one process the way box top prints it.
+func (p ProcessUsage) Line() string {
+	return fmt.Sprintf("pid %d  %.1f%% of a core  %d MiB  %s", p.Pid, p.CPUPercent, p.MemMiB, p.Command)
+}
+
+// Hog is a process that has used a whole core for at least hogAfter of the
+// samples boxd took. The journal says so once and says when it stops; box top
+// shows it for as long as it lasts.
+//
+// It is a measurement and never a verdict: a long compile holds a core for ten
+// minutes, and so does a process the guest has not finished with. What the line
+// is for is that someone was watching a box that had a core taken and nobody said
+// so.
+type Hog struct {
+	Pid        int     `json:"pid"`
+	Command    string  `json:"command"`
+	CPUPercent float64 `json:"cpu_percent"`
+	ForSeconds int     `json:"for_seconds"`
+}
+
+// Line says what was seen: who holds a core, and for how long.
+func (h Hog) Line() string {
+	return fmt.Sprintf("%s (pid %d) has used a whole core for %s", h.Command, h.Pid,
+		spanText(time.Duration(h.ForSeconds)*time.Second))
+}
+
+// spanText is a span the way a person reads it: minutes for the minutes, and
+// seconds only below a minute.
+func spanText(d time.Duration) string {
+	if d < time.Minute {
+		return d.Round(time.Second).String()
+	}
+	d = d.Round(time.Minute)
+	h, m := int(d/time.Hour), int(d%time.Hour/time.Minute)
+	if h > 0 {
+		return fmt.Sprintf("%dh%dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
+}
+
+// procLoad is one process of one sample: what it runs, how much CPU time it has
+// used in all, when it started and how much memory it holds.
+type procLoad struct {
+	pid     int
+	comm    string
+	ticks   uint64
+	started time.Time
+	rssMiB  uint64
+	// percent is the share of one core this process used in the sample that
+	// placed it here. It is kept so a sample taken at the same moment as the
+	// last one has something to say rather than nothing.
+	percent float64
+}
+
+// procReading is what one sample of the guest's process table says.
+type procReading struct {
+	// Busy are the processes that used the most CPU since the last sample, most
+	// first, at most usageProcesses of them.
+	Busy []ProcessUsage
+	// Hogs are the processes that have held a whole core for hogAfter.
+	Hogs []Hog
+	// Said are the journal lines of this sample: one when a process crosses into
+	// holding a whole core, one when it stops using it, one when it ends.
+	Said []string
+}
+
+// procWatch samples the guest's process table and keeps what it needs between
+// samples: the CPU time every process had then, so its use is the share of a core
+// it used since, and the processes that have held a whole core.
+//
+// One sample is one read per process -- a few hundred small files every five
+// seconds -- and it stays a few milliseconds, which is why it is part of the load
+// boxd measures and never on the path of a guest call.
+type procWatch struct {
+	prev   map[int]procLoad
+	prevAt time.Time
+	// held are the processes that are using a whole core now, by pid. A process
+	// that is gone from the table is dropped: a box that has run for hours must
+	// not keep the state of every pid it has seen.
+	held map[int]*hogState
+}
+
+// hogState is one process that is using a whole core, and whether the journal
+// has heard of it yet.
+type hogState struct {
+	comm    string
+	since   time.Time
+	said    bool
+	percent float64
+}
+
+// sample reads the guest's process table at now and returns what box top shows
+// and what the journal has to say. A table that cannot be read is not a failure
+// of the sample: the processes are simply left out, and the rest of the guest's
+// load is still measured.
+func (w *procWatch) sample(now time.Time, root string) procReading {
+	procs, err := readProcTable(now, root)
+	if err != nil {
+		return procReading{}
+	}
+	percents := w.percents(procs, now)
+	for pid, pct := range percents {
+		p := procs[pid]
+		p.percent = pct
+		procs[pid] = p
+	}
+	busy := busiest(procs, percents, usageProcesses)
+	for i := range busy {
+		busy[i].Command = commandOf(root, busy[i].Pid, procs[busy[i].Pid].comm)
+	}
+	hogs, said := w.cross(procs, percents, now)
+	w.prev, w.prevAt = procs, now
+	return procReading{Busy: busy, Hogs: hogs, Said: said}
+}
+
+// percents is how much of one core each process used: the CPU time it used since
+// the last sample over that sample, or, for a process that is new to this one,
+// over its own life.
+func (w *procWatch) percents(procs map[int]procLoad, now time.Time) map[int]float64 {
+	out := make(map[int]float64, len(procs))
+	interval := 0.0
+	if !w.prevAt.IsZero() && now.After(w.prevAt) {
+		interval = now.Sub(w.prevAt).Seconds()
+	}
+	for pid, p := range procs {
+		if prev, ok := w.prev[pid]; ok && p.ticks >= prev.ticks {
+			if interval > 0 {
+				out[pid] = 100 * float64(p.ticks-prev.ticks) / (interval * clockTicks)
+			} else {
+				// The same moment again (a second sample of one instant): the
+				// figure of the last sample stands.
+				out[pid] = prev.percent
+			}
+			continue
+		}
+		// A pid the last sample did not have, or one the kernel has given to
+		// another process since: its use since it started is all there is to say
+		// about it.
+		if !p.started.IsZero() {
+			if life := now.Sub(p.started).Seconds(); life > 0 {
+				out[pid] = 100 * float64(p.ticks) / (life * clockTicks)
+			}
+		}
+	}
+	return out
+}
+
+// cross moves every process that uses a whole core one sample further, keeps the
+// ones that have used it for hogAfter, and says what changed: the ones that
+// cross into holding a whole core, the ones that stop using it and the ones that
+// ended while holding it.
+//
+// It says each crossing once: a process that holds a core for four hours is one
+// line when it starts and one when it stops, not one every five seconds.
+func (w *procWatch) cross(procs map[int]procLoad, percents map[int]float64, now time.Time) ([]Hog, []string) {
+	if w.held == nil {
+		w.held = map[int]*hogState{}
+	}
+	var said []string
+	for pid, p := range procs {
+		pct := percents[pid]
+		h, held := w.held[pid]
+		switch {
+		case pct >= hogPercent:
+			if !held {
+				w.held[pid] = &hogState{comm: p.comm, since: now, percent: pct}
+				continue
+			}
+			h.comm, h.percent = p.comm, pct
+			if !h.said && now.Sub(h.since) >= hogAfter {
+				h.said = true
+				said = append(said, Hog{Pid: pid, Command: h.comm, CPUPercent: pct,
+					ForSeconds: int(now.Sub(h.since).Round(time.Second) / time.Second)}.Line())
+			}
+		case held:
+			if h.said {
+				said = append(said, fmt.Sprintf("%s (pid %d) no longer uses a whole core: %.0f%% of one since the last sample, after %s",
+					h.comm, pid, pct, spanText(now.Sub(h.since))))
+			}
+			delete(w.held, pid)
+		}
+	}
+	// A process that ended while it was using a core stopped using it too, and a
+	// pid that is gone must not keep its state.
+	for pid, h := range w.held {
+		if _, ok := procs[pid]; ok {
+			continue
+		}
+		if h.said {
+			said = append(said, fmt.Sprintf("%s (pid %d) is gone; it had used a whole core for %s",
+				h.comm, pid, spanText(now.Sub(h.since))))
+		}
+		delete(w.held, pid)
+	}
+	var hogs []Hog
+	for pid, h := range w.held {
+		if !h.said {
+			continue
+		}
+		hogs = append(hogs, Hog{Pid: pid, Command: h.comm, CPUPercent: h.percent,
+			ForSeconds: int(now.Sub(h.since).Round(time.Second) / time.Second)})
+	}
+	// The longest held first: it is the one to look at.
+	sort.Slice(hogs, func(i, j int) bool {
+		if hogs[i].ForSeconds != hogs[j].ForSeconds {
+			return hogs[i].ForSeconds > hogs[j].ForSeconds
+		}
+		return hogs[i].Pid < hogs[j].Pid
+	})
+	return hogs, said
+}
+
+// readProcTable reads one sample of the guest's process table from root: every
+// process the guest has, with what it runs and what it cost so far. A process
+// that vanishes between the directory read and its own file is one that ended
+// while the sample ran, and a kernel thread or a zombie has nothing to say here.
+func readProcTable(now time.Time, root string) (map[int]procLoad, error) {
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", root, err)
+	}
+	boot := bootTime(now, root)
+	out := make(map[int]procLoad, len(ents))
+	for _, e := range ents {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(root, e.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		info, err := parseProcStat(data)
+		if err != nil || info.state == 'Z' || info.state == 'X' {
+			continue
+		}
+		p := procLoad{
+			pid:    pid,
+			comm:   info.comm,
+			ticks:  info.utime + info.stime,
+			rssMiB: info.rssPages * uint64(os.Getpagesize()) >> 20,
+		}
+		if !boot.IsZero() {
+			p.started = boot.Add(time.Duration(info.startTicks) * time.Second / clockTicks)
+		}
+		out[pid] = p
+	}
+	return out, nil
+}
+
+// busiest is the n processes that used the most CPU, most first, and the memory
+// each holds. A process that used none is still worth showing when the guest is
+// idle: what holds the memory is the answer then.
+func busiest(procs map[int]procLoad, percents map[int]float64, n int) []ProcessUsage {
+	loads := make([]procLoad, 0, len(procs))
+	for _, p := range procs {
+		loads = append(loads, p)
+	}
+	sort.Slice(loads, func(i, j int) bool {
+		pi, pj := percents[loads[i].pid], percents[loads[j].pid]
+		if pi != pj {
+			return pi > pj
+		}
+		if loads[i].rssMiB != loads[j].rssMiB {
+			return loads[i].rssMiB > loads[j].rssMiB
+		}
+		return loads[i].pid < loads[j].pid
+	})
+	if len(loads) > n {
+		loads = loads[:n]
+	}
+	out := make([]ProcessUsage, 0, len(loads))
+	for _, p := range loads {
+		out = append(out, ProcessUsage{Pid: p.pid, CPUPercent: percents[p.pid], MemMiB: p.rssMiB})
+	}
+	return out
+}
+
+// commandOf is what a process runs, the way box top shows it: the program and
+// its first few arguments, cut short, or the kernel's own name for the process
+// when its command line cannot be read.
+func commandOf(root string, pid int, comm string) string {
+	if data, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "cmdline")); err == nil {
+		if text := commandText(splitArgv(data)); text != "" {
+			return text
+		}
+	}
+	return oneLine(comm, 30)
+}
+
 // --- memory stall -------------------------------------------------------------
 
 // memoryPressurePath is where the Linux kernel reports memory pressure, if it is
@@ -472,6 +787,18 @@ type Usage struct {
 	DiskTotalMiB   uint64    `json:"disk_total_mib"`
 	DiskFreeMiB    uint64    `json:"disk_free_mib"`
 	Top            string    `json:"top,omitempty"`
+	// Processes are the guest's busiest processes by CPU, most first: what box
+	// top prints without a flag. A sample that cannot read the process table
+	// leaves them out.
+	Processes []ProcessUsage `json:"processes,omitempty"`
+	// Hogs are the processes that have used a whole core for ten minutes, the
+	// longest first. box top shows them; the journal said each one once.
+	Hogs []Hog `json:"hogs,omitempty"`
+	// Leftover is the work running with no turn in progress (stillrunning.go).
+	// It is filled in when boxd is asked for the guest's load and no session is
+	// running a turn, and it is left out when one is: a turn's own work cannot
+	// be told from what it leaves behind.
+	Leftover *Leftover `json:"leftover,omitempty"`
 }
 
 // usageSampler measures the guest every usageEvery and keeps the last sample.
@@ -492,6 +819,13 @@ type usageSampler struct {
 	// pressureFile is where the memory pressure file is read from;
 	// memoryPressurePath when empty (the tests point it at a file).
 	pressureFile string
+	// procRoot is where the process table is read from; procRoot() of the
+	// daemon's configuration calls it /proc, and a test points it at a tree of
+	// its own (stillrunning_test.go builds one).
+	procRoot string
+	// procs samples the process table: what takes the CPU, and what holds a
+	// whole core.
+	procs procWatch
 }
 
 // pressurePath is the file this sampler reads memory pressure from.
@@ -500,6 +834,14 @@ func (u *usageSampler) pressurePath() string {
 		return u.pressureFile
 	}
 	return memoryPressurePath
+}
+
+// processesPath is the process table this sampler reads.
+func (u *usageSampler) processesPath() string {
+	if u.procRoot != "" {
+		return u.procRoot
+	}
+	return "/proc"
 }
 
 const usageEvery = 5 * time.Second
@@ -532,10 +874,12 @@ func (u *usageSampler) sample(logf func(string, ...any)) {
 
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	s := Usage{At: time.Now().UTC(), Load1: l1, Load5: l5, MemTotalMiB: total >> 20, MemAvailMiB: avail >> 20,
+	now := time.Now().UTC()
+	procs := u.procs.sample(now, u.processesPath())
+	s := Usage{At: now, Load1: l1, Load5: l5, MemTotalMiB: total >> 20, MemAvailMiB: avail >> 20,
 		MemoryPressure: readPressure(u.pressurePath()),
 		DiskPath:       "/", DiskTotalMiB: st.Blocks * uint64(st.Bsize) >> 20, DiskFreeMiB: st.Bavail * uint64(st.Bsize) >> 20,
-		Top: topProcesses(3)}
+		Top: topProcesses(3), Processes: procs.Busy, Hogs: procs.Hogs}
 	if u.prevAll > 0 && all > u.prevAll {
 		d := float64(all - u.prevAll)
 		s.CPUPercent = 100 * float64(busy-u.prevBusy) / d
@@ -545,6 +889,12 @@ func (u *usageSampler) sample(logf func(string, ...any)) {
 	u.last = s
 	if logf == nil {
 		return
+	}
+	// A process that has held a whole core, and one that stopped holding it: a
+	// measurement of what the guest does, said once per crossing, because a box
+	// that lost a core for four hours and said nothing is what this is for.
+	for _, line := range procs.Said {
+		logf("guest: %s", line)
 	}
 	switch {
 	case s.IOWaitPercent > 33:

@@ -175,8 +175,10 @@ type Manager struct {
 	prep *preparer
 
 	// stillRunningErr makes a scan of the guest's process table (stillrunning.go)
-	// say its failure once, not once per turn.
+	// say its failure once, not once per turn, and leftoverErr the same for the
+	// work running with no turn in progress.
 	stillRunningErr sync.Once
+	leftoverErr     sync.Once
 
 	// sealed is set by a seal: the box is an image now, so the daemon keeps no
 	// session and starts none. Without it, the shutdown that follows the seal
@@ -671,6 +673,24 @@ func (m *Manager) lookupSession(id string) *session {
 // number matches "session ls").
 func (m *Manager) Count() int { return len(m.List()) }
 
+// TurnInProgress reports whether any session of this box is running a turn. It
+// is what decides whether boxd can tell the work left in the guest apart from
+// the work a turn is doing (stillrunning.go).
+func (m *Manager) TurnInProgress() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range m.order {
+		s := m.sessions[id]
+		s.mu.Lock()
+		busy := s.busy
+		s.mu.Unlock()
+		if busy {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) lookup(id string) (*session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -938,10 +958,17 @@ func (s *session) findTurnLocked(turn int) *turnState {
 	return nil
 }
 
-// Events returns the session's event feed after a cursor.
+// Events returns the session's event feed from a cursor.
 func (m *Manager) Events(id string, since int64, limit int) ([]Event, int64, error) {
+	events, next, _, err := m.EventsPage(id, since, limit)
+	return events, next, err
+}
+
+// EventsPage is Events with the number of events there are after the cursor, so
+// a caller can say that it was given a page of them and not the whole feed.
+func (m *Manager) EventsPage(id string, since int64, limit int) ([]Event, int64, int, error) {
 	if _, err := m.lookup(id); err != nil {
-		return nil, since, err
+		return nil, since, 0, err
 	}
 	return m.store.ReadEvents(id, since, limit)
 }

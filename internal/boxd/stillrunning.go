@@ -147,6 +147,74 @@ func newStillRunning(found []StillRunningProcess) *StillRunning {
 	return &StillRunning{Processes: found[:stillRunningLines], More: len(found) - stillRunningLines}
 }
 
+// --- work with no turn in progress ---------------------------------------------
+//
+// A turn is not the only thing that leaves work behind. A test run three hours
+// ago can still have its helpers and its shells alive, and no turn is running to
+// be blamed for them: a turn's own report is about what a turn that just ended
+// started, so a process older than that turn is not in it, and nobody is left to
+// ask. The usage boxctl info answers carries that count instead -- how many work
+// processes are alive while no turn runs in any session.
+//
+// WHICH PROCESSES COUNT. The rule of a finished turn's report, without its
+// start-time test: a process that started before the turn started is not the
+// turn's, and this report has no turn to compare with. So a userspace process
+// that is not the box's own machinery (the platform bundle, the executor homes
+// and the configured executors) and that is in boxd's own cgroup, or below it,
+// is a work process.
+//
+// WHEN IT IS SAID. Only while no turn runs in any session. A process of a
+// running turn cannot be told from the work that turn was asked to do, so boxd
+// says nothing then rather than reporting a turn's own build as leftover. The
+// count therefore also cannot say anything about work a turn is about to leave
+// behind: that is what the turn's own report is for.
+
+// Leftover is what the guest is running with no turn in progress: work that an
+// earlier turn, an earlier boxd or a person started, and that nothing here is
+// waiting for.
+type Leftover struct {
+	// Count is how many work processes are alive, the ones listed and the ones
+	// under "and N more".
+	Count int `json:"count"`
+	// Processes are the heaviest of them, at most stillRunningLines, in the same
+	// lines a turn's report uses.
+	Processes []StillRunningProcess `json:"processes"`
+	// More is how many processes the lines leave out.
+	More int `json:"more,omitempty"`
+}
+
+// Lines are the lines of a leftover report, ending with "and N more" when it was
+// cut.
+func (l *Leftover) Lines() []string {
+	if l == nil {
+		return nil
+	}
+	out := make([]string, 0, len(l.Processes)+1)
+	for _, p := range l.Processes {
+		out = append(out, p.Line())
+	}
+	if l.More > 0 {
+		out = append(out, fmt.Sprintf("and %d more", l.More))
+	}
+	return out
+}
+
+// newLeftover caps what a scan found the way a turn's report is capped, keeping
+// the count of everything it found.
+func newLeftover(found []StillRunningProcess) *Leftover {
+	if len(found) == 0 {
+		return nil
+	}
+	l := &Leftover{Count: len(found)}
+	if len(found) <= stillRunningLines {
+		l.Processes = found
+		return l
+	}
+	l.Processes = found[:stillRunningLines]
+	l.More = len(found) - stillRunningLines
+	return l
+}
+
 // --- the scan -----------------------------------------------------------------
 
 // procScan is one read of the guest's process table. Everything it needs from
@@ -223,6 +291,26 @@ func (m *Manager) stillRunningAt(since, now time.Time) *StillRunning {
 	return newStillRunning(found)
 }
 
+// leftoverAt reports the work processes alive in the guest while no turn runs.
+//
+// It says nothing while a turn runs: the processes of a running turn cannot be
+// told from the work it was asked to do, and saying a turn's own build is
+// leftover would be wrong in the one direction that matters. A scan that fails
+// is not a failure of boxctl info: it is logged once and the field stays out.
+func (m *Manager) leftoverAt(now time.Time) *Leftover {
+	if m.TurnInProgress() {
+		return nil
+	}
+	found, err := m.stillRunningScan(now).runAll()
+	if err != nil {
+		m.leftoverErr.Do(func() {
+			m.cfg.logf("could not read the guest's process table to report the work running with no turn in progress: %v", err)
+		})
+		return nil
+	}
+	return newLeftover(found)
+}
+
 // bootTime is when the guest booted: now, less the uptime the kernel reports.
 // A guest that does not report an uptime has no boot time, and the scan places
 // no process on the clock (see started).
@@ -260,21 +348,27 @@ func ownCgroup(root string) string {
 // procInfo is the part of /proc/<pid>/stat the scan reads.
 type procInfo struct {
 	state      byte
+	comm       string
 	ppid       int
 	pgid       int
 	utime      uint64
 	stime      uint64
 	startTicks uint64
+	rssPages   uint64
 }
 
 // parseProcStat reads the fields of /proc/<pid>/stat the scan uses. The command
 // name in the second field may hold spaces and parentheses, so the fields start
 // after the last ')'.
 func parseProcStat(data []byte) (procInfo, error) {
+	open := bytes.IndexByte(data, '(')
 	i := bytes.LastIndexByte(data, ')')
-	if i < 0 {
+	if i < 0 || open < 0 || open > i {
 		return procInfo{}, fmt.Errorf("no comm field")
 	}
+	// The kernel's own name for the process, which is what a report says when
+	// there is no command line to show.
+	comm := string(data[open+1 : i])
 	f := strings.Fields(string(data[i+1:]))
 	// After the comm: state, ppid, pgrp, session, tty_nr, tpgid, flags,
 	// minflt, cminflt, majflt, cmajflt, utime, stime, ..., starttime at 19.
@@ -286,6 +380,7 @@ func parseProcStat(data []byte) (procInfo, error) {
 	}
 	var p procInfo
 	p.state = f[0][0]
+	p.comm = comm
 	var err error
 	for _, field := range []struct {
 		dst *int
@@ -303,6 +398,13 @@ func parseProcStat(data []byte) (procInfo, error) {
 		*field.dst, err = strconv.ParseUint(field.val, 10, 64)
 		if err != nil {
 			return procInfo{}, err
+		}
+	}
+	// The resident set in pages is field 24, which a kernel always writes and a
+	// hand-made entry of a test may not: a missing one is 0 pages, not an error.
+	if len(f) > 21 {
+		if pages, err := strconv.ParseUint(f[21], 10, 64); err == nil {
+			p.rssPages = pages
 		}
 	}
 	return p, nil
@@ -331,6 +433,18 @@ type candidate struct {
 // run scans the process table and returns the processes a turn started at
 // since left running, one per tree or process group, the most CPU first.
 func (ps procScan) run(since time.Time) ([]StillRunningProcess, error) {
+	return ps.scan(func(c candidate) bool { return ps.belongs(c, since) })
+}
+
+// runAll scans the process table and returns every work process alive now, with
+// no turn to compare a start time with (see "work with no turn in progress").
+func (ps procScan) runAll() ([]StillRunningProcess, error) {
+	return ps.scan(ps.isWork)
+}
+
+// scan reads the process table once and keeps what keep lets through, one entry
+// per tree or process group, the most CPU first.
+func (ps procScan) scan(keep func(candidate) bool) ([]StillRunningProcess, error) {
 	ents, err := os.ReadDir(ps.root)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", ps.root, err)
@@ -348,7 +462,7 @@ func (ps procScan) run(since time.Time) ([]StillRunningProcess, error) {
 		if !ok {
 			continue
 		}
-		if ps.belongs(c, since) {
+		if keep(c) {
 			found = append(found, c)
 		}
 	}
@@ -411,10 +525,10 @@ func cgroupPath(data []byte) string {
 	return ""
 }
 
-// belongs applies the rule at the top of this file.
+// belongs applies the rule at the top of this file: a work process that started
+// after the turn did.
 func (ps procScan) belongs(c candidate, since time.Time) bool {
-	// A kernel thread has no command line; a zombie has exited.
-	if len(c.argv) == 0 || c.state == 'Z' || c.state == 'X' {
+	if !ps.isWork(c) {
 		return false
 	}
 	// Started after the turn did. A scan without a boot time cannot place a
@@ -428,6 +542,18 @@ func (ps procScan) belongs(c candidate, since time.Time) bool {
 	// turn may be reported, and saying one thing too many is the safe way to be
 	// wrong about a guest's process table.
 	if ps.boot.IsZero() || ps.started(c.procInfo).Add(stillRunningTick).Before(since) {
+		return false
+	}
+	return true
+}
+
+// isWork applies everything of the rule but its start-time test: this is a
+// userspace process that is not the box's own machinery and not another systemd
+// service's. It is the rule of a report with no turn to compare with, which is
+// what the leftover report is (see "work with no turn in progress").
+func (ps procScan) isWork(c candidate) bool {
+	// A kernel thread has no command line; a zombie has exited.
+	if len(c.argv) == 0 || c.state == 'Z' || c.state == 'X' {
 		return false
 	}
 	// The box's own machinery: boxd, the executors, their tools, and what an

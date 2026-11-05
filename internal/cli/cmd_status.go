@@ -308,6 +308,11 @@ func (a *App) printStatus(out *statusOutput) {
 		}
 		if u := out.Guest.Usage; u != nil {
 			a.note("  usage   %s", u.Line())
+			// Work running with no turn in progress is why a box is busy while
+			// its sessions are idle; the count and its lines are boxd's.
+			if line := u.Leftover.Summary(); line != "" {
+				a.note("  leftover %s", line)
+			}
 		}
 		if p := out.Guest.Prepare; p != nil && p.State != "none" {
 			switch p.State {

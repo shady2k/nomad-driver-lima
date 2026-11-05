@@ -332,25 +332,52 @@ func (a *App) cmdEvents(ctx context.Context, args []string) error {
 	}
 	cursor := *since
 	for {
-		events, next, err := client.Events(ctx, sessionID, EventsOptions{Since: cursor, Limit: *limit})
+		page, err := client.Events(ctx, sessionID, EventsOptions{Since: cursor, Limit: *limit})
 		if err != nil {
 			return wrapf(err, "the guest could not read the events of session %s", sessionID)
 		}
-		for _, event := range events {
+		for _, event := range page.Events {
 			if err := a.printEvent(event); err != nil {
 				return err
 			}
 		}
-		if next > cursor {
-			cursor = next
+		if page.Next > cursor {
+			cursor = page.Next
 		}
 		if !*follow {
+			// A page is not the feed. Saying so is what keeps a limit from
+			// reading as a hang: the next call, with --since, is the rest.
+			a.noteMoreEvents(page, cursor)
 			return nil
 		}
 		if err := a.sleep(ctx, 2*time.Second); err != nil {
 			return nil
 		}
 	}
+}
+
+// noteMoreEvents says that the events printed were a page of the feed and not
+// all of it, with the cursor that continues them.
+//
+// An agent that reads 200 events and stops takes the end of the page for the end
+// of the feed and waits for events that are already there. With --json the same
+// fact is the last document on stdout, one line after the events; a reader that
+// lives on the text reads it on stderr.
+func (a *App) noteMoreEvents(page EventPage, cursor int64) {
+	if !page.More {
+		return
+	}
+	if a.JSON {
+		// One line, like the events before it: a document per line is what a
+		// reader of a JSON stream expects.
+		data, err := json.Marshal(map[string]any{"next_since": cursor, "more": true})
+		if err != nil {
+			return
+		}
+		fmt.Fprintln(a.Out, string(data))
+		return
+	}
+	a.note("%d of %d events, more with --since %d", len(page.Events), page.Total, cursor)
 }
 
 // printEvent writes one event: a JSON object per line with --json, otherwise a

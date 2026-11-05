@@ -83,11 +83,16 @@ executor writes to stderr
 (at most 40 a minute, all of them in its `executor.log`), the log files of
 prime's background workers, how an executor exited and its last lines, the
 guest kernel's lines about memory and the disk (out of memory, I/O errors,
-ext4 errors, hung tasks), and when memory or a disk is low or the guest has
-waited on its disk for a minute. A tool call names what it runs (the code of a
-Python cell, the command of a shell) and its result says its exit code, its
-time and the beginning and the end of its output. The driver adds to the task
-events when the kernel OOM-killed something in the box's cgroup.
+ext4 errors, hung tasks), when memory or a disk is low, when the guest has
+waited on its disk for a minute, and a process that has used a whole core for
+ten minutes (`guest: systemd-logind (pid 851) has used a whole core for 10m`),
+with a line when it stops using it. The last of those is a measurement and never
+a verdict: a long compile holds a core for ten minutes too, and the line is there
+so that a box that lost a core for four hours does not lose it silently. A tool
+call names what it runs (the code of a Python cell, the command of a shell) and
+its result says its exit code, its time and the beginning and the end of its
+output. The driver adds to the task events when the kernel OOM-killed something
+in the box's cgroup.
 
 ## Commands
 
@@ -108,13 +113,13 @@ timeout with the state as it is. `boxctl info` carries the same document as
 
 | command | stdin | result |
 | --- | --- | --- |
-| `boxctl info` | – | `{"boxd_version","executors":[ExecutorInfo],"sessions":N,"mem_total_mib","mem_free_mib","cpus","platform":PlatformInfo}` |
+| `boxctl info` | – | `{"boxd_version","executors":[ExecutorInfo],"sessions":N,"mem_total_mib","mem_free_mib","cpus","platform":PlatformInfo,"prepare","usage":Usage}` |
 | `boxctl session new --executor prime\|opencode\|claude --model <provider>/<model> [--cwd DIR] [--title T]` | – | `{"session":"<id>"}` |
 | `boxctl session ls` | – | `{"sessions":[Session]}` |
 | `boxctl session get <id>` | – | `Session` |
 | `boxctl send <id>` | prompt text | `{"session","turn":N}` — returns immediately; `busy` if a turn is already running |
 | `boxctl wait <id> [--turn N] [--timeout SEC]` | – | `Turn` when the turn has finished; on timeout the same `Turn` with `"state":"running"` and exit 0 |
-| `boxctl events <id> [--since SEQ] [--limit N]` | – | `{"events":[Event],"next":SEQ}` |
+| `boxctl events <id> [--since SEQ] [--limit N]` | – | `{"events":[Event],"next":SEQ,"total":N,"more":BOOL}` |
 | `boxctl cancel <id>` | – | `Turn`, with `"state":"cancelled"` once the executor acknowledged it |
 | `boxctl session close <id>` | – | `{"session","state":"closed"}` — stops the executor process and keeps the history |
 | `boxctl reload` | – | re-reads the executor credentials without touching the sessions: it answers `{"configured":[...],"restarted":[...],"deferred":[...]}` — idle sessions restart their executor now, a session in a turn defers to the end of that turn |
@@ -216,6 +221,36 @@ with `kind` one of `turn_start`, `message`, `tool`, `tool_result`, `turn_end`,
 `error`, `executor_exit`, `executor_restart`, and `summary` one line in plain
 words. Sequence numbers are per session and monotonic, which is what makes
 `--since` a resumable cursor.
+
+`--since` is the sequence number to resume from and it is **read again**: a page
+of a feed loses no event at its boundary, so reading with `--limit` and continuing
+at `next` gives every event once. `total` is how many events there are from
+`--since`, and `more` says that `events` is a page of them and not the whole feed:
+a reader that takes the limit for the end of the events waits for events that are
+already there. `boxctl events` also writes one line to stderr when it was cut --
+`200 of 350 events, more with --since 201` -- and the `box` CLI says the same.
+
+`Usage`: `{"at","cpu_percent","iowait_percent","load1","load5","mem_total_mib",
+"mem_available_mib","memory_pressure","disk_path","disk_total_mib","disk_free_mib",
+"top","processes","hogs","leftover"}` -- what boxd measured of the guest, every
+five seconds; `box top` and `box status` print it.
+
+- `memory_pressure` is the guest kernel's `some`/`full` avg10 of
+  `/proc/pressure/memory`, and is absent on a kernel without PSI.
+- `processes` are the guest's busiest processes by CPU, most first, at most five:
+  `[{"pid","command","cpu_percent","mem_mib"}]`, with `cpu_percent` the share of
+  one core each used since boxd's last sample and `command` cut to about 80
+  characters. A sample that cannot read the process table leaves them out.
+- `hogs` are the processes that have used a whole core for ten minutes or more:
+  `[{"pid","command","cpu_percent","for_seconds"}]`, the longest first. It is a
+  measurement, not a fault -- a long compile holds a core for ten minutes as well.
+- `leftover` is `{"count":N,"processes":[StillRunningProcess],"more":N}`: the work
+  processes alive while **no turn is running in any session**, by the rule of
+  `still_running` without its start-time test, so a process older than any turn is
+  in it. `processes` is the heaviest few of them in the lines `still_running`
+  uses, and `count` is all of them. The field is **omitted while a turn runs**,
+  because a process of a running turn cannot be told from the work it was asked to
+  do. A scan that fails leaves it out and says so once in the log.
 
 `SealResult`: `{"image":ImageRecord,"steps":["..."],"files":N,"values":N}` -- what
 a seal wrote and what it did to get there. `ImageRecord` is

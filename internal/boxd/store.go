@@ -119,15 +119,21 @@ func (s *Store) AppendEvent(id string, ev Event) error {
 	return f.Sync()
 }
 
-// ReadEvents returns up to limit events with seq > since, and the cursor to use
-// next (highest returned seq + 1, or since when nothing is new).
-func (s *Store) ReadEvents(id string, since int64, limit int) ([]Event, int64, error) {
+// ReadEvents returns up to limit events from seq >= since, the cursor to use next
+// (highest returned seq + 1, or since when nothing is new), and how many events
+// there are from since in all -- so a caller can say that it was cut short
+// instead of letting a reader take the limit for the end of the feed.
+//
+// "since" is the sequence number to resume from and it is read again, so a cursor
+// never steps over an event: the page boundary is where a feed read as a whole
+// loses exactly the event it stopped at.
+func (s *Store) ReadEvents(id string, since int64, limit int) ([]Event, int64, int, error) {
 	f, err := os.Open(s.EventsFile(id))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, since, nil
+		return nil, since, 0, nil
 	}
 	if err != nil {
-		return nil, since, err
+		return nil, since, 0, err
 	}
 	defer f.Close()
 	if limit <= 0 {
@@ -135,6 +141,7 @@ func (s *Store) ReadEvents(id string, since int64, limit int) ([]Event, int64, e
 	}
 	var out []Event
 	next := since
+	total := 0
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
@@ -146,19 +153,21 @@ func (s *Store) ReadEvents(id string, since int64, limit int) ([]Event, int64, e
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			continue
 		}
-		if ev.Seq <= since {
+		if ev.Seq < since {
 			continue
 		}
+		total++
 		if len(out) >= limit {
-			break
+			// Count the rest, so the answer can say how much of the feed it is.
+			continue
 		}
 		out = append(out, ev)
 		next = ev.Seq + 1
 	}
 	if err := sc.Err(); err != nil {
-		return out, next, err
+		return out, next, total, err
 	}
-	return out, next, nil
+	return out, next, total, nil
 }
 
 // LastSeq reports the highest event sequence number stored for a session.

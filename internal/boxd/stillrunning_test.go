@@ -1,6 +1,7 @@
 package boxd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -486,5 +487,142 @@ func TestStillRunningAllowsOneTickOfStarttime(t *testing.T) {
 		if !got[pid] {
 			t.Fatalf("pid %d, which started at or after the turn's start, is missing from %v", pid, found)
 		}
+	}
+}
+
+// TestLeftoverReportsWorkWithNoTurnRunning: a test run three hours ago can leave
+// its helpers and its shells alive, and no turn is running to be blamed for them.
+// The report is the rule of a finished turn without its start-time test, in the
+// same lines and with the same cap.
+func TestLeftoverReportsWorkWithNoTurnRunning(t *testing.T) {
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	cfg := testConfig(t)
+	f := newFakeProc(t, now)
+	cfg.ProcRoot = f.root
+	// Fifteen shells that started three hours before any turn: a turn's own
+	// report would leave every one of them out.
+	for i := 0; i < 15; i++ {
+		f.add(fakeProcess{pid: 300 + i, started: now.Add(-3 * time.Hour), cpu: time.Duration(15-i) * time.Second,
+			argv: []string{"/bin/sh", "-c", "sleep 300"}})
+	}
+	// The box's own machinery and another unit's work are not the work.
+	f.add(fakeProcess{pid: 100, started: now.Add(-3 * time.Hour), argv: []string{filepath.Join(cfg.PlatformDir, "bin", "boxd")},
+		exe: filepath.Join(cfg.PlatformDir, "bin", "boxd")})
+	f.add(fakeProcess{pid: 101, started: now.Add(-3 * time.Hour), cgroup: "/system.slice/apt-daily.service",
+		argv: []string{"/usr/bin/apt-get", "update"}, exe: "/usr/bin/apt-get"})
+	m := newManager(t, cfg)
+
+	left := m.leftoverAt(now)
+	if left == nil {
+		t.Fatal("fifteen shells with no turn running is not nothing")
+	}
+	if left.Count != 15 {
+		t.Fatalf("count = %d, want the fifteen shells: %+v", left.Count, left)
+	}
+	if len(left.Processes) != stillRunningLines || left.More != 5 {
+		t.Fatalf("%d line(s) and %d more, want %d and 5", len(left.Processes), left.More, stillRunningLines)
+	}
+	lines := left.Lines()
+	if len(lines) != stillRunningLines+1 || lines[len(lines)-1] != "and 5 more" {
+		t.Fatalf("lines end with %q", lines[len(lines)-1])
+	}
+	if !strings.Contains(lines[0], "sleep 300 (pid ") {
+		t.Fatalf("first line = %q", lines[0])
+	}
+	// The heaviest first: the shell that used the most CPU is the one a person
+	// wants to see first.
+	if left.Processes[0].CPUSeconds != 15 {
+		t.Fatalf("first line = %+v, want the most CPU", left.Processes[0])
+	}
+	// The age is the process's own, not a turn's: three hours.
+	if left.Processes[0].AgeSeconds != 3*3600 {
+		t.Fatalf("age = %ds, want 10800", left.Processes[0].AgeSeconds)
+	}
+
+	// Nothing running is no report at all.
+	emptyCfg := testConfig(t)
+	emptyCfg.ProcRoot = newFakeProc(t, now).root
+	if left := newManager(t, emptyCfg).leftoverAt(now); left != nil {
+		t.Fatalf("an empty guest reported %+v", left)
+	}
+}
+
+// TestLeftoverSaysNothingWhileATurnRuns: a process of a running turn cannot be
+// told from the work the turn was asked to do, so boxd says nothing at all then
+// rather than reporting a turn's own build as leftover.
+func TestLeftoverSaysNothingWhileATurnRuns(t *testing.T) {
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	cfg := testConfig(t)
+	f := newFakeProc(t, now)
+	cfg.ProcRoot = f.root
+	f.add(fakeProcess{pid: 300, started: now.Add(-3 * time.Hour), argv: []string{"/usr/bin/sleep", "300"},
+		exe: "/usr/bin/sleep"})
+	m := newManager(t, cfg)
+	if m.TurnInProgress() {
+		t.Fatal("no session of this box runs a turn")
+	}
+	if left := m.leftoverAt(now); left == nil || left.Count != 1 {
+		t.Fatalf("leftover = %+v, want the one shell", left)
+	}
+	// A session in a turn: the report is left out until it ends.
+	s := m.lookupSession(mustSession(t, m, "prime", "p/m").ID)
+	s.mu.Lock()
+	s.busy = true
+	s.mu.Unlock()
+	if !m.TurnInProgress() {
+		t.Fatal("a session with a turn running is a turn in progress")
+	}
+	if left := m.leftoverAt(now); left != nil {
+		t.Fatalf("a running turn reported %+v as leftover", left)
+	}
+}
+
+// TestLeftoverScanFailureIsLoggedOnce: a guest whose process table cannot be read
+// says so once in the log, and boxctl info keeps answering.
+func TestLeftoverScanFailureIsLoggedOnce(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ProcRoot = filepath.Join(t.TempDir(), "no-such-proc")
+	var logged []string
+	cfg.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	m := newManager(t, cfg)
+	now := time.Now().UTC()
+	for i := 0; i < 3; i++ {
+		if left := m.leftoverAt(now); left != nil {
+			t.Fatalf("a failed scan reported %+v", left)
+		}
+	}
+	if len(logged) != 1 {
+		t.Fatalf("the failure was logged %d times, want once: %v", len(logged), logged)
+	}
+	if !strings.Contains(logged[0], "no turn in progress") {
+		t.Fatalf("the log line does not say what failed: %q", logged[0])
+	}
+}
+
+// TestInfoCarriesTheWorkRunningWithNoTurn: the guest's load that boxctl info
+// answers with carries the leftover report, so box status and box top can say
+// that a box is busy with no turn in progress.
+func TestInfoCarriesTheWorkRunningWithNoTurn(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := testConfig(t)
+	f := newFakeProc(t, now)
+	cfg.ProcRoot = f.root
+	f.add(fakeProcess{pid: 300, started: now.Add(-3 * time.Hour), cpu: 12 * time.Second,
+		argv: []string{"/usr/bin/cc1", "-c", "big.c"}, exe: "/usr/bin/cc1"})
+	d, err := NewDaemon(cfg)
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	t.Cleanup(d.Manager().Shutdown)
+	d.usage.sample(nil)
+	info := d.Info(context.Background())
+	if info.Usage == nil {
+		t.Fatal("the info carries no usage")
+	}
+	if info.Usage.Leftover == nil || info.Usage.Leftover.Count != 1 {
+		t.Fatalf("leftover = %+v, want the one process", info.Usage.Leftover)
+	}
+	if line := info.Usage.Leftover.Processes[0].Line(); !strings.Contains(line, "cc1 -c big.c") {
+		t.Fatalf("line = %q", line)
 	}
 }

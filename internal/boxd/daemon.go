@@ -38,6 +38,9 @@ func NewDaemon(cfg DaemonConfig) (*Daemon, error) {
 		return nil, err
 	}
 	d := &Daemon{cfg: cfg, mgr: mgr}
+	// The load boxd measures reads the same process table the turn's report
+	// does, so a test's tree is the one both read.
+	d.usage.procRoot = cfg.procRoot()
 	d.srv = &http.Server{
 		Handler:           d.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -285,7 +288,10 @@ func (d *Daemon) Handler() http.Handler {
 			}
 			limit = n
 		}
-		evs, next, err := d.mgr.Events(r.PathValue("id"), since, limit)
+		// "total" is how many events there are from the cursor and "more" says
+		// that this answer is a page of them: a cut feed reads as a hang to
+		// whoever asked, so the answer has to say it was cut.
+		evs, next, total, err := d.mgr.EventsPage(r.PathValue("id"), since, limit)
 		if err != nil {
 			fail(w, err)
 			return
@@ -293,7 +299,7 @@ func (d *Daemon) Handler() http.Handler {
 		if evs == nil {
 			evs = []Event{}
 		}
-		writeJSON(w, 200, map[string]any{"events": evs, "next": next})
+		writeJSON(w, 200, map[string]any{"events": evs, "next": next, "total": total, "more": total > len(evs)})
 	})
 	mux.HandleFunc("POST /v1/session/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
 		t, err := d.mgr.Cancel(r.PathValue("id"))
@@ -375,6 +381,10 @@ func (d *Daemon) Info(ctx context.Context) Info {
 	st := d.mgr.Prepare().State()
 	info.Prepare = &st
 	if u := d.usage.Last(); !u.At.IsZero() {
+		// What is running with no turn in progress is asked for here and not
+		// measured by the sampler: it is a report about this moment, and a turn
+		// that started since the last sample would make it wrong.
+		u.Leftover = d.mgr.leftoverAt(d.cfg.now())
 		info.Usage = &u
 	}
 	for _, name := range []string{"prime", "opencode", "claude"} {
