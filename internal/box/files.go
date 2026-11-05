@@ -1,10 +1,12 @@
 package box
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 )
 
 // The files Nomad renders for a box task -- the job's local/ files and the
@@ -90,14 +92,23 @@ func (b *Box) StageTaskFiles(localDir, secretsDir, privateDir string) (int, erro
 		if err := b.m.opts.Identity.EnsureDir(real, 0o700); err != nil {
 			return 0, err
 		}
-		if target, err := os.Readlink(dir); err != nil || target != real {
+		target, err := os.Readlink(dir)
+		switch {
+		case err == nil && target == real:
+			dir = real
+		case b.mountInUse(dir):
+			// A running guest has this directory mounted, and a share does not
+			// follow a replaced directory: it stops reading. The files stay where
+			// the guest reads them until the VM stops.
+			b.event("files", fmt.Sprintf("Box %s is running with its task files in %s: they stay there until its next start", b.spec.BoxID, dir))
+		default:
 			_ = os.RemoveAll(dir)
 			if err := os.Symlink(real, dir); err != nil {
 				return 0, fmt.Errorf("link %s to the task's directory: %w", dir, err)
 			}
 			_ = b.m.opts.Identity.Chown(dir)
+			dir = real
 		}
-		dir = real
 	} else if err := b.m.opts.Identity.EnsureDir(dir, 0o700); err != nil {
 		return 0, err
 	}
@@ -114,6 +125,22 @@ func (b *Box) StageTaskFiles(localDir, secretsDir, privateDir string) (int, erro
 		}
 	}
 	return count, nil
+}
+
+// mountInUse reports whether dir exists and the box's VM may have it mounted. An
+// answer that cannot be had counts as in use: leaving the files where they are
+// costs one extra stage, and replacing a mounted directory breaks the box.
+func (b *Box) mountInUse(dir string) bool {
+	if _, err := os.Stat(dir); err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	inst, err := b.Status(ctx)
+	if err != nil {
+		return true
+	}
+	return b.m.Alive(inst)
 }
 
 // syncFiles makes dst hold exactly files.

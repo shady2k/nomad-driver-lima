@@ -346,6 +346,10 @@ where one is known, what would close it. Nothing here is a promise to fix it.
 - **The plugin watchdog is a workaround.** Nomad 2.0 does not reattach a
   restarted client to a running external plugin, so the plugin stops when its
   client goes away. It can go when Nomad fixes reattachment.
+- **A running macOS box keeps its task files where it mounted them.** A share
+  does not follow a replaced directory, so a box running when the driver is updated
+  keeps a plain directory in the temporary directory until its next start, when it
+  becomes a link into the task's private directory.
 - **On macOS a VM's graphs depend on finding its process.** A `vz` VM runs in a
   Virtualization.framework XPC service that no Lima pid file names, so the driver
   finds it by the box's disk among the files it holds open (`lsof`, every 30 s

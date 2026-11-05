@@ -633,3 +633,38 @@ func TestStageTaskFilesInTheTaskDir(t *testing.T) {
 	_, err = os.Lstat(m.FilesDir("box1"))
 	require.True(t, os.IsNotExist(err))
 }
+
+// A running guest has the box's directory mounted, and a share does not follow a
+// replaced directory (measured on a real macOS host: Operation not permitted). A
+// driver update must not move it under the VM: it moves at the next start.
+func TestStageTaskFilesLeavesAMountedDirectory(t *testing.T) {
+	old := stageInTaskDir
+	stageInTaskDir = true
+	t.Cleanup(func() { stageInTaskDir = old })
+	f := fakelima.New(t)
+	m := newTestManager(t, f)
+	b, err := m.Box(Spec{BoxID: "box1", VolumeDir: t.TempDir(), ImageURL: "http://x/i.img", ImageSHA256: strings.Repeat("a", 64),
+		CPUs: 1, MemoryMiB: 512, DiskGiB: 1}, nil)
+	require.NoError(t, err)
+	dir := m.FilesDir("box1")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "secrets"), 0o700))
+	secrets, private := t.TempDir(), t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(secrets, "key"), []byte("rotated"), 0o600))
+
+	f.SetState(t, "box1", map[string]any{"status": "Running", "hostagent_pid": os.Getpid(), "driver_pid": os.Getpid()})
+	_, err = b.StageTaskFiles("", secrets, private)
+	require.NoError(t, err)
+	st, err := os.Lstat(dir)
+	require.NoError(t, err)
+	require.True(t, st.IsDir(), "the mounted directory stays a directory")
+	got, err := os.ReadFile(filepath.Join(dir, "secrets", "key"))
+	require.NoError(t, err)
+	require.Equal(t, "rotated", string(got), "a rotated file still reaches the guest")
+
+	f.SetState(t, "box1", map[string]any{"status": "Stopped", "hostagent_pid": 0, "driver_pid": 0})
+	_, err = b.StageTaskFiles("", secrets, private)
+	require.NoError(t, err)
+	target, err := os.Readlink(dir)
+	require.NoError(t, err, "at the next start the directory becomes the link")
+	require.Equal(t, filepath.Join(private, "box-files"), target)
+}
