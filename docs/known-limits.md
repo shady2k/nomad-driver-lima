@@ -259,15 +259,28 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   offset point into a file that was truncated: the resumed read then starts at
   the wrong place or ends early. A follow that spans a rotation is read again
   from the start with `box logs <id>`.
-- **A long disconnection ends the task at Nomad.** `box wait` keeps trying for as
-  long as `--timeout` allows, but the box is Nomad's task: a client that stays
-  away longer than the server tolerates makes the server mark the allocation lost
-  and place a new one, and the client then stops the box on its return. The disk
-  is kept, so the new allocation adopts the same box and the same sessions, and
-  the turn that was running is lost with the VM. Measured on the local cluster:
-  six seconds away cost nothing, and a rebuild that kept the client down for
-  about eighty seconds made Nomad end the allocation at its return (the next
-  allocation started four seconds later on the same disk).
+- **A client away for more than ten minutes ends the box; a shorter absence does
+  not.** Nomad notices a missing client after 20-30 seconds and, because the box's
+  group sets `disconnect { lost_after = "10m", replace = false, reconcile =
+  "keep_original" }`, marks the node `disconnected`: the allocation turns `unknown`
+  and stays where it is. A client back inside those ten minutes re-attaches to the
+  same allocation and the same VM. Measured on Nomad 2.0.7 with a root client: 20 s
+  and 118 s away, SIGKILL and SIGTERM, and with the plugin binary replaced meanwhile;
+  the qemu pid and the guest's uptime did not change. After 13 minutes away the
+  allocation was lost at the ten-minute mark, the VM ran on until the client
+  returned, and the client then stopped it: a new allocation started on the same
+  disk seconds later with a fresh guest. A job change is a different thing. It
+  replaces the allocation whether or not the client was away ("alloc is being
+  updated due to job update"), so a `box upgrade` sent during an absence runs at the
+  client's return. Re-registering an unchanged job does nothing.
+- **A job change during an absence can fail its first start.** In the one run
+  measured, the replacement allocation's `limactl start` met the host agent the
+  old allocation's stop had just killed (`host agent process has exited: signal:
+  killed`), Nomad marked that allocation failed and placed another one, which ran.
+- **A bake or a publish has no disconnect window.** Their jobs carry no `disconnect`
+  block, so by Nomad's code a client away for about 30 seconds loses that allocation
+  (measured with a box job at `lost_after = 0`, not with a bake). The command reports
+  a failed job, and the box's own disk is untouched.
 - **A lost connection is only retried by four commands.** `box wait`,
   `box events -f`, `box logs -f` and `box run` know the difference between a box
   that is gone and a connection that is not there. Every other command reports
