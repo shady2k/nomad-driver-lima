@@ -46,6 +46,43 @@ func TestCapacityOutput(t *testing.T) {
 	require.Equal(t, "dev1", doc.Nodes[0].Disks[0].BoxID)
 }
 
+// TestCapacityShowsVCPUsAndOvercommit: a node that shares its cores out to more
+// vCPUs says so in the table and in the JSON, and the number it offers is what
+// its reservation implies.
+func TestCapacityShowsVCPUsAndOvercommit(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.cluster.mu.Lock()
+	node := ta.cluster.nodes["node-1"]
+	node.Attributes["cpu.numcores"] = "8"
+	node.Attributes["driver.box.cpu_overcommit"] = "2"
+	ta.cluster.mu.Unlock()
+
+	require.Equal(t, ExitOK, ta.run(t, "capacity"))
+	table := ta.out.String()
+	require.Contains(t, table, "vCPU")
+	require.Contains(t, table, "OVERCOMMIT")
+	// 12000 MHz over 8 cores is 1500 MHz of a core a vCPU, and 750 with an
+	// overcommit of 2: the node offers 16 vCPUs of them.
+	line := ""
+	for _, l := range strings.Split(table, "\n") {
+		if strings.HasPrefix(l, "node-1 ") {
+			line = l
+		}
+	}
+	require.NotEmpty(t, line)
+	fields := strings.Fields(line)
+	require.Equal(t, "16", fields[6], "the vCPUs the node offers: %q", line)
+	require.Equal(t, "2", fields[7], "the overcommit: %q", line)
+
+	ta.out.Reset()
+	require.Equal(t, ExitOK, ta.run(t, "--json", "capacity"))
+	var doc capacityOutput
+	require.NoError(t, json.Unmarshal(ta.out.Bytes(), &doc))
+	require.Equal(t, float64(2), doc.Nodes[0].CPUOvercommit)
+	require.Equal(t, int64(16), doc.Nodes[0].CPUVCPUs)
+	require.Equal(t, int64(750), doc.Nodes[0].CPUMHzPerVCPU)
+}
+
 // TestCapacityNamesOrphans: the driver never removes an orphan, so the human
 // output names it with what to do about it.
 func TestCapacityNamesOrphans(t *testing.T) {
@@ -169,6 +206,79 @@ func TestListOutput(t *testing.T) {
 	require.Equal(t, "node-1", doc.Boxes[0].NodeID)
 }
 
+// TestListShowsIdleAndBusy is the IDLE column of `box ls`: how long since the
+// last turn of a running box ended, whether a turn runs now, "-" for a box that
+// is not running or a boxd that does not report it, and "?" for a guest that did
+// not answer.
+func TestListShowsIdleAndBusy(t *testing.T) {
+	t.Run("idle", func(t *testing.T) {
+		ta := newTestApp(t, indexJSON)
+		ta.addBox(t, "dev1")
+		ta.guest.responses["info"] = `{"boxd_version":"0.5.0","sessions":0,"activity":{"busy":false,"idle_seconds":11520}}`
+		require.Equal(t, ExitOK, ta.run(t, "ls"), ta.errOut.String())
+		require.Contains(t, ta.out.String(), "IDLE")
+		require.Contains(t, ta.out.String(), "idle 3h12m")
+
+		ta.out.Reset()
+		require.Equal(t, ExitOK, ta.run(t, "ls", "--json"))
+		var doc lsOutput
+		require.NoError(t, json.Unmarshal(ta.out.Bytes(), &doc))
+		require.NotNil(t, doc.Boxes[0].Activity)
+		require.False(t, doc.Boxes[0].Activity.Busy)
+		require.Equal(t, int64(11520), doc.Boxes[0].Activity.IdleSeconds)
+		require.Empty(t, doc.Boxes[0].GuestError)
+	})
+
+	t.Run("busy", func(t *testing.T) {
+		ta := newTestApp(t, indexJSON)
+		ta.addBox(t, "dev1")
+		ta.guest.responses["info"] = `{"boxd_version":"0.5.0","sessions":1,"activity":{"busy":true,"idle_seconds":0}}`
+		require.Equal(t, ExitOK, ta.run(t, "ls"), ta.errOut.String())
+		require.Contains(t, ta.out.String(), "busy")
+		require.NotContains(t, ta.out.String(), "idle ", "a running turn is not idle time")
+	})
+
+	t.Run("older boxd", func(t *testing.T) {
+		ta := newTestApp(t, indexJSON)
+		ta.addBox(t, "dev1")
+		// boxd 0.1.17 answers without the report: there is nothing to show.
+		ta.guest.responses["info"] = `{"boxd_version":"0.1.17","sessions":0}`
+		require.Equal(t, ExitOK, ta.run(t, "ls"), ta.errOut.String())
+		fields := strings.Fields(strings.Split(strings.TrimSpace(ta.out.String()), "\n")[1])
+		require.Equal(t, "-", fields[len(fields)-1], "the last column is the idle cell: %q", ta.out.String())
+	})
+
+	t.Run("guest silent", func(t *testing.T) {
+		ta := newTestApp(t, indexJSON)
+		ta.addBox(t, "dev1")
+		ta.guest.silent["info"] = true
+		ta.GuestTimeout = 50 * time.Millisecond
+		require.Equal(t, ExitOK, ta.run(t, "ls"), ta.errOut.String())
+		fields := strings.Fields(strings.Split(strings.TrimSpace(ta.out.String()), "\n")[1])
+		require.Equal(t, "?", fields[len(fields)-1], "a guest that does not answer: %q", ta.out.String())
+	})
+
+	t.Run("stopped box", func(t *testing.T) {
+		ta := newTestApp(t, indexJSON)
+		ta.addBox(t, "dev1")
+		ta.stopBox("dev1")
+		require.Equal(t, ExitOK, ta.run(t, "ls"), ta.errOut.String())
+		fields := strings.Fields(strings.Split(strings.TrimSpace(ta.out.String()), "\n")[1])
+		require.Equal(t, "-", fields[len(fields)-1], "a box that is not running is not asked: %q", ta.out.String())
+		require.NotContains(t, ta.guest.callLines(), "info", "the guest of a stopped box is not asked")
+	})
+}
+
+// TestCapacityShowsIdleBoxes: `box capacity` names an idle box too, so a node full
+// of boxes waiting for their model reads as what it is.
+func TestCapacityShowsIdleBoxes(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.addBox(t, "dev1")
+	ta.guest.responses["info"] = `{"boxd_version":"0.5.0","sessions":0,"activity":{"busy":false,"idle_seconds":11520}}`
+
+	require.Equal(t, ExitOK, ta.run(t, "capacity"), ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "node-1/dev1: idle 3h12m")
+}
 func TestListEmpty(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	require.Equal(t, ExitOK, ta.run(t, "ls"))

@@ -263,6 +263,64 @@ systemctl start docker.service
 for _ in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
 docker info --format 'docker server version: {{.ServerVersion}}' || echo 'docker daemon is not answering'
 
+# --- the box's user and the docker group --------------------------------------
+# The user `box run` starts commands as is not in the docker group, so `docker
+# info` in a box answered "permission denied while trying to connect to the
+# Docker daemon socket" while `sudo -n docker` worked. The user is not the
+# image's to describe: cloud-init creates it at the box's first boot, from what
+# Lima passes through cidata, so its name and its groups are decided then and no
+# account record in this image can know them. /etc/adduser.conf is no help
+# either: cloud-init calls useradd itself and never reads it.
+#
+# What joins the two is a boot unit after cloud-init: every user of the box whose
+# uid is a login user's is put in the docker group, and running it again changes
+# nothing. It is enabled, so it runs on every boot -- a first boot that created
+# the user and a later one that did not both leave the same answer.
+#
+# Nothing secret takes part and no privilege is added: the docker socket belongs
+# to root in the box, and the box's user already has passwordless sudo there. The
+# difference is that a tool call in a box works without `sudo`.
+install -d -m 0755 /usr/local/sbin
+cat > /usr/local/sbin/box-user-groups <<'EOF'
+#!/bin/sh
+# Written by images/provision.sh: put this box's users in the docker group, so
+# `docker` works for the user `box run` starts as. Safe to run on every boot: a
+# user who is already in the group is left alone, and an image without docker has
+# no group to join.
+set -eu
+getent group docker >/dev/null 2>&1 || exit 0
+getent passwd | while IFS=: read -r name _ uid _ _ _ _; do
+  # Login users only: system accounts (and nobody) are not the box's user, and
+  # the box's user is one cloud-init created at the first boot.
+  [ "$uid" -ge 1000 ] || continue
+  [ "$uid" -lt 60000 ] || continue
+  if id -nG "$name" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+    continue
+  fi
+  usermod -aG docker "$name" || true
+done
+exit 0
+EOF
+chmod 0755 /usr/local/sbin/box-user-groups
+cat > /etc/systemd/system/box-user-groups.service <<'EOF'
+# Written by images/provision.sh: the user of a box is created by cloud-init, so
+# the docker group is joined after the first boot has made it (and again on every
+# boot, where it changes nothing).
+[Unit]
+Description=Put the box's users in the docker group
+After=cloud-init.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/box-user-groups
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable box-user-groups.service >/dev/null
+chmod 0644 /etc/systemd/system/box-user-groups.service
+
 # --- earlyoom -----------------------------------------------------------------
 # A box that ran out of memory did not answer at all: the guest thrashed, qemu
 # spent twenty minutes inflating the clusters of its disk, no session could be

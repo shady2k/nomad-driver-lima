@@ -68,6 +68,10 @@ it has for the platform is:
   as a mount. The unit is boxd's own -- `images/build.sh` copies the boxd of the
   recorded source in only to print it with `-print-unit`, and removes the binary
   again;
+- `box-user-groups.service`, enabled, which runs after cloud-init and puts the
+  user cloud-init creates at the box's first boot in the `docker` group, so
+  `docker` works for the user `box run` starts as (nothing secret is involved;
+  see `docs/guest-image.md`);
 - `"platform": "mount"` in `/etc/box/image.json` and in the build manifest: the
   image saying it expects a bundle. `images/publish.sh` copies it into the
   image's index entry, and the CLI adds a `platform` block to a box's task config

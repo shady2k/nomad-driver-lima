@@ -476,6 +476,60 @@ func TestReservationFitsFourBoxesOnEightCores(t *testing.T) {
 	require.Contains(t, BuildCapacity(node, allocs).NodeProblem(req), "MHz of CPU free")
 }
 
+// TestOvercommitFitsTwiceTheBoxes is the overcommit of the driver's plugin
+// config: the same 8-core node takes eight boxes of 2 vCPU instead of four, and
+// the ninth is refused. Eight cores shared out to two vCPUs each are sixteen.
+func TestOvercommitFitsTwiceTheBoxes(t *testing.T) {
+	cluster := newFakeCluster()
+	node := cluster.addNode("node-1", "node-1", "amd64", 15992, 64000, 900000)
+	node.Attributes["cpu.numcores"] = "8"
+	node.Attributes["driver.box.cpu_overcommit"] = "2"
+	node.ReservedResources = &api.NodeReservedResources{Cpu: api.NodeReservedCpuResources{CpuShares: 500}}
+	req := PlacementRequest{CPUs: 2, MemoryMiB: 1024, DiskGiB: 16}
+
+	var allocs []*api.Allocation
+	for placed := 0; placed < 8; placed++ {
+		capacity := BuildCapacity(node, allocs)
+		require.Equal(t, float64(2), capacity.CPUOvercommit)
+		require.Equal(t, int64(968), capacity.CPUMHzPerVCPU, "1936 MHz of a core shared out to two vCPUs")
+		require.Equal(t, int64(16), capacity.CPUVCPUs)
+		require.Empty(t, capacity.NodeProblem(req), "box %d", placed+1)
+		allocs = append(allocs, &api.Allocation{ID: fmt.Sprint("a", placed), ClientStatus: "running",
+			AllocatedResources: &api.AllocatedResources{Tasks: map[string]*api.AllocatedTaskResources{
+				"box": {Cpu: api.AllocatedCpuResources{CpuShares: 2 * capacity.CPUMHzPerVCPU}},
+			}}})
+	}
+	// 8 boxes take 15488 of the 15492 MHz there are; the ninth needs 1936.
+	require.Contains(t, BuildCapacity(node, allocs).NodeProblem(req), "MHz of CPU free")
+}
+
+// TestCPUOvercommitFromAttributes: a node that does not say, or says something
+// that is not a usable number, is 1 -- a reservation is never quietly larger than
+// the node published.
+func TestCPUOvercommitFromAttributes(t *testing.T) {
+	cases := map[string]float64{
+		"":      1,
+		"1":     1,
+		"2":     2,
+		"1.5":   1.5,
+		"0.5":   1,
+		"0":     1,
+		"-2":    1,
+		"two":   1,
+		" 3.5 ": 3.5,
+	}
+	for value, want := range cases {
+		attrs := map[string]string{}
+		if value != "" {
+			attrs["driver.box.cpu_overcommit"] = value
+		}
+		require.Equal(t, want, cpuOvercommitFromAttributes(attrs), "%q", value)
+	}
+	require.Equal(t, int64(968), reservePerVCPU(15992, 500, "8", 2))
+	require.Equal(t, int64(1291), reservePerVCPU(15992, 500, "8", 1.5))
+	require.Equal(t, int64(1936), reservePerVCPU(15992, 500, "8", 1))
+}
+
 func TestMHzPerVCPUFallsBack(t *testing.T) {
 	require.Equal(t, int64(1936), mhzPerVCPU(15992, 500, "8"))
 	require.Equal(t, int64(boxCPUSharesPerVCPU), mhzPerVCPU(15992, 500, ""))

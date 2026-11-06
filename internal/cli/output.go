@@ -44,6 +44,13 @@ type BoxRecord struct {
 	// SpecWrittenAt is when the stored description of the box was written, empty
 	// for a box that has none.
 	SpecWrittenAt string `json:"spec_written_at,omitempty"`
+	// Activity is what the guest says its turns are doing: absent when the box is
+	// not running, when the guest did not answer, or when its boxd is older than
+	// the report.
+	Activity *BoxActivity `json:"activity,omitempty"`
+	// GuestError is why the guest could not be asked about its activity. It is set
+	// by `box ls` only: a box that is not running is not asked and has no error.
+	GuestError string `json:"guest_error,omitempty"`
 	// Note explains a state that needs a sentence.
 	Note string `json:"note,omitempty"`
 }
@@ -101,6 +108,15 @@ func (a *App) note(format string, args ...any) {
 	if a.JSON {
 		return
 	}
+	a.errMu.Lock()
+	defer a.errMu.Unlock()
+	fmt.Fprintf(a.ErrOut, format+"\n", args...)
+}
+
+// noteWait writes a line to stderr whatever the output mode: a wait that lasts
+// minutes is the only news there is, and a --json caller watching stdout for one
+// document still has to see why nothing has arrived yet.
+func (a *App) noteWait(format string, args ...any) {
 	a.errMu.Lock()
 	defer a.errMu.Unlock()
 	fmt.Fprintf(a.ErrOut, format+"\n", args...)

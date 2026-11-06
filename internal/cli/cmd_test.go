@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/nomad/api"
 	"github.com/stretchr/testify/require"
@@ -335,6 +338,147 @@ func TestStopKeepsTheDisk(t *testing.T) {
 	require.Contains(t, ta.errOut.String(), "already stopped")
 }
 
+// hogAllocation takes most of a node's memory, so the next create does not fit
+// until a test removes it.
+func (ta *testApp) hogAllocation(memoryMB int64) {
+	ta.cluster.mu.Lock()
+	defer ta.cluster.mu.Unlock()
+	ta.cluster.allocs["hog"] = &api.Allocation{
+		ID: "hog", NodeID: "node-1", ClientStatus: "running",
+		AllocatedResources: &api.AllocatedResources{Tasks: map[string]*api.AllocatedTaskResources{
+			"box": {Memory: api.AllocatedMemoryResources{MemoryMB: memoryMB}},
+		}},
+	}
+}
+
+// TestCreateWaitAsksAgainUntilThereIsRoom is `box create --wait 30m`: the box
+// does not fit, the command says so once, and it asks again until a box finishes.
+func TestCreateWaitAsksAgainUntilThereIsRoom(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
+	ta.hogAllocation(20000) // node-1 has 32768 MiB, so 12768 are free
+
+	var sleeps int
+	ta.Sleep = func(ctx context.Context, d time.Duration) error {
+		sleeps++
+		ta.clock.advance(d)
+		if sleeps == 1 {
+			ta.cluster.mu.Lock()
+			delete(ta.cluster.allocs, "hog")
+			ta.cluster.mu.Unlock()
+		}
+		return nil
+	}
+
+	rc := ta.run(t, "create", "dev1", "--image", "1.0.0", "--memory-mib", "16384", "--wait", "30m")
+	require.Equal(t, ExitOK, rc, ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "no room for box dev1 yet")
+	require.Contains(t, ta.errOut.String(), "16896 MiB", "the line says what the box needs")
+	require.Contains(t, ta.errOut.String(), "room for box dev1 after")
+	require.Contains(t, ta.errOut.String(), "created box dev1")
+	require.Equal(t, 2, sleeps, "the command asked twice: once refusal, once room")
+}
+
+// TestCreateWaitGivesUpWithTheRefusal: the waiting ends with the refusal the
+// placement gave and its exit code, and the reason is repeated as it goes.
+func TestCreateWaitGivesUpWithTheRefusal(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.cluster.mu.Lock()
+	ta.cluster.nodes["node-1"].NodeResources.Memory.MemoryMB = 8000
+	ta.cluster.mu.Unlock()
+
+	var sleeps int
+	ta.Sleep = func(ctx context.Context, d time.Duration) error {
+		sleeps++
+		ta.clock.advance(d)
+		return nil
+	}
+
+	rc := ta.run(t, "create", "dev1", "--image", "1.0.0", "--memory-mib", "16384", "--wait", "1m")
+	require.Equal(t, ExitError, rc, ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "box: no node can take this box")
+	require.Contains(t, ta.errOut.String(), "no room for box dev1 yet")
+	require.Contains(t, ta.errOut.String(), "the placement is refused as it was")
+	require.Equal(t, 2, sleeps, "1m of waiting is two asks 30s apart")
+	require.Empty(t, ta.cluster.jobs, "nothing was created")
+}
+
+// TestCreateWaitDoesNotWaitForWhatWaitingCannotChange: a wrong architecture, a
+// missing image or a usage error is refused at once.
+func TestCreateWaitDoesNotWaitForWhatWaitingCannotChange(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.Sleep = func(ctx context.Context, d time.Duration) error {
+		t.Errorf("nothing should be waited for, slept %s", d)
+		return nil
+	}
+	rc := ta.run(t, "create", "dev1", "--image", "1.0.0", "--arch", "arm64", "--wait", "30m")
+	require.Equal(t, ExitError, rc, ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "the box needs arm64")
+	require.NotContains(t, ta.errOut.String(), "no room for box dev1 yet")
+}
+
+// TestCreateWaitFlagIsOptional: "--wait" alone is what it always was, and
+// "--wait=false" waits for nothing.
+func TestCreateWaitFlagIsOptional(t *testing.T) {
+	// A bare --wait waits for the box to run and does not retry a refusal.
+	ta := newTestApp(t, indexJSON)
+	ta.Sleep = func(ctx context.Context, d time.Duration) error {
+		if d == capacityPollInterval {
+			t.Errorf("a bare --wait must not retry a refusal")
+		}
+		return nil
+	}
+	ta.cluster.mu.Lock()
+	ta.cluster.nodes["node-1"].NodeResources.Memory.MemoryMB = 8000
+	ta.cluster.mu.Unlock()
+	rc := ta.run(t, "create", "dev1", "--image", "1.0.0", "--memory-mib", "16384", "--wait")
+	require.Equal(t, ExitError, rc, ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "box: no node can take this box")
+	require.NotContains(t, ta.errOut.String(), "no room for box dev1 yet")
+
+	// --wait=false creates the box and does not wait for it to run.
+	ta = newTestApp(t, indexJSON)
+	rc = ta.run(t, "create", "dev1", "--image", "1.0.0", "--wait=false")
+	require.Equal(t, ExitOK, rc, ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "starting")
+	require.Len(t, ta.cluster.jobs, 1, "the job is registered even when the command does not wait")
+}
+
+// TestOptionalDurationFlag reads both shapes of a flag whose value may be left
+// out, and does not take a box id for a duration.
+func TestOptionalDurationFlag(t *testing.T) {
+	newWait := func() (*flag.FlagSet, *optionalDuration) {
+		fs := newFlagSet("test")
+		wait := &optionalDuration{on: true}
+		fs.Var(wait, "wait", "")
+		return fs, wait
+	}
+
+	fs, wait := newWait()
+	require.NoError(t, parseFlags(fs, joinOptionalValue([]string{"--wait", "30m", "dev1"}, "wait", isDurationValue), 1))
+	require.True(t, wait.on)
+	require.Equal(t, 30*time.Minute, wait.d)
+	require.Equal(t, "dev1", fs.Arg(0))
+
+	fs, wait = newWait()
+	require.NoError(t, parseFlags(fs, joinOptionalValue([]string{"dev1", "--wait"}, "wait", isDurationValue), 1))
+	require.True(t, wait.on)
+	require.Zero(t, wait.d, "a bare --wait carries no duration")
+
+	fs, _ = newWait()
+	require.NoError(t, parseFlags(fs, joinOptionalValue([]string{"--wait", "dev1"}, "wait", isDurationValue), 1))
+	require.Equal(t, "dev1", fs.Arg(0), "a box id is not a duration, so it is not the flag's value")
+
+	fs, wait = newWait()
+	require.NoError(t, parseFlags(fs, joinOptionalValue([]string{"--wait=false", "dev1"}, "wait", isDurationValue), 1))
+	require.False(t, wait.on)
+	require.True(t, wait.given())
+
+	// A value that is not a duration is a usage error, not a silent box id.
+	fs, _ = newWait()
+	require.Equal(t, ExitUsage, ExitCode(parseFlags(fs, joinOptionalValue([]string{"--wait", "3x", "dev1"}, "wait", isDurationValue), 1)))
+}
+
 func TestStartUsesTheSameDisk(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	ta.addBox(t, "dev1")
@@ -345,6 +489,32 @@ func TestStartUsesTheSameDisk(t *testing.T) {
 	require.Equal(t, ExitOK, ta.run(t, "start", "dev1"), ta.errOut.String())
 	require.Contains(t, ta.errOut.String(), "old disk")
 	require.Len(t, ta.cluster.volumes, 1, "the volume is not recreated")
+}
+
+// TestStartTakesTheNodesCurrentReservation: an existing box keeps the reservation
+// it was created with until a resize, an upgrade -- or a start, which
+// re-registers the job and reads the node's figure again.
+func TestStartTakesTheNodesCurrentReservation(t *testing.T) {
+	ta := newTestApp(t, indexJSON)
+	ta.cluster.mu.Lock()
+	node := ta.cluster.nodes["node-1"]
+	node.Attributes["cpu.numcores"] = "8"
+	ta.cluster.mu.Unlock()
+	ta.addBox(t, "dev1")
+	require.Equal(t, 2*1000, *ta.cluster.jobs["box-dev1"].TaskGroups[0].Tasks[0].Resources.CPU,
+		"the box was made with the default reservation of 1000 MHz a vCPU")
+
+	require.Equal(t, ExitOK, ta.run(t, "stop", "dev1"))
+	ta.cluster.mu.Lock()
+	node.Attributes["driver.box.cpu_overcommit"] = "2"
+	ta.cluster.mu.Unlock()
+
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
+	ta.out.Reset()
+	ta.errOut.Reset()
+	require.Equal(t, ExitOK, ta.run(t, "start", "dev1"), ta.errOut.String())
+	require.Equal(t, 2*750, *ta.cluster.jobs["box-dev1"].TaskGroups[0].Tasks[0].Resources.CPU,
+		"the start took the node's overcommit: 750 MHz a vCPU")
 }
 
 func TestStartWithoutDisk(t *testing.T) {

@@ -14,8 +14,9 @@
 #
 # Every check prints one line -- "PASS" or "FAIL", with the value expected and the
 # value found -- and the script exits non-zero when any of them failed. Nothing
-# here writes to the box's disk: the test credential is written to
-# /run/box/secrets, which is a tmpfs, and it is removed again at the end.
+# here writes a secret to the box's disk: the test credential is written to
+# /run/box/secrets, which is a tmpfs, and it is removed again at the end. The one
+# account the checks create -- for the docker group -- is deleted again.
 #
 # Usage (inside the guest, as root):
 #   images/guest-checks.sh [--manifest PATH] [--platform DIR]
@@ -377,6 +378,37 @@ for tool in node npm go python3 uv docker git; do
 done
 rmdir /run/box-checks-home 2>/dev/null || true
 [[ $TOOLS_CHECKED -gt 0 ]] || fail "the manifest names at least one tool version" "at least one" "none"
+
+# --- docker for the box's user -------------------------------------------------
+printf '\n== docker for the box user\n'
+# The user `box run` starts commands as is created by cloud-init at the box's
+# first boot, so the image cannot hold its account: it holds the boot unit that
+# puts it in the docker group (images/provision.sh). The check proves both halves
+# with a temporary user it creates and deletes again, because the box's own user
+# may not exist yet when this runs -- verify.sh gets a shell as soon as the VM
+# answers. `docker info` for that user is the real question; it is asked when the
+# daemon answers at all, so a slow first boot is not a failure of the group.
+check "the image has the docker group" "docker" "$(getent group docker | cut -d: -f1 || true)"
+check "the unit that joins a user to it is enabled" "enabled" \
+  "$(systemctl is-enabled box-user-groups.service 2>&1)"
+CHECK_USER=box-checks-user
+userdel -r "$CHECK_USER" >/dev/null 2>&1 || true
+if useradd -m -s /bin/bash "$CHECK_USER" >/dev/null 2>&1; then
+  /usr/local/sbin/box-user-groups >/dev/null 2>&1 || true
+  check "the user of a box is in the docker group" "docker" \
+    "$(id -nG "$CHECK_USER" | tr ' ' '\n' | grep -x docker || echo 'not in docker')"
+  if docker info >/dev/null 2>&1; then
+    DOCKER_AS_USER=ok
+    su -s /bin/sh "$CHECK_USER" -c 'docker info' >/dev/null 2>&1 || \
+      DOCKER_AS_USER=$(su -s /bin/sh "$CHECK_USER" -c 'docker info' 2>&1 | head -1)
+    check "docker answers that user without sudo" "ok" "$(short "${DOCKER_AS_USER:-nothing}")"
+  else
+    info "the docker daemon is not answering in this guest, so only the group membership is checked"
+  fi
+else
+  fail "a temporary user can be created for the docker check" "created" "useradd failed"
+fi
+userdel -r "$CHECK_USER" >/dev/null 2>&1 || true
 
 # --- the add-ons the bundle carries -------------------------------------------
 printf '\n== the add-ons\n'

@@ -66,6 +66,13 @@ type Config struct {
 	// a Linux node) requires it; a driver that runs as another user may leave it
 	// empty or name its own user.
 	RuntimeUser string `codec:"runtime_user"`
+	// CPUOvercommit is how many vCPUs the node's cores are shared out to (>= 1,
+	// fractions allowed, default 1). A box is idle most of the time -- an agent
+	// waits for its model -- so a vCPU does not have to reserve a whole core: the
+	// `cpu.max` cap of a box (its vCPUs plus one core) is what keeps a busy box
+	// from taking the node. The driver only publishes the number: the CLI divides
+	// its per-vCPU reservation by it, and Nomad then places that many more boxes.
+	CPUOvercommit float64 `codec:"cpu_overcommit"`
 
 	// identity is the resolved RuntimeUser; identityErr is why it could not be
 	// resolved. A root client without runtime_user is reported by the
@@ -114,6 +121,10 @@ var configSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 		hclspec.NewAttr("runtime_user", "string", false),
 		hclspec.NewLiteral(`""`),
 	),
+	"cpu_overcommit": hclspec.NewDefault(
+		hclspec.NewAttr("cpu_overcommit", "number", false),
+		hclspec.NewLiteral("1"),
+	),
 })
 
 // validate fills in defaults and rejects configurations that cannot work.
@@ -147,6 +158,14 @@ func (c *Config) validate() error {
 		}
 	default:
 		return fmt.Errorf("vm_type must be %q or %q, got %q", box.VMTypeQEMU, box.VMTypeVZ, c.VMType)
+	}
+	// Zero is "the key was left out": the public default is 1, so a node that does
+	// not ask for overcommit reserves a core for a vCPU exactly as before.
+	if c.CPUOvercommit == 0 {
+		c.CPUOvercommit = 1
+	}
+	if !(c.CPUOvercommit >= 1) {
+		return fmt.Errorf("cpu_overcommit must be at least 1 (1 disables it, 2 shares a core between two vCPUs), got %v", c.CPUOvercommit)
 	}
 	if c.LimaHome == "" {
 		home, err := os.UserHomeDir()

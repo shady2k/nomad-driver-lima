@@ -55,6 +55,7 @@
           'lima_home': nomad_box_lima_home,
           'image_cache_dir': nomad_box_image_cache_dir,
           'memory_overhead_mib': nomad_box_memory_overhead_mib | int,
+          'cpu_overcommit': nomad_box_cpu_overcommit | float,
           'memory_limit': nomad_box_memory_limit}
          | combine({'runtime_user': nomad_box_runtime_user}
                    if nomad_box_runtime_user | length > 0 else {})

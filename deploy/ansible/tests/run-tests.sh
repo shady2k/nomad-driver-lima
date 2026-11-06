@@ -535,6 +535,7 @@ check_grep 'the unit carries the runtime directory of the box user' '^Environmen
 check_grep 'nomad config validate accepted the configuration' 'Configuration is valid!' "$TEST_ROOT/apply.log"
 check_grep 'the plugin block carries runtime_user' '"runtime_user": "'"$RUN_USER"'"' "$P/etc/nomad.d/50-box.json"
 check_grep 'the plugin block carries the memory limit of this platform' '"memory_limit": "enforce"' "$P/etc/nomad.d/50-box.json"
+check_grep 'the plugin block carries the CPU overcommit of the node' '"cpu_overcommit": 1.0' "$P/etc/nomad.d/50-box.json"
 check_grep 'the plugin block carries the allowlist' '"driver.allowlist": "box"' "$P/etc/nomad.d/50-box.json"
 check_grep 'the plugin block names the live plugin directory' '"plugin_dir": "'"$P"'/opt/box/current/plugins"' "$P/etc/nomad.d/50-box.json"
 check_grep 'the plugin block names the live host volume plugin directory' '"host_volume_plugin_dir": "'"$P"'/opt/box/current/host_volume_plugins"' "$P/etc/nomad.d/50-box.json"

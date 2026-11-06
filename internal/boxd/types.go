@@ -132,8 +132,25 @@ type Info struct {
 	// Platform is the bundle the box mounts at /opt/box; it is always present,
 	// with Mounted false and a reason when there is none.
 	Platform PlatformInfo `json:"platform"`
+	// Activity says whether a turn runs now and how long the box has been idle,
+	// which is what tells a box waiting for its model from one at work.
+	Activity Activity `json:"activity"`
 	// Seal is whether the seal would run in this box now.
 	Seal SealStatus `json:"seal"`
+}
+
+// Activity is what the box's sessions are doing: whether a turn runs now, and how
+// long since the last one ended.
+//
+// A box is idle most of the time -- an agent waits for its model -- so a host
+// that holds many of them asks this to say which is which. Nothing acts on the
+// answer here: boxd stops nothing, and the numbers are a report.
+type Activity struct {
+	// Busy is true while a turn runs in any session.
+	Busy bool `json:"busy"`
+	// IdleSeconds is how long since the last turn of the box ended, or since boxd
+	// started when no turn has run yet.
+	IdleSeconds int64 `json:"idle_seconds"`
 }
 
 // ErrorBody is the failure document boxctl prints to stdout and exits 1 with.

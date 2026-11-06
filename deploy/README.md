@@ -251,7 +251,7 @@ no `runtime_user` to give a volume directory to, so keep the two the same.
 | file | contents |
 | --- | --- |
 | `10-base.json` | region, datacenter, node name, `data_dir`, bind/advertise, ports, the client block (servers to join, node pool, meta, reserved resources, host volumes directory), telemetry, ACL, mTLS |
-| `50-box.json` | `plugin_dir`, `client.host_volume_plugin_dir`, `client.options["driver.allowlist"]`, and the `plugin "box"` block (limactl, lima home, image cache, memory overhead, vm type, `runtime_user`) |
+| `50-box.json` | `plugin_dir`, `client.host_volume_plugin_dir`, `client.options["driver.allowlist"]`, and the `plugin "box"` block (limactl, lima home, image cache, memory overhead, `cpu_overcommit`, vm type, `runtime_user`) |
 | `nomad.env` (Linux) | the tokens, mode 0600, loaded with `EnvironmentFile=`; on macOS they travel in the plist's `EnvironmentVariables` |
 
 The Linux unit is `nomad.service`: `nomad agent -config /etc/nomad.d`, `Type=notify`,
@@ -266,6 +266,29 @@ Nothing in the repo has to be edited to change any of this: every key is a varia
 in `roles/nomad_client/defaults/main.yml` (documented there), and
 `nomad_client_extra` / `nomad_extra` merge anything else the client block or the
 top-level configuration needs.
+
+### How many boxes a node takes: `box_cpu_overcommit`
+
+A node reserves `(total MHz - reserved) / cores` for one vCPU, so an 8-core node is
+full at four boxes of 2 vCPU. A box is idle most of the time - an agent waits for
+its model - and the driver already caps a busy box at its vCPUs plus one core
+(`cpu.max`), so a box cannot take the node. `box_cpu_overcommit` (default `1`)
+divides that reservation: with `2` the same node takes eight boxes of 2 vCPU, and
+the driver publishes it as `driver.box.cpu_overcommit` for the CLI to read.
+
+It changes nothing else: a box keeps its vCPU count, its `cpu.max` cap and its
+memory, which stays a hard reservation (a guest out of memory freezes). `box
+capacity` shows the vCPUs a node offers and its overcommit. A box keeps the figure
+it was created with until `box start`, `box resize` or `box upgrade`, so raising the
+variable refills the node's room without touching the boxes already on it:
+
+```yaml
+# group_vars/box_nodes.yml
+box_cpu_overcommit: 2
+```
+
+Do not raise it past what the node's memory and disk can hold: those are still
+counted in full, and a node that is full of memory is full whatever the CPU says.
 
 ## macOS: the launchd daemon
 
@@ -401,6 +424,9 @@ services.nomad = {
       # "enforce" on Linux, "off" on macOS: the v0.1.0 driver needs it written out,
       # newer ones default to the platform's answer.
       memory_limit = "enforce";
+      # How many vCPUs the cores are shared out to (1 = a core a vCPU). The role
+      # writes it too; a node configured outside the kit sets it by hand.
+      cpu_overcommit = 2;
       runtime_user = "dev";
     };
   };

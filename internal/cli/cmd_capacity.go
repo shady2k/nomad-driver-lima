@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -31,6 +32,15 @@ func uncountedSummary(node *NodeCapacity) string {
 	return fmt.Sprintf("%d (%s)", len(node.Uncounted), humanMiB(node.UncountedMemoryMiB))
 }
 
+// humanOvercommit renders a node's CPU overcommit: "1" for a node that reserves a
+// whole core for a vCPU, and "2" or "1.5" for one that shares it.
+func humanOvercommit(over float64) string {
+	if !(over >= 1) {
+		return "1"
+	}
+	return strconv.FormatFloat(over, 'f', -1, 64)
+}
+
 // cmdCapacity lists the nodes that can run boxes.
 func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 	fs := newFlagSet("capacity")
@@ -56,6 +66,10 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 			byBox[box.ID] = box
 		}
 	}
+	// How long the running boxes have been idle: a node that is full of boxes that
+	// are all waiting for their model is a different picture from a node of boxes
+	// at work. Asked in parallel, each under the guest call bound.
+	activities := a.guestActivities(ctx, boxes)
 	arches := summarizeArches(nodes)
 	if a.JSON {
 		return a.printJSON(capacityOutput{Nodes: nodes, Arches: arches})
@@ -65,7 +79,7 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 		return nil
 	}
 	rows := make([][]string, 0, len(nodes)+len(arches))
-	headers := []string{"NODE", "ARCH", "OS", "STATUS", "ELIGIBLE", "CPU free/total", "MEM free/total", "DISK free/total", "BOX DISKS used", "UNCOUNTED VMs", "DRIVER", "VOLUME PLUGIN", "BOXES"}
+	headers := []string{"NODE", "ARCH", "OS", "STATUS", "ELIGIBLE", "CPU free/total", "vCPU", "OVERCOMMIT", "MEM free/total", "DISK free/total", "BOX DISKS used", "UNCOUNTED VMs", "DRIVER", "VOLUME PLUGIN", "BOXES"}
 	for _, node := range nodes {
 		eligible := "no"
 		if node.Eligible {
@@ -91,6 +105,8 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 			node.Status,
 			eligible,
 			fmt.Sprintf("%s/%s", humanMHz(node.CPU.Free), humanMHz(node.CPU.Total)),
+			fmt.Sprintf("%d", node.vcpus()),
+			humanOvercommit(node.CPUOvercommit),
 			fmt.Sprintf("%s/%s", humanMiB(node.Memory.Free), humanMiB(node.Memory.Total)),
 			fmt.Sprintf("%s/%s", humanMiB(node.Disk.Free), humanMiB(node.Disk.Total)),
 			diskSummary(node),
@@ -127,6 +143,23 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 			}
 			a.note("%s/%s: an orphan, a VM with no box task for 10 minutes or without its disk; the driver leaves it "+
 				"alone, remove it on the node with limactl delete as the driver's runtime user", node.Name, name)
+		}
+	}
+
+	// How long each running box has been idle, and whether a turn runs in it now.
+	// Nothing is stopped for it: a box that waits for its model is still a box
+	// somebody owns.
+	if len(activities) > 0 {
+		names := make(map[string]string, len(nodes))
+		for _, node := range nodes {
+			names[node.NodeID] = node.Name
+		}
+		for _, box := range boxes {
+			res, ok := activities[box.ID]
+			if !ok {
+				continue
+			}
+			a.note("%s/%s: %s", dash(names[box.NodeID]), box.ID, activityCell(res.activity, errOr(res.err)))
 		}
 	}
 

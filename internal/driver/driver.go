@@ -239,6 +239,12 @@ func (d *Driver) clearGoneKeys(fp *drivers.Fingerprint) {
 	d.published = now
 }
 
+// formatOvercommit renders the overcommit factor as the fingerprint attribute a
+// CLI reads: "1" and "2" for the whole numbers, "1.5" for a fraction.
+func formatOvercommit(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
 // isPerBoxKey reports whether an attribute names one box: its disk or its
 // instance, not a node-wide total.
 func isPerBoxKey(key string) bool {
@@ -269,6 +275,10 @@ func (d *Driver) fingerprintOnce(ctx context.Context) *drivers.Fingerprint {
 	// Whether the memory budget of a box is enforced on this node: a node with
 	// memory_limit = "off" runs boxes without a cap, and that is visible here.
 	set("driver.box.memory_limit", d.config.MemoryLimit)
+	// How many vCPUs the node's cores are shared out to: the CLI divides its
+	// per-vCPU reservation by this, so a node says it once and every `box create`
+	// on the cluster picks it up.
+	set("driver.box.cpu_overcommit", formatOvercommit(d.config.CPUOvercommit))
 	if d.config.identity != nil {
 		set("driver.box.runtime_user", d.config.identity.Name)
 	}

@@ -164,6 +164,11 @@ nomad_box_limactl: '{{ box_limactl | default("/usr/local/bin/limactl") }}'
 nomad_box_lima_home: '{{ box_lima_home | default("/var/lib/box/lima") }}'
 nomad_box_image_cache_dir: '{{ box_image_cache_dir | default("/var/lib/box/images") }}'
 nomad_box_memory_overhead_mib: '{{ box_memory_overhead_mib | default(512) }}'
+# How many vCPUs the node's cores are shared out to (box_node). 1 is a whole core
+# for a vCPU; a larger number puts that many more boxes on the node, and the CLI
+# divides its per-vCPU reservation by it. Written out even at 1, so the node says
+# what it reserves instead of leaving the driver's default to be assumed.
+nomad_box_cpu_overcommit: '{{ box_cpu_overcommit | default(1) }}'
 # The memory cap of a box: "enforce" fails a box whose cgroup scope cannot be made,
 # "off" runs it uncapped - the only possible value on macOS, which has no cgroup
 # v2. The driver works this default out by itself (aba99dc), but the v0.1.0

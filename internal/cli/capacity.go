@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -296,8 +297,15 @@ type NodeCapacity struct {
 	// Uncounted is the running instances Nomad's accounting does not cover: their
 	// memory and vCPUs are taken off the free resources below.
 	Uncounted []BoxInstance `json:"uncounted_instances,omitempty"`
-	// CPUMHzPerVCPU is what one vCPU reserves on this node.
+	// CPUMHzPerVCPU is what one vCPU reserves on this node: one core, less the
+	// client's part of it, shared out to the node's overcommit.
 	CPUMHzPerVCPU int64 `json:"cpu_mhz_per_vcpu"`
+	// CPUOvercommit is how many vCPUs the node shares its cores out to
+	// (driver.box.cpu_overcommit, 1 when the node does not say).
+	CPUOvercommit float64 `json:"cpu_overcommit"`
+	// CPUVCPUs is how many vCPUs the node offers: its CPU total in the units one
+	// vCPU of it reserves, so eight cores at overcommit 2 offer sixteen.
+	CPUVCPUs int64 `json:"cpu_vcpus"`
 	// UncountedMemoryMiB and UncountedCPUShares are what those VMs take.
 	UncountedMemoryMiB int64 `json:"uncounted_memory_mib"`
 	UncountedCPUShares int64 `json:"uncounted_cpu_shares"`
@@ -468,7 +476,9 @@ func BuildCapacity(node *api.Node, allocs []*api.Allocation) *NodeCapacity {
 	}
 
 	cap.CPU = usage(cpuTotal, cpuReserved, cpuAllocated)
-	cap.CPUMHzPerVCPU = mhzPerVCPU(cpuTotal, cpuReserved, attrs["cpu.numcores"])
+	cap.CPUOvercommit = cpuOvercommitFromAttributes(attrs)
+	cap.CPUMHzPerVCPU = reservePerVCPU(cpuTotal, cpuReserved, attrs["cpu.numcores"], cap.CPUOvercommit)
+	cap.CPUVCPUs = cap.vcpus()
 	cap.UncountedCPUShares = uncountedVCPUs * cap.CPUMHzPerVCPU
 	cap.Memory = usage(memTotal, memReserved, memAllocated)
 	cap.Disk = usage(diskTotal, diskReserved, diskAllocated)
@@ -526,6 +536,41 @@ func mhzPerVCPU(total, reserved int64, numCores string) int64 {
 	return (total - reserved) / cores
 }
 
+// cpuOvercommitFromAttributes reads driver.box.cpu_overcommit: how many vCPUs the
+// node shares its cores out to. A node that does not say, or says something that
+// is not a number >= 1, is 1: a reservation is never quietly larger than the node
+// published.
+func cpuOvercommitFromAttributes(attrs map[string]string) float64 {
+	value, ok := attrs["driver.box.cpu_overcommit"]
+	if !ok {
+		return 1
+	}
+	over, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	if err != nil || !(over >= 1) || math.IsInf(over, 0) {
+		return 1
+	}
+	return over
+}
+
+// reservePerVCPU is what one vCPU reserves on a node: one core less the client's
+// part of it, shared out to the node's overcommit.
+//
+// Overcommit changes this number and nothing else: the vCPUs of a box and its
+// cpu.max cap (its vCPUs plus one core) stay what the box asked for, and the
+// memory stays a hard reservation. So a box that is idle most of the time costs
+// a fraction of a core, and a box that is busy is still capped.
+func reservePerVCPU(total, reserved int64, numCores string, overcommit float64) int64 {
+	mhz := mhzPerVCPU(total, reserved, numCores)
+	if !(overcommit > 1) || math.IsInf(overcommit, 0) {
+		return mhz
+	}
+	shared := math.Round(float64(mhz) / overcommit)
+	if shared < 1 {
+		return 1
+	}
+	return int64(shared)
+}
+
 // vcpuMHz is the reservation of one vCPU on this node.
 func (n *NodeCapacity) vcpuMHz() int64 {
 	if n.CPUMHzPerVCPU > 0 {
@@ -555,36 +600,62 @@ func isTerminalAlloc(clientStatus string) bool {
 	return false
 }
 
+// refusal is why a node cannot take a box, and which kind of a reason it is: a
+// caller that can wait has to tell "the node is full" from "this node will never
+// run this box".
+type refusal int
+
+const (
+	// refusalNone is a node that can take the box.
+	refusalNone refusal = iota
+	// refusalRoom is the node being full: another box finishing frees the CPU,
+	// the memory or the disk.
+	refusalRoom
+	// refusalNode is the node itself: not ready, not eligible, no driver, an
+	// unhealthy driver, no volume plugin. Waiting changes none of it.
+	refusalNode
+	// refusalRequest is the box against this node: the architecture. Another node
+	// or another image is the answer.
+	refusalRequest
+)
+
+// nodeRefusal returns the kind of the node's refusal and its plain-words reason,
+// or refusalNone and "" when the node can take the box.
+func (n *NodeCapacity) nodeRefusal(req PlacementRequest) (refusal, string) {
+	switch {
+	case n.Status != api.NodeStatusReady:
+		return refusalNode, fmt.Sprintf("node %s is %s, not ready", n.Name, n.Status)
+	case !n.Eligible:
+		return refusalNode, fmt.Sprintf("node %s is not eligible for new allocations", n.Name)
+	case !n.Driver.Installed:
+		return refusalNode, fmt.Sprintf("node %s has no box driver installed", n.Name)
+	case n.Driver.Installed && n.Driver.HealthReported && !n.Driver.Healthy:
+		if reason := oneLine(n.Driver.HealthDescription, 240); reason != "" {
+			return refusalNode, fmt.Sprintf("the box driver on node %s is unhealthy: %s", n.Name, reason)
+		}
+		return refusalNode, fmt.Sprintf("the box driver on node %s is unhealthy", n.Name)
+	case !n.hasVolumePlugin(boxVolumePluginID):
+		return refusalNode, fmt.Sprintf("node %s has no %s host volume plugin, so it cannot hold a box disk", n.Name, boxVolumePluginID)
+	case NormalizeArch(req.Arch) != "" && n.Arch != NormalizeArch(req.Arch):
+		return refusalRequest, fmt.Sprintf("node %s runs %s images, the box needs %s", n.Name, n.Arch, NormalizeArch(req.Arch))
+	}
+	if need := req.TaskMemoryMiB(); need > 0 && n.Memory.Free < int64(need) {
+		return refusalRoom, fmt.Sprintf("node %s has %d MiB of memory free, the box needs %d MiB", n.Name, n.Memory.Free, need)
+	}
+	if need := int64(req.CPUs) * n.vcpuMHz(); need > 0 && n.CPU.Free < need {
+		return refusalRoom, fmt.Sprintf("node %s has %d MHz of CPU free, the box needs %d MHz", n.Name, n.CPU.Free, need)
+	}
+	if need := int64(req.DiskGiB) * 1024; need > 0 && n.Disk.Free < need {
+		return refusalRoom, fmt.Sprintf("node %s has %d MiB of disk free, the box disk needs %d MiB", n.Name, n.Disk.Free, need)
+	}
+	return refusalNone, ""
+}
+
 // NodeProblem returns the plain-words reason this node cannot take the box, or
 // "" when it can.
 func (n *NodeCapacity) NodeProblem(req PlacementRequest) string {
-	switch {
-	case n.Status != api.NodeStatusReady:
-		return fmt.Sprintf("node %s is %s, not ready", n.Name, n.Status)
-	case !n.Eligible:
-		return fmt.Sprintf("node %s is not eligible for new allocations", n.Name)
-	case !n.Driver.Installed:
-		return fmt.Sprintf("node %s has no box driver installed", n.Name)
-	case n.Driver.Installed && n.Driver.HealthReported && !n.Driver.Healthy:
-		if reason := oneLine(n.Driver.HealthDescription, 240); reason != "" {
-			return fmt.Sprintf("the box driver on node %s is unhealthy: %s", n.Name, reason)
-		}
-		return fmt.Sprintf("the box driver on node %s is unhealthy", n.Name)
-	case !n.hasVolumePlugin(boxVolumePluginID):
-		return fmt.Sprintf("node %s has no %s host volume plugin, so it cannot hold a box disk", n.Name, boxVolumePluginID)
-	case NormalizeArch(req.Arch) != "" && n.Arch != NormalizeArch(req.Arch):
-		return fmt.Sprintf("node %s runs %s images, the box needs %s", n.Name, n.Arch, NormalizeArch(req.Arch))
-	}
-	if need := req.TaskMemoryMiB(); need > 0 && n.Memory.Free < int64(need) {
-		return fmt.Sprintf("node %s has %d MiB of memory free, the box needs %d MiB", n.Name, n.Memory.Free, need)
-	}
-	if need := int64(req.CPUs) * n.vcpuMHz(); need > 0 && n.CPU.Free < need {
-		return fmt.Sprintf("node %s has %d MHz of CPU free, the box needs %d MHz", n.Name, n.CPU.Free, need)
-	}
-	if need := int64(req.DiskGiB) * 1024; need > 0 && n.Disk.Free < need {
-		return fmt.Sprintf("node %s has %d MiB of disk free, the box disk needs %d MiB", n.Name, n.Disk.Free, need)
-	}
-	return ""
+	_, problem := n.nodeRefusal(req)
+	return problem
 }
 
 func (r PlacementRequest) TaskMemoryMiB() int {
@@ -666,14 +737,16 @@ func ChooseNode(nodes []*NodeCapacity, req PlacementRequest) (*NodeCapacity, []s
 	var (
 		best     *NodeCapacity
 		problems []string
+		kinds    []refusal
 	)
 	candidates := make([]*NodeCapacity, 0, len(nodes))
 	for _, node := range nodes {
 		if req.Node != "" && node.Name != req.Node && node.NodeID != req.Node {
 			continue
 		}
-		if problem := node.NodeProblem(req); problem != "" {
+		if kind, problem := node.nodeRefusal(req); problem != "" {
 			problems = append(problems, problem)
+			kinds = append(kinds, kind)
 			continue
 		}
 		candidates = append(candidates, node)
@@ -694,7 +767,47 @@ func ChooseNode(nodes []*NodeCapacity, req PlacementRequest) (*NodeCapacity, []s
 		return nil, problems, notFoundf("there is no node named %q", req.Node)
 	}
 	sort.Strings(problems)
-	return nil, problems, errorf("no node can take this box: %s", strings.Join(problems, "; "))
+	refused := errorf("no node can take this box: %s", strings.Join(problems, "; "))
+	if waitingHelps(kinds) {
+		return nil, problems, &noRoomError{cause: refused}
+	}
+	return nil, problems, refused
+}
+
+// noRoomError is ChooseNode's refusal when every node was rejected for want of
+// room and none for what it is: it is an ordinary failure with the same exit
+// code, and the one thing it adds is that asking again later can change the
+// answer.
+type noRoomError struct{ cause *Error }
+
+func (e *noRoomError) Error() string { return e.cause.Error() }
+
+// Unwrap keeps the exit code: this is still the errorf ChooseNode would have
+// returned without the wait.
+func (e *noRoomError) Unwrap() error { return e.cause }
+
+// noRoom reports whether err is that refusal: `box create --wait D` then asks
+// again instead of reporting it.
+func noRoom(err error) bool {
+	var e *noRoomError
+	return errors.As(err, &e)
+}
+
+// waitingHelps reports whether asking again later can change a refusal: some node
+// was refused for want of room.
+//
+// The other kinds are not the reason the box is not created when one node is
+// merely full: a node that is down, ineligible, without the driver or without the
+// volume plugin cannot take the box, and neither can one of the wrong
+// architecture, but the room of the node that is full is what a finished box
+// gives back. When no node is refused for room, there is nothing to wait for.
+func waitingHelps(kinds []refusal) bool {
+	for _, kind := range kinds {
+		if kind == refusalRoom {
+			return true
+		}
+	}
+	return false
 }
 
 // nodeCapacities loads every node with its allocations.

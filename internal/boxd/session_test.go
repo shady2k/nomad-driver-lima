@@ -506,6 +506,40 @@ func TestCloseStopsExecutorKeepsHistory(t *testing.T) {
 	}
 }
 
+// TestActivitySaysBusyAndIdle is the `boxctl info` activity a host reads to tell
+// an idle box from one at work: a turn makes it busy, and its end starts the idle
+// clock.
+func TestActivitySaysBusyAndIdle(t *testing.T) {
+	cfg := testConfig(t)
+	m := newManager(t, cfg)
+	s := mustSession(t, m, "prime", "fake/model-1")
+
+	// A box that has not run a turn is idle, and idle since boxd started.
+	if got := m.Activity(); got.Busy || got.IdleSeconds < 0 {
+		t.Fatalf("a box with no turn: %+v", got)
+	}
+	if _, err := m.Send(s.ID, "slow:1500"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !m.Activity().Busy {
+		if time.Now().After(deadline) {
+			t.Fatalf("the box never said it was busy during a turn: %+v", m.Activity())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if done := waitTurn(t, m, s.ID, 1); done.State != TurnDone {
+		t.Fatalf("turn state = %q (%s)", done.State, done.Error)
+	}
+	if got := m.Activity(); got.Busy {
+		t.Fatalf("the box is still busy after its turn ended: %+v", got)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if got := m.Activity(); got.Busy || got.IdleSeconds < 1 {
+		t.Fatalf("idle after the turn: %+v, want the idle clock running", got)
+	}
+}
+
 func TestInfoDocument(t *testing.T) {
 	cfg := testConfig(t)
 	d, err := NewDaemon(cfg)

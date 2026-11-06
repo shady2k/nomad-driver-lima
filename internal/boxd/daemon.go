@@ -376,6 +376,7 @@ func (d *Daemon) Info(ctx context.Context) Info {
 		Sessions:    d.mgr.Count(),
 		CPUs:        runtime.NumCPU(),
 		Seal:        d.mgr.SealStatus(),
+		Activity:    d.mgr.Activity(),
 	}
 	total, free := memoryMiB()
 	info.MemTotalMiB, info.MemFreeMiB = total, free

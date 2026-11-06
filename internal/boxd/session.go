@@ -208,6 +208,10 @@ type Manager struct {
 	// outside a turn (watchOutsideTurn).
 	outsideDone chan struct{}
 	outsideOnce sync.Once
+
+	// startedAt is when boxd came up: a box where no turn has run is idle since
+	// then (Activity).
+	startedAt time.Time
 }
 
 // Prepare is the box's preparation.
@@ -223,7 +227,7 @@ func NewManager(cfg DaemonConfig) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Manager{cfg: cfg, store: store, sessions: map[string]*session{}, prep: newPreparer(cfg)}
+	m := &Manager{cfg: cfg, store: store, sessions: map[string]*session{}, prep: newPreparer(cfg), startedAt: cfg.now()}
 	m.secrets = secretsDigest(cfg)
 	if err := m.load(); err != nil {
 		return nil, err
@@ -761,6 +765,41 @@ func (m *Manager) TurnInProgress() bool {
 		}
 	}
 	return false
+}
+
+// Activity reports whether a turn runs now and how long since the last one
+// ended, over every session of the box.
+//
+// A box where no turn has run since boxd started is idle since then: a box that
+// has just booted is idle, and that is what a host asking about it wants to
+// know. Nothing here stops anything.
+func (m *Manager) Activity() Activity {
+	now := m.cfg.now()
+	m.mu.Lock()
+	sessions := make([]*session, 0, len(m.order))
+	for _, id := range m.order {
+		sessions = append(sessions, m.sessions[id])
+	}
+	m.mu.Unlock()
+	busy := false
+	last := m.startedAt
+	for _, s := range sessions {
+		s.mu.Lock()
+		if s.busy {
+			busy = true
+		}
+		for _, ts := range s.turns {
+			if ts.EndedAt != nil && ts.EndedAt.After(last) {
+				last = *ts.EndedAt
+			}
+		}
+		s.mu.Unlock()
+	}
+	idle := int64(now.Sub(last) / time.Second)
+	if idle < 0 {
+		idle = 0
+	}
+	return Activity{Busy: busy, IdleSeconds: idle}
 }
 
 func (m *Manager) lookup(id string) (*session, error) {

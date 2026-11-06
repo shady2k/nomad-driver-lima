@@ -74,6 +74,8 @@ def check_user_install(prefix, version, user):
     require(box["vm_type"] == "vz", f"the plugin block has vm_type {box['vm_type']}, not vz")
     require(box["memory_limit"] == "off",
             f"the plugin block has memory_limit {box['memory_limit']}: macOS has no cgroup v2, so it is off")
+    require(box["cpu_overcommit"] == 1.0,
+            f"the plugin block has cpu_overcommit {box['cpu_overcommit']}, not the 1 a whole core a vCPU means")
     require(not pathlib.Path(box["limactl"]).is_absolute() or str(prefix) in box["limactl"],
             f"the plugin block runs {box['limactl']}, which is not the stub inside {prefix}")
     require(config["client"]["host_volume_plugin_dir"] == str(prefix / "user-node" / "box" / "current" / "host_volume_plugins"),

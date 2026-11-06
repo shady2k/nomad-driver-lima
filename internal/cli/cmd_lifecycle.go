@@ -85,6 +85,10 @@ func (a *App) cmdStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// A start is also where the box picks up what its node reserves per vCPU now:
+	// the node's overcommit may have changed since the box was created, and a
+	// start re-registers the job anyway. A resize and an upgrade do the same.
+	a.refreshCPUReservation(ctx, &spec, box.NodeID)
 	if !*wait {
 		// The job is registered even when the command does not wait: the box
 		// starts, and `box status` shows when it is ready.

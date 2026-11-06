@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // helpError is a command's -h: Run prints the command's flags and exits 0.
@@ -131,6 +133,87 @@ func parseFlagsMin(fs *flag.FlagSet, args []string, min int) error {
 			fs.Name(), min, len(fs.Args()), fs.Name())
 	}
 	return nil
+}
+
+// optionalDuration is a flag whose value may be left out: "--wait" is the flag's
+// own meaning, "--wait 30m" also carries a duration.
+//
+// It is a boolean flag to the flag package, which is what lets it be written
+// without a value at all. joinOptionalValue does the other half: it joins a
+// duration that follows into "--wait=30m", because the flag package never takes
+// the next argument for a boolean flag.
+type optionalDuration struct {
+	// set is false until the flag was given on the command line.
+	set bool
+	// on is the flag's own meaning: true for "--wait", false for "--wait=false".
+	on bool
+	// d is the duration it was given, 0 for none.
+	d time.Duration
+}
+
+// String renders the value the way the flag package prints its defaults.
+func (o *optionalDuration) String() string {
+	if o.d > 0 {
+		return o.d.String()
+	}
+	return strconv.FormatBool(o.on)
+}
+
+// IsBoolFlag is what makes "--wait" alone work.
+func (o *optionalDuration) IsBoolFlag() bool { return true }
+
+// Set reads "true", "false" or a duration.
+func (o *optionalDuration) Set(value string) error {
+	o.set = true
+	switch strings.TrimSpace(value) {
+	case "", "true":
+		o.on = true
+		return nil
+	case "false":
+		o.on = false
+		return nil
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return fmt.Errorf("want a duration such as 30m, or =false, got %q", value)
+	}
+	if d <= 0 {
+		return fmt.Errorf("want a positive duration, got %q", value)
+	}
+	o.on, o.d = true, d
+	return nil
+}
+
+// given reports whether the flag was on the command line.
+func (o *optionalDuration) given() bool { return o.set }
+
+// joinOptionalValue turns "--name VALUE" into "--name=VALUE" when VALUE is a
+// value of the flag: a flag whose value is optional cannot rely on the flag
+// package for that, and its value would otherwise be read as an argument.
+func joinOptionalValue(args []string, name string, takes func(string) bool) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			// Everything after -- belongs to the command that follows.
+			return append(out, args[i:]...)
+		}
+		if (arg == "--"+name || arg == "-"+name) && i+1 < len(args) && takes(args[i+1]) {
+			out = append(out, arg+"="+args[i+1])
+			i++
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out
+}
+
+// isDurationValue reports whether an argument is a duration, which is what makes
+// it the value of an optional-duration flag rather than an argument of the
+// command.
+func isDurationValue(value string) bool {
+	_, err := time.ParseDuration(value)
+	return err == nil
 }
 
 // requirePositive turns a non-positive flag into a usage error.

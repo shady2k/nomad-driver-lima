@@ -156,7 +156,31 @@ from what the box looked like from outside.
   on a 2 GHz node, so Nomad placed about twice the boxes the node can run. With
   this figure a node offers as many vCPUs as it has cores: 8 cores take four boxes
   of 2 vCPU, and the fifth is refused. The figure comes from the box's node, so it
-  is set at `box create` and again by `box resize` and `box upgrade`.
+  is set at `box create` and again by `box start`, `box resize` and `box upgrade`.
+- **The reservation is divided by the node's `cpu_overcommit`, and that is the
+  only thing overcommit changes.** A box is idle most of the time -- an agent waits
+  for its model; a box measured at 1% CPU still held a whole core. The plugin
+  setting is a number >= 1 (default 1: a core a vCPU, no surprise), published as
+  `driver.box.cpu_overcommit`, and the CLI reserves
+  `((total - reserved) / cores) / overcommit` for a vCPU. At 2, an 8-core node
+  takes eight boxes of 2 vCPU instead of four.
+  - **It is safe because the cap, not the reservation, is what a busy box hits.**
+    Every box is already in a `cpu.max` of its vCPUs plus one core, so it cannot
+    take the node: overcommit says the node may promise more vCPUs than it has
+    cores, and a box that uses more than its share is slowed by the kernel instead
+    of the node being taken. Nomad's own CPU reservation is only a weight; the cap
+    is the hard limit.
+  - **Memory is not overcommitted.** A guest out of memory does not answer at all
+    -- it freezes, and the host loses several cores -- so memory stays a hard
+    reservation of guest RAM plus the qemu overhead. A node that is full of memory
+    is full whatever the CPU says.
+  - **Nothing else moves**: the vCPU count of a box, its `cpu.max` cap, its memory
+    and its disk. A box keeps the figure its node published when it was created
+    until `box start`, `box resize` or `box upgrade`, so an operator can raise the
+    variable and refill the node without touching the boxes on it.
+  - **Known risk:** with overcommit 2 and every box busy, the node's cores are
+    oversubscribed and every box runs at about half speed. That is the trade the
+    operator makes; the cap keeps it from being a box that takes the node.
 - **The memory cap is a systemd user scope with `memory.max` and
   `memory.swap.max=0`.** The budget is guest RAM plus about 150 MB (qemu about
   guest RAM plus 60 MB, the hostagent about 60 MB). `memory.max` alone is soft:

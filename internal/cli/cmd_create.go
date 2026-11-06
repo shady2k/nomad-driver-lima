@@ -52,10 +52,17 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	vaultRole := fs.String("vault-role", a.VaultRole(), "the Vault role the box reads its secrets with "+
 		"(default: $BOX_VAULT_ROLE, else the cluster's default role)")
 	timeout := fs.Duration("timeout", defaultWaitTimeout, "how long to wait for the box to run")
-	wait := fs.Bool("wait", true, "wait until the box is running")
-	if err := parseFlags(fs, args, 1); err != nil {
+	// --wait is a flag whose value may be left out: "--wait" waits as it always
+	// did, "--wait 30m" also waits that long for room when no node has any.
+	wait := &optionalDuration{on: true}
+	fs.Var(wait, "wait", "wait until the box is running; with a duration, also wait that long for room "+
+		"when no node has it (for example --wait 30m)")
+	if err := parseFlags(fs, joinOptionalValue(args, "wait", isDurationValue), 1); err != nil {
 		return err
 	}
+	// A bare --wait waits as long as it always did; a duration is how long to keep
+	// asking for room.
+	waitFor := wait.d
 	id := fs.Arg(0)
 	if err := ValidateBoxID(id); err != nil {
 		return err
@@ -69,7 +76,7 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	if err := src.check(); err != nil {
 		return err
 	}
-	if src.given() && !*wait {
+	if src.given() && !wait.on {
 		return usagef("box create %s: --repo and --from need the box running, so they do not go with --wait=false; "+
 			"`box prepare %s` does it later", id, id)
 	}
@@ -114,134 +121,26 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	nodes, err := a.nodeCapacities(ctx)
+	// The placement is the CLI's normal choice each time: a box that does not fit
+	// yet is asked for again from scratch, so it takes whatever the cluster has
+	// room for then.
+	placed, err := a.placeAndWait(ctx, placementArgs{
+		ID:              id,
+		Index:           index,
+		Drafts:          drafts,
+		Version:         version,
+		Arch:            NormalizeArch(*arch),
+		PlatformVersion: *platformVersion,
+		NodeName:        *nodeName,
+		CPUs:            *cpus,
+		MemoryMiB:       *memoryMiB,
+		DiskGiB:         *diskGiB,
+		DiskGiven:       flagSet(fs, "disk-gib"),
+	}, waitFor)
 	if err != nil {
 		return err
 	}
-
-	wantArch := NormalizeArch(*arch)
-	diskGiven := flagSet(fs, "disk-gib")
-	requested := PlacementRequest{Arch: wantArch, CPUs: *cpus, MemoryMiB: *memoryMiB, DiskGiB: *diskGiB, Node: *nodeName}
-
-	// Pick the architecture and the node together: the node decides which
-	// architecture is possible, the images decide which one there is.
-	candidateArches := ImageArchitectures
-	if wantArch != "" {
-		if wantArch != "amd64" && wantArch != "arm64" {
-			return usagef("--arch must be amd64 or arm64, got %q", *arch)
-		}
-		candidateArches = []string{wantArch}
-	}
-	var (
-		node    *NodeCapacity
-		image   *ImageArtifact
-		bundle  *PlatformArtifact
-		reasons []string
-		codes   []int
-	)
-	disk := *diskGiB
-	for _, candidate := range candidateArches {
-		artifact, err := a.resolveImage(index, drafts, version, candidate)
-		if err != nil {
-			// A usage error is about the command line, not about one candidate
-			// architecture: it stands whatever the other candidates say.
-			if ExitCode(err) == ExitUsage {
-				return err
-			}
-			reasons = append(reasons, err.Error())
-			codes = append(codes, ExitCode(err))
-			continue
-		}
-		if err := artifact.Validate(); err != nil {
-			reasons = append(reasons, err.Error())
-			codes = append(codes, ExitCode(err))
-			continue
-		}
-		// A project image's disk is the floor of the box's disk, and a box made
-		// from a draft runs on the node that holds it.
-		candidateDisk, err := diskForImage(artifact, disk, diskGiven)
-		if err != nil {
-			if ExitCode(err) == ExitUsage {
-				return err
-			}
-			reasons = append(reasons, err.Error())
-			codes = append(codes, ExitCode(err))
-			continue
-		}
-		// The image's own entry decides whether a bundle is mounted: an image
-		// that carries its own boxd keeps running it, and its /opt/box is not
-		// hidden by a mount. The bundle belongs to the candidate that is chosen,
-		// so it is reset with each candidate: an arm64 image that carries its own
-		// boxd must not inherit the amd64 candidate's bundle.
-		var candidateBundle *PlatformArtifact
-		if artifact.Platform != "mount" {
-			if want := strings.TrimSpace(*platformVersion); want != "" {
-				return usagef("box create %s: the image %s does not take a platform bundle (its entry has no "+
-					"\"platform\": \"mount\"), so --platform does not apply: that image runs the boxd it carries",
-					id, artifact.Version)
-			}
-		} else {
-			if index == nil || len(index.Platforms) == 0 {
-				return errorf("the image %s needs a platform bundle, but the image index %s lists none yet",
-					artifact.Version, a.ImageIndexURL())
-			}
-			want := strings.TrimSpace(*platformVersion)
-			if want == "" {
-				want = "latest"
-			}
-			resolved, err := index.ResolvePlatform(want, candidate)
-			if err != nil {
-				if want == "latest" && ExitCode(err) == ExitNotFound {
-					err = notFoundf("the image %s needs a platform bundle and none is published for architecture %s; published: %s",
-						artifact.Version, candidate, strings.Join(index.PlatformVersions(), ", "))
-				}
-				reasons = append(reasons, err.Error())
-				codes = append(codes, ExitCode(err))
-				continue
-			}
-			if err := resolved.Validate(); err != nil {
-				reasons = append(reasons, err.Error())
-				codes = append(codes, ExitCode(err))
-				continue
-			}
-			candidateBundle = resolved
-		}
-		requested.Arch = candidate
-		requested.DiskGiB = candidateDisk
-		var chosen *NodeCapacity
-		if artifact.IsDraft() {
-			// A draft exists on one node, and its image is in that node's cache:
-			// the box runs there.
-			chosen, err = draftNode(nodes, drafts, artifact.Version, candidate, *nodeName)
-		} else {
-			chosen, _, err = ChooseNode(nodes, requested)
-		}
-		if err != nil {
-			if ExitCode(err) == ExitUsage {
-				return err
-			}
-			reasons = append(reasons, err.Error())
-			codes = append(codes, ExitCode(err))
-			continue
-		}
-		node, image, bundle, disk = chosen, artifact, candidateBundle, candidateDisk
-		break
-	}
-	if node == nil || image == nil {
-		// Keep the most specific exit code: "no such image version" is a
-		// not-found, a cluster without room is an error.
-		code := ExitError
-		if len(codes) > 0 {
-			code = codes[0]
-			for _, other := range codes {
-				if other != code {
-					code = ExitError
-					break
-				}
-			}
-		}
-		return &Error{Code: code, Msg: strings.Join(reasons, "; ")}
-	}
+	node, image, bundle, disk := placed.Node, placed.Image, placed.Bundle, placed.Disk
 	diskGiB = &disk
 
 	out, err := a.createBox(ctx, boxRequest{
@@ -254,14 +153,14 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		DiskGiB:       *diskGiB,
 		VaultRole:     strings.TrimSpace(*vaultRole),
 		ExecutorItems: a.executorItems(ctx),
-	}, *wait, *timeout)
+	}, wait.on, *timeout)
 	if err != nil {
 		return err
 	}
 	// A box bigger than a quarter of its node says so, and runs: the note is what
 	// keeps a large box from being forgotten on a shared node.
 	a.noteShare(node.ShareNote(id, out.Box.CPUs, out.Box.MemoryMiB, out.Box.DiskGiB))
-	if !*wait || !src.given() {
+	if !wait.on || !src.given() {
 		return a.printCreate(out)
 	}
 	// The box runs; now its sources, and the box is ready when they are. A
@@ -290,6 +189,241 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		}
 	}
 	return prepErr
+}
+
+// boxPlacement is a decided box: the node it runs on, the image its disk is made
+// from, the bundle it mounts and the disk it gets.
+type boxPlacement struct {
+	Node   *NodeCapacity
+	Image  *ImageArtifact
+	Bundle *PlatformArtifact
+	Disk   int
+}
+
+// placementArgs is what one placement attempt works from: the images the cluster
+// has and the request the operator wrote. Everything a box needs but the choice
+// of node is in it, because a second attempt makes the same choose-it-together
+// decision as the first.
+type placementArgs struct {
+	ID              string
+	Index           *ImageIndex
+	Drafts          []DraftImage
+	Version         string
+	Arch            string
+	PlatformVersion string
+	NodeName        string
+	CPUs            int
+	MemoryMiB       int
+	DiskGiB         int
+	// DiskGiven says whether --disk-gib was on the command line: an image's own
+	// disk is the floor of a box's disk, and a disk asked for below it is refused.
+	DiskGiven bool
+}
+
+// placeBox picks where a box goes: the architecture, the image and the node are
+// decided together, because each of them rules the others out.
+func (a *App) placeBox(ctx context.Context, args placementArgs) (*boxPlacement, error) {
+	nodes, err := a.nodeCapacities(ctx)
+	if err != nil {
+		return nil, err
+	}
+	requested := PlacementRequest{Arch: args.Arch, CPUs: args.CPUs, MemoryMiB: args.MemoryMiB,
+		DiskGiB: args.DiskGiB, Node: args.NodeName}
+
+	// Pick the architecture and the node together: the node decides which
+	// architecture is possible, the images decide which one there is.
+	candidateArches := ImageArchitectures
+	if args.Arch != "" {
+		if args.Arch != "amd64" && args.Arch != "arm64" {
+			return nil, usagef("--arch must be amd64 or arm64, got %q", args.Arch)
+		}
+		candidateArches = []string{args.Arch}
+	}
+	var (
+		node    *NodeCapacity
+		image   *ImageArtifact
+		bundle  *PlatformArtifact
+		reasons []string
+		codes   []int
+		// sawRoom says a candidate was refused for want of room, and blocked says
+		// one was refused for what waiting cannot change: an image that is not
+		// there, a bundle nothing publishes, a node without the driver.
+		sawRoom bool
+		blocked bool
+	)
+	disk := args.DiskGiB
+	for _, candidate := range candidateArches {
+		artifact, err := a.resolveImage(args.Index, args.Drafts, args.Version, candidate)
+		if err != nil {
+			// A usage error is about the command line, not about one candidate
+			// architecture: it stands whatever the other candidates say.
+			if ExitCode(err) == ExitUsage {
+				return nil, err
+			}
+			reasons = append(reasons, err.Error())
+			codes = append(codes, ExitCode(err))
+			blocked = true
+			continue
+		}
+		if err := artifact.Validate(); err != nil {
+			reasons = append(reasons, err.Error())
+			codes = append(codes, ExitCode(err))
+			blocked = true
+			continue
+		}
+		// A project image's disk is the floor of the box's disk, and a box made
+		// from a draft runs on the node that holds it.
+		candidateDisk, err := diskForImage(artifact, disk, args.DiskGiven)
+		if err != nil {
+			if ExitCode(err) == ExitUsage {
+				return nil, err
+			}
+			reasons = append(reasons, err.Error())
+			codes = append(codes, ExitCode(err))
+			blocked = true
+			continue
+		}
+		// The image's own entry decides whether a bundle is mounted: an image
+		// that carries its own boxd keeps running it, and its /opt/box is not
+		// hidden by a mount. The bundle belongs to the candidate that is chosen,
+		// so it is reset with each candidate: an arm64 image that carries its own
+		// boxd must not inherit the amd64 candidate's bundle.
+		var candidateBundle *PlatformArtifact
+		if artifact.Platform != "mount" {
+			if want := strings.TrimSpace(args.PlatformVersion); want != "" {
+				return nil, usagef("box create %s: the image %s does not take a platform bundle (its entry has no "+
+					"\"platform\": \"mount\"), so --platform does not apply: that image runs the boxd it carries",
+					args.ID, artifact.Version)
+			}
+		} else {
+			if args.Index == nil || len(args.Index.Platforms) == 0 {
+				return nil, errorf("the image %s needs a platform bundle, but the image index %s lists none yet",
+					artifact.Version, a.ImageIndexURL())
+			}
+			want := strings.TrimSpace(args.PlatformVersion)
+			if want == "" {
+				want = "latest"
+			}
+			resolved, err := args.Index.ResolvePlatform(want, candidate)
+			if err != nil {
+				if want == "latest" && ExitCode(err) == ExitNotFound {
+					err = notFoundf("the image %s needs a platform bundle and none is published for architecture %s; published: %s",
+						artifact.Version, candidate, strings.Join(args.Index.PlatformVersions(), ", "))
+				}
+				reasons = append(reasons, err.Error())
+				codes = append(codes, ExitCode(err))
+				blocked = true
+				continue
+			}
+			if err := resolved.Validate(); err != nil {
+				reasons = append(reasons, err.Error())
+				codes = append(codes, ExitCode(err))
+				blocked = true
+				continue
+			}
+			candidateBundle = resolved
+		}
+		requested.Arch = candidate
+		requested.DiskGiB = candidateDisk
+		var chosen *NodeCapacity
+		if artifact.IsDraft() {
+			// A draft exists on one node, and its image is in that node's cache:
+			// the box runs there.
+			chosen, err = draftNode(nodes, args.Drafts, artifact.Version, candidate, args.NodeName)
+		} else {
+			chosen, _, err = ChooseNode(nodes, requested)
+		}
+		if err != nil {
+			if ExitCode(err) == ExitUsage {
+				return nil, err
+			}
+			reasons = append(reasons, err.Error())
+			codes = append(codes, ExitCode(err))
+			if noRoom(err) {
+				sawRoom = true
+			}
+			continue
+		}
+		node, image, bundle, disk = chosen, artifact, candidateBundle, candidateDisk
+		break
+	}
+	if node == nil || image == nil {
+		// Keep the most specific exit code: "no such image version" is a
+		// not-found, a cluster without room is an error.
+		code := ExitError
+		if len(codes) > 0 {
+			code = codes[0]
+			for _, other := range codes {
+				if other != code {
+					code = ExitError
+					break
+				}
+			}
+		}
+		refused := &Error{Code: code, Msg: strings.Join(reasons, "; ")}
+		// What waiting cannot change ends the command; a refusal that is only about
+		// room keeps its own type, so `--wait D` asks again with the same sentence
+		// and the same exit code.
+		if sawRoom && !blocked {
+			return nil, &noRoomError{cause: refused}
+		}
+		return nil, refused
+	}
+	return &boxPlacement{Node: node, Image: image, Bundle: bundle, Disk: disk}, nil
+}
+
+// How `box create --wait D` asks again while nothing fits: a node's capacity is
+// a moving target (a box finishes, another is created), so the question is
+// repeated, and the reason is repeated at a pace a person can read.
+const (
+	// capacityPollInterval is how often the capacity is read again.
+	capacityPollInterval = 30 * time.Second
+	// capacityNoteInterval is how often the reason is written to stderr.
+	capacityNoteInterval = 5 * time.Minute
+)
+
+// placeAndWait places a box, and while the only thing in the way is room it asks
+// again: every capacityPollInterval, with a line on stderr at the start and every
+// capacityNoteInterval, until the box fits or waitFor is up.
+//
+// What comes back when the waiting ends is the refusal the placement gave, with
+// its own exit code. Nothing is retried that waiting cannot change: a wrong
+// architecture, a missing image, an unhealthy driver or a usage error ends the
+// command at once.
+func (a *App) placeAndWait(ctx context.Context, args placementArgs, waitFor time.Duration) (*boxPlacement, error) {
+	placed, err := a.placeBox(ctx, args)
+	if err == nil || waitFor <= 0 || !noRoom(err) {
+		return placed, err
+	}
+	start := a.now()
+	deadline := start.Add(waitFor)
+	noted := start
+	a.noteWait("no room for box %s yet: %s; asking again every %s for up to %s, nothing has been created",
+		args.ID, oneLine(err.Error(), 300), span(capacityPollInterval), span(waitFor))
+	for {
+		if err := a.sleep(ctx, capacityPollInterval); err != nil {
+			return nil, wrapKeep(err, "stopped waiting for room for box %s", args.ID)
+		}
+		placed, err := a.placeBox(ctx, args)
+		if err == nil {
+			a.noteWait("room for box %s after %s; creating it", args.ID, span(a.now().Sub(start)))
+			return placed, nil
+		}
+		// Something other than room is in the way now: report it as it is.
+		if !noRoom(err) {
+			return nil, err
+		}
+		refusal := err
+		now := a.now()
+		if now.Sub(noted) >= capacityNoteInterval {
+			noted = now
+			a.noteWait("still no room for box %s after %s: %s", args.ID, span(now.Sub(start)), oneLine(err.Error(), 300))
+		}
+		if !now.Before(deadline) {
+			a.noteWait("no room for box %s in %s; the placement is refused as it was", args.ID, span(waitFor))
+			return nil, refusal
+		}
+	}
 }
 
 // boxRequest is a box ready to be created: the image, the bundle and the node are

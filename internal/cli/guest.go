@@ -192,6 +192,9 @@ type BoxInfo struct {
 	// Seal is whether the seal would run in this box now; a boxd that does not
 	// say leaves it out.
 	Seal *BoxSealStatus `json:"seal,omitempty"`
+	// Activity is whether a turn runs now and how long since the last one ended;
+	// a boxd from an older image leaves it out.
+	Activity *BoxActivity `json:"activity,omitempty"`
 }
 
 // BoxSealStatus is `boxctl info`'s answer about the seal: OK, or the reason the

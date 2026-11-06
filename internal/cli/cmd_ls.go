@@ -71,6 +71,20 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 			boxes[i].DiskVirtualBytes = disk.VirtualBytes
 		}
 	}
+	// How long each running box has been idle is the one thing only its guest
+	// knows; it is asked in parallel, under the guest call bound, and a box that
+	// does not answer says so in its cell.
+	activities := a.guestActivities(ctx, boxes)
+	for i := range boxes {
+		res, ok := activities[boxes[i].ID]
+		if !ok {
+			continue
+		}
+		boxes[i].Activity = res.activity
+		if res.err != nil {
+			boxes[i].GuestError = res.err.Error()
+		}
+	}
 	if a.JSON {
 		return a.printJSON(lsOutput{Boxes: boxes})
 	}
@@ -98,9 +112,10 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 			diskColumn(box),
 			alloc,
 			uptime,
+			idleCell(box),
 		})
 	}
-	a.printTable([]string{"ID", "NODE", "ARCH", "STATE", "CPU", "MEM", "DISK", "VOLUME", "USED", "ALLOC", "UPTIME"}, rows)
+	a.printTable([]string{"ID", "NODE", "ARCH", "STATE", "CPU", "MEM", "DISK", "VOLUME", "USED", "ALLOC", "UPTIME", "IDLE"}, rows)
 	for _, box := range boxes {
 		if box.Note != "" {
 			a.note("%s: %s", box.ID, box.Note)

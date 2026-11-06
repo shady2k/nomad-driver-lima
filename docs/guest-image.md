@@ -225,6 +225,18 @@ docker with buildx and compose, git, curl, jq, ripgrep, build-essential and
 python3. None of it is required; a box is more useful with a toolchain, but which
 one is the operator's choice.
 
+**The box's user is in the `docker` group, and that is a boot unit, not an
+account.** The user `box run` starts commands as is created by cloud-init at the
+box's first boot, from what Lima passes through cidata: the image cannot know its
+name or its groups, and `/etc/adduser.conf` does not apply (cloud-init calls
+`useradd` itself). So the recipe installs `box-user-groups.service`, which runs
+after `cloud-init.service` on every boot and puts every login user (uid 1000 to
+59999) in the docker group; it is idempotent and does nothing on an image without
+docker. No credential is involved, no secret is in the image, and no privilege is
+added -- the socket belongs to root in the box, and the box's user already has
+passwordless sudo there. An image that predates this answers `docker info` with
+"permission denied" for that user, and `sudo -n docker` works.
+
 ## What a bundle image must provide
 
 - **an empty `/opt/box`**: the mount point. The bundle is mounted over it, so the
@@ -551,6 +563,7 @@ anything failed.
 | `boxctl info` reports the bundle | the mounted version and boxd |
 | the box can run an executor out of the bundle | at least one available |
 | the image's tool versions | every entry of the manifest's `tools`, each checked with the command that recorded it |
+| the box's user and the docker group: `box-user-groups.service` is enabled, and a temporary user it adds can run `docker info` | `docker` in the user's groups, `docker info` answering it without `sudo` (only the group is checked when the daemon is not up yet) |
 | the add-ons at `/opt/box/addons` (when the bundle was built with them) | nothing group- or world-writable, and the file count the manifest records; without the directory, "no add-ons" |
 | apt talks only to the sources the image configures | no fetch from any other host |
 | `/run/box/secrets` and `/run/boxd` are tmpfs | `tmpfs` for both |

@@ -31,6 +31,7 @@ box send dev1 s-7f3a2c --file prompt.md   # or the prompt as one argument
 box wait dev1 s-7f3a2c --timeout 15m      # blocks until the turn ends, prints the answer
 box events dev1 s-7f3a2c --since 12       # what happened, resumable
 box run dev1 -- python3 /root/repo/check.py   # one command in the guest, to check a result
+box run dev1 -- docker info            # on an image older than the docker-group unit: sudo -n docker info
 box cp ./results dev1:/root/in            # files in
 box cp dev1:/root/repo/out ./out          # files out
 box status dev1                           # state, task events, guest, sessions, disk used
@@ -123,8 +124,9 @@ box's environment an image instead of repeating it.
   sessions of one box. Give back what you do not use: `box stop` an idle box and
   `box rm` a finished one, because a reservation held by an idle box keeps
   someone else's work from starting. If there is no room, stop your own idle
-  boxes or tell the owner; do not wait silently. A box that takes more than a
-  quarter of its node is created anyway and said on stderr: it fits, it is
+  boxes or tell the owner, or let `box create --wait 30m` wait for room and say
+  on stderr what it waits for; do not sit in a retry loop. A box that takes more
+  than a quarter of its node is created anyway and said on stderr: it fits, it is
   yours to watch.
 - **The model is one the box's key may use**, as `<provider>/<model>`. The box
   asks its provider when a session starts, and `box session new` refuses any
@@ -241,8 +243,8 @@ starts, so no key lands on a disk.
 ## When something is wrong
 
 - `no node can take this box: ...` - the message says which node failed and
-  why (no memory, no `box-volume` plugin, wrong architecture). Fix the request
-  or wait; do not retry in a loop.
+  why (no memory, no `box-volume` plugin, wrong architecture). Fix the request,
+  or let `box create --wait 30m` wait for room instead of retrying in a loop.
 - `Nomad could not place the box: 3 node(s) ran out of memory` - the scheduler
   refused it. Ask for less, or stop a box you own with `box stop`.
 - `Nomad rejected the box job ... the Nomad token needs ...` - the token lacks

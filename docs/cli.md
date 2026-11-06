@@ -38,6 +38,19 @@ Lima instances Nomad does not know about, the driver and volume plugin versions,
 and how many boxes the node runs. A node's free resources are reported *after*
 subtracting the running VMs that no task owns.
 
+`vCPU` is how many vCPUs the node offers -- its total CPU divided by what one
+vCPU reserves -- and `OVERCOMMIT` is how many vCPUs its cores are shared out to
+(`cpu_overcommit` in the driver's plugin block, 1 on a node that does not set
+it). With overcommit 2 an 8-core node offers 16 vCPUs, so it takes eight boxes of
+2 vCPU instead of four. Nothing else changes: a box keeps its vCPUs, its memory
+and its `cpu.max` cap (its vCPUs plus one core), so a busy box cannot take the
+node, and memory is never overcommitted -- a guest out of memory freezes.
+
+Each running box's line says how long it has been idle: `idle 3h12m` since its
+last turn ended, or `busy` while a turn runs. `?` is a guest that did not answer
+and `-` a boxd too old to report it. This is a report and nothing more: no box is
+ever stopped for being idle.
+
 A VM with no task is an orphan to the driver after ten minutes, and that is what
 every stopped box looks like to it. So this command answers as `box ls` does: a box
 with a job or a stored description is named with its state from there -- a stopped
@@ -297,7 +310,22 @@ waits until the box is running.
 | `--node NAME` | – | pin the box to this node |
 | `--vault-role ROLE` | `BOX_VAULT_ROLE`, else the cluster's default role | the Vault role the box reads its secrets with, used when the executors hold a template item (see "Executor credentials") |
 | `--timeout D` | 10m | how long to wait for it to run |
-| `--wait` | true | wait until it is running |
+| `--wait [D]` | true | wait until it is running; with a duration, also wait that long for room |
+
+**`--wait 30m` waits for room.** `box create` refuses at once when nothing fits,
+and room is a moving target: another box finishes, another agent creates one, a
+`box stop` frees a node's memory. With `--wait D`, a refusal *for lack of room*
+(CPU, memory or disk on the candidate nodes) is retried: the reason goes to stderr
+once at the start and again every 5 minutes, the capacity is read again every 30
+seconds, and the placement is the CLI's normal choice each time. After D the
+command ends with the refusal it would have given at once, and its exit code.
+
+Waiting is for room only. A wrong architecture, a missing image, an unhealthy
+driver, a node without the box-volume plugin or a usage error ends the command
+immediately: waiting changes none of them. `--wait` alone is what it always was
+(wait for the box to run); `--wait=false` returns as soon as the job is
+registered. `box start` and `box resize` do not take a duration: they re-register
+the box's own job on its node, where Nomad, not the CLI, places it.
 
 A draft is created from on its own node: `--image NAME-N` pins the box to the node
 that holds the image, and `--node` must name that node or be left out. Its url in
@@ -330,8 +358,9 @@ for `box top` to show a shortage. `box resize` is for growth you can see coming,
 between turns, and for a box whose guest has gone silent (it restarts it; the disk
 is kept). Give back what you do not use: `box stop` an idle box and `box rm` a
 finished one, because a reservation held by an idle box keeps someone else's work
-from starting. If there is no room, stop your own idle boxes or tell the owner;
-do not wait silently.
+from starting. If there is no room, stop your own idle boxes or tell the owner --
+or let the command wait for room itself with `--wait 30m` (below), which says on
+stderr what it is waiting for; do not sit in a retry loop.
 
 An image built for bundles gets one mounted at `/opt/box` without asking: the
 newest bundle for the box's architecture. `--platform <version>` picks an older
@@ -344,6 +373,15 @@ of what its image expects.
 
 Every box with its state, node, allocation, image, size, the disk it really
 occupies on the host, and its sessions.
+
+The `IDLE` column says what a running box has been doing: `idle 3h12m` since its
+last turn ended, or `busy` while a turn runs. It comes from the guest -- `boxctl
+info`, under the 20 second bound every guest call has, one call per running box in
+parallel, so a table of boxes costs one bound and not one each. `?` is a guest
+that did not answer, `-` a box that is not running or a boxd from an older image
+that does not report it. Under `--json` it is `activity: {"busy",
+"idle_seconds"}`, and `guest_error` says why there is none. Nothing is stopped for
+being idle: the number is what an owner needs to decide.
 
 A box is its volume and its disk, not its job: Nomad deletes a dead job after
 `job_gc_threshold` (4 hours by default), and the box is still there. `box ls`,
@@ -383,7 +421,11 @@ of it is a Nomad variable (`nomad/jobs/box-<id>/spec`) that no garbage collectio
 removes, so `box start` brings the same disk back tomorrow as well as in a minute.
 Start registers the stored job again, with the executor credentials that are
 staged now and the CPU reservation of the box's node; on a box that is already
-running it only refreshes that description.
+running it only refreshes that description. A node whose `cpu_overcommit`
+changed therefore takes effect at the box's next `box start`, `box resize` or
+`box upgrade`: an existing box keeps the reservation it was made with, so an
+operator can raise the variable and refill the node without touching the boxes
+already on it.
 
 ### `box rm <id> [--yes] [--timeout D]`
 

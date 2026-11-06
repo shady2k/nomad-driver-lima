@@ -121,6 +121,15 @@ box_image_cache_dir: /var/lib/box/images
 # cache, and qemu with 150 MiB on top reached the cap and stalled the box.
 box_memory_overhead_mib: 512
 
+# How many vCPUs the node's cores are shared out to, written into the driver's
+# plugin block. 1: a vCPU reserves a whole core, which is 8 cores taking four
+# boxes of 2 vCPU. A box is idle most of the time -- an agent waits for its
+# model -- so 2 puts twice as many boxes on the node and the driver still caps a
+# busy box at its vCPUs plus one core (cpu.max), which is what lets the node hold
+# them. Fractions are allowed. Memory stays a hard reservation: this changes no
+# memory and no vCPU count.
+box_cpu_overcommit: 1
+
 # qemu on Linux, vz on macOS; empty means the driver's default for the OS.
 box_vm_type: ''
 

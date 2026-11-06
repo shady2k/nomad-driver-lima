@@ -31,6 +31,15 @@ box_install_deps: false
 # install without a memory cap (the role says so, and the driver reports it).
 # box_cgroup_enabled: true
 
+# How many vCPUs this node's cores are shared out to: 1 reserves a whole core for
+# a vCPU, and 2 puts twice as many boxes on the node (8 cores take eight boxes of
+# 2 vCPU instead of four). A box is idle most of the time, and the driver caps a
+# busy box at its vCPUs plus one core, so it cannot take the node. It is the
+# driver's plugin setting, read per node by every `box create`, and it changes no
+# memory: memory stays a hard reservation. A box keeps the figure it was created
+# with until `box start`, `box resize` or `box upgrade`.
+# box_cpu_overcommit: 2
+
 # ---------------------------------------------------------------- the Nomad client
 # The node name in the cluster. The node ID is not this: the ID comes from
 # nomad_data_dir, so a node keeps its ID as long as it keeps its data directory.

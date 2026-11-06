@@ -413,8 +413,14 @@ func draftNode(nodes []*NodeCapacity, drafts []DraftImage, version, arch, wantNa
 		return nil, usagef("the draft %s is on node %s, and --node %s was asked for: a draft is created from on the node "+
 			"that holds it", version, node.Name, wantName)
 	}
-	if problem := node.NodeProblem(PlacementRequest{Arch: arch}); problem != "" {
-		return nil, errorf("the node %s holds the draft %s but cannot run the box: %s", node.Name, version, problem)
+	if kind, problem := node.nodeRefusal(PlacementRequest{Arch: arch}); problem != "" {
+		refused := errorf("the node %s holds the draft %s but cannot run the box: %s", node.Name, version, problem)
+		if kind == refusalRoom {
+			// A draft runs on the node that holds it, so a full node is the one
+			// thing that changes by itself: `--wait` asks again.
+			return nil, &noRoomError{cause: refused}
+		}
+		return nil, refused
 	}
 	return node, nil
 }

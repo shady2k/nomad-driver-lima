@@ -113,7 +113,7 @@ timeout with the state as it is. `boxctl info` carries the same document as
 
 | command | stdin | result |
 | --- | --- | --- |
-| `boxctl info` | – | `{"boxd_version","executors":[ExecutorInfo],"sessions":N,"mem_total_mib","mem_free_mib","cpus","platform":PlatformInfo,"seal":SealStatus,"prepare","usage":Usage}` |
+| `boxctl info` | – | `{"boxd_version","executors":[ExecutorInfo],"sessions":N,"mem_total_mib","mem_free_mib","cpus","platform":PlatformInfo,"seal":SealStatus,"prepare","usage":Usage,"activity":Activity}` |
 | `boxctl session new --executor prime\|opencode\|claude --model <provider>/<model> [--cwd DIR] [--title T]` | – | `{"session":"<id>"}` |
 | `boxctl session ls` | – | `{"sessions":[Session]}` |
 | `boxctl session get <id>` | – | `Session` |
@@ -205,6 +205,13 @@ answers "which bundle is this box on".
 credentials and configuration for it in `/run/box/secrets/<name>/`. `configured`
 is omitted when the binary is missing, because `available` already says
 everything. `reason` is the sentence a person reads when something is missing.
+
+`Activity`: `{"busy","idle_seconds"}` -- what the box's sessions are doing.
+`busy` is true while a turn runs in any session, and `idle_seconds` is how long
+since the last turn of the box ended (or since `boxd` started, on a box no turn
+has run in yet). It is what `box ls` and `box capacity` turn into `idle 3h12m`,
+`busy`, `-` (a boxd that does not report it) and `?` (a guest that did not
+answer). boxd stops nothing for it.
 
 `SealStatus`: `{"ok","reason"}` -- whether the seal's gate would let `boxctl seal`
 run in this box now. `ok` is false while a turn runs or a preparation is in

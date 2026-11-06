@@ -105,6 +105,16 @@ func TestConfigValidate(t *testing.T) {
 	require.NoError(t, (&Config{MemoryLimit: box.MemoryLimitOff}).validate())
 	require.Error(t, (&Config{MemoryLimit: "disabled"}).validate())
 
+	// cpu_overcommit is a number >= 1: a node that leaves it out reserves a core
+	// for a vCPU exactly as before, and a fraction below 1 would reserve more than
+	// the node has.
+	require.Equal(t, float64(1), c.CPUOvercommit)
+	over := Config{CPUOvercommit: 2.5}
+	require.NoError(t, over.validate())
+	require.Equal(t, 2.5, over.CPUOvercommit)
+	require.Error(t, (&Config{CPUOvercommit: 0.5}).validate())
+	require.Error(t, (&Config{CPUOvercommit: -1}).validate())
+
 	// memory_limit = "enforce" needs cgroup v2, which only Linux has.
 	enforce := Config{MemoryLimit: box.MemoryLimitEnforce}
 	if runtime.GOOS == "linux" {
@@ -487,6 +497,35 @@ func TestConfigSpecOffersRuntimeUser(t *testing.T) {
 	// memory_limit is the operator switch B5 asks for: a setting Nomad cannot
 	// decode would silently leave the cap enforced.
 	require.Contains(t, obj.Object.Attributes, "memory_limit")
+	// cpu_overcommit is a node setting too: the CLI reads it from the fingerprint.
+	require.Contains(t, obj.Object.Attributes, "cpu_overcommit")
+	def := obj.Object.Attributes["cpu_overcommit"].GetDefault()
+	require.NotNil(t, def)
+	require.Equal(t, "1", def.GetDefault().GetLiteral().GetValue(), "the public default reserves a core per vCPU")
+}
+
+// TestFingerprintReportsCPUOvercommit publishes the overcommit factor as the node
+// attribute the CLI divides its per-vCPU reservation by.
+func TestFingerprintReportsCPUOvercommit(t *testing.T) {
+	for _, tc := range []struct {
+		in   float64
+		want string
+	}{{1, "1"}, {2, "2"}, {1.5, "1.5"}} {
+		d := NewDriver(context.Background(), hclog.NewNullLogger())
+		cfg := Config{
+			LimactlPath:   "/nonexistent/limactl",
+			LimaHome:      filepath.Join(t.TempDir(), "lima"),
+			ImageCacheDir: filepath.Join(t.TempDir(), "images"),
+			VMType:        "qemu",
+			CPUOvercommit: tc.in,
+		}
+		var encoded []byte
+		require.NoError(t, base.MsgPackEncode(&encoded, cfg))
+		require.NoError(t, d.SetConfig(&base.Config{PluginConfig: encoded}))
+		fp := d.buildFingerprint(context.Background())
+		require.Equal(t, tc.want, attrValue(t, fp, "driver.box.cpu_overcommit"), "%v", tc.in)
+		require.NoError(t, d.Shutdown(context.Background()))
+	}
 }
 
 // TestConfigSpecLeavesPlatformDefaultsToValidate keeps a platform-dependent
