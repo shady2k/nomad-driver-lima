@@ -272,10 +272,12 @@ docker info --format 'docker server version: {{.ServerVersion}}' || echo 'docker
 # account record in this image can know them. /etc/adduser.conf is no help
 # either: cloud-init calls useradd itself and never reads it.
 #
-# What joins the two is a boot unit after cloud-init: every user of the box whose
-# uid is a login user's is put in the docker group, and running it again changes
-# nothing. It is enabled, so it runs on every boot -- a first boot that created
-# the user and a later one that did not both leave the same answer.
+# What joins the two is a boot unit after cloud-init: every user of the box with a
+# login shell is put in the docker group, and running it again changes nothing. It
+# is enabled, so it runs on every boot -- a first boot that created the user and a
+# later one that did not both leave the same answer. The shell decides and not the
+# uid, because Lima gives the guest user the uid of the host's user, and a macOS
+# user's is 501: below where Linux starts counting login users.
 #
 # Nothing secret takes part and no privilege is added: the docker socket belongs
 # to root in the box, and the box's user already has passwordless sudo there. The
@@ -289,11 +291,13 @@ cat > /usr/local/sbin/box-user-groups <<'EOF'
 # no group to join.
 set -eu
 getent group docker >/dev/null 2>&1 || exit 0
-getent passwd | while IFS=: read -r name _ uid _ _ _ _; do
-  # Login users only: system accounts (and nobody) are not the box's user, and
-  # the box's user is one cloud-init created at the first boot.
-  [ "$uid" -ge 1000 ] || continue
+getent passwd | while IFS=: read -r name _ uid _ _ _ shell; do
+  # Login users only: system accounts have no shell /etc/shells lists, nobody is
+  # past the range, and root needs no group. The box's user is one cloud-init
+  # created at the first boot, on a uid that came from the host (501 on macOS).
+  [ "$uid" -gt 0 ] || continue
   [ "$uid" -lt 60000 ] || continue
+  grep -qxF -- "$shell" /etc/shells 2>/dev/null || continue
   if id -nG "$name" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
     continue
   fi

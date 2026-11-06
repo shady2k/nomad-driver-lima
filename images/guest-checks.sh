@@ -387,14 +387,21 @@ printf '\n== docker for the box user\n'
 # with a temporary user it creates and deletes again, because the box's own user
 # may not exist yet when this runs -- verify.sh gets a shell as soon as the VM
 # answers. `docker info` for that user is the real question; it is asked when the
-# daemon answers at all, so a slow first boot is not a failure of the group.
+# daemon answers at all, so a slow first boot is not a failure of the group. Its
+# uid is 501, a macOS user's, which Lima passes on to the guest: the uid must not
+# keep it out. A system account with no login shell stays out.
 check "the image has the docker group" "docker" "$(getent group docker | cut -d: -f1 || true)"
 check "the unit that joins a user to it is enabled" "enabled" \
   "$(systemctl is-enabled box-user-groups.service 2>&1)"
 CHECK_USER=box-checks-user
+CHECK_SYSTEM_USER=box-checks-system
 userdel -r "$CHECK_USER" >/dev/null 2>&1 || true
-if useradd -m -s /bin/bash "$CHECK_USER" >/dev/null 2>&1; then
+userdel "$CHECK_SYSTEM_USER" >/dev/null 2>&1 || true
+if useradd -m -u 501 -s /bin/bash "$CHECK_USER" >/dev/null 2>&1 &&
+   useradd -r -s /usr/sbin/nologin "$CHECK_SYSTEM_USER" >/dev/null 2>&1; then
   /usr/local/sbin/box-user-groups >/dev/null 2>&1 || true
+  check "a system account stays out of the docker group" "not in docker" \
+    "$(id -nG "$CHECK_SYSTEM_USER" | tr ' ' '\n' | grep -x docker || echo 'not in docker')"
   check "the user of a box is in the docker group" "docker" \
     "$(id -nG "$CHECK_USER" | tr ' ' '\n' | grep -x docker || echo 'not in docker')"
   if docker info >/dev/null 2>&1; then
@@ -406,9 +413,10 @@ if useradd -m -s /bin/bash "$CHECK_USER" >/dev/null 2>&1; then
     info "the docker daemon is not answering in this guest, so only the group membership is checked"
   fi
 else
-  fail "a temporary user can be created for the docker check" "created" "useradd failed"
+  fail "temporary users can be created for the docker check" "created" "useradd failed"
 fi
 userdel -r "$CHECK_USER" >/dev/null 2>&1 || true
+userdel "$CHECK_SYSTEM_USER" >/dev/null 2>&1 || true
 
 # --- the add-ons the bundle carries -------------------------------------------
 printf '\n== the add-ons\n'
