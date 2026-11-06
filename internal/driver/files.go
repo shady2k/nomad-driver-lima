@@ -62,7 +62,7 @@ func dirsDigest(roots ...string) string {
 				return nil
 			}
 			rel, err := filepath.Rel(root, path)
-			if err != nil {
+			if err != nil || !box.IsTaskFile(rel) {
 				return nil
 			}
 			data, err := os.ReadFile(path)
@@ -106,6 +106,12 @@ func (d *Driver) refreshTaskFiles(h *taskHandle, b *box.Box) {
 	if stagedFilesDigest(b) == digest {
 		return
 	}
+	// One render is handled once. If what is staged can never equal what Nomad
+	// rendered, this keeps a difference between the two from reloading boxd on
+	// every tick and restarting executors for ever.
+	if digest == h.handledFiles() {
+		return
+	}
 	n, err := b.StageTaskFiles(h.tc.TaskDir().LocalDir, h.tc.TaskDir().SecretsDir, taskPrivateDir(h.tc))
 	if err != nil {
 		d.emit(h.tc, "files", fmt.Sprintf("Box %s: the task files changed, but they could not be put where the guest mounts them: %v", h.boxID, err))
@@ -116,6 +122,7 @@ func (d *Driver) refreshTaskFiles(h *taskHandle, b *box.Box) {
 		d.emit(h.tc, "reload", fmt.Sprintf("Box %s: boxd could not reload the executor credentials (%v%s)", h.boxID, err, suffixStderr(stderr)))
 		return
 	}
+	h.setHandledFiles(digest)
 	d.emit(h.tc, "reload", fmt.Sprintf("Box %s: boxd reloaded the executor credentials; a running turn keeps its executor until it ends", h.boxID))
 }
 

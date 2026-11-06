@@ -798,6 +798,11 @@ const nomadSecretsMarker = ".nomad-mount"
 
 // collectTaskFiles lists the regular files below root, keyed by the path below
 // it with prefix in front (for the log messages).
+// IsTaskFile reports whether a file at this path below a task directory goes to
+// the guest. Anything that compares a task directory with what the guest has must
+// ask this: Nomad keeps a marker of its own in secrets/, which never goes there.
+func IsTaskFile(rel string) bool { return rel != nomadSecretsMarker }
+
 func collectTaskFiles(root, prefix string) ([]taskFile, error) {
 	if root == "" {
 		return nil, nil
@@ -817,7 +822,7 @@ func collectTaskFiles(root, prefix string) ([]taskFile, error) {
 		if err != nil {
 			return err
 		}
-		if rel == nomadSecretsMarker {
+		if !IsTaskFile(rel) {
 			return nil
 		}
 		files = append(files, taskFile{host: path, rel: rel})

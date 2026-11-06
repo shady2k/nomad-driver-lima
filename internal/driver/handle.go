@@ -35,12 +35,14 @@ type taskHandle struct {
 	// it, -1 before the first read; only the watcher goroutine uses it.
 	oomKills int64
 
-	boxID       string
-	volumeDir   string
-	vmPID       int
-	diskPath    string
-	instanceDir string
-	cgroupMode  string
+	boxID     string
+	volumeDir string
+	vmPID     int
+	// handledFilesDigest is the last render of the task files the driver staged.
+	handledFilesDigest string
+	diskPath           string
+	instanceDir        string
+	cgroupMode         string
 
 	mu          sync.RWMutex
 	state       drivers.TaskState
@@ -133,6 +135,18 @@ func (h *taskHandle) noteVMPID(pid int) bool {
 	}
 	h.vmPID = pid
 	return true
+}
+
+func (h *taskHandle) handledFiles() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.handledFilesDigest
+}
+
+func (h *taskHandle) setHandledFiles(digest string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.handledFilesDigest = digest
 }
 
 func (h *taskHandle) taskStatus() *drivers.TaskStatus {

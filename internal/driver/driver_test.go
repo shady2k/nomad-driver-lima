@@ -587,6 +587,13 @@ func TestRefreshTaskFilesOnRerender(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(got), "one")
 
+	// Nomad's own marker in secrets/ never goes to the guest, and must not read as
+	// a difference: it reloaded boxd every ten seconds on a real node.
+	require.NoError(t, os.WriteFile(filepath.Join(secretsDir(t, tc), ".nomad-mount"), nil, 0o600))
+	f.ResetCalls(t)
+	d.refreshTaskFiles(h, b)
+	require.Empty(t, f.CallsWith(t, "shell box1 -- boxctl reload"), "Nomad's marker is not a change of the task files")
+
 	// Nothing changed: no reload.
 	f.ResetCalls(t)
 	d.refreshTaskFiles(h, b)
@@ -828,4 +835,9 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+func secretsDir(t *testing.T, tc *drivers.TaskConfig) string {
+	t.Helper()
+	return tc.TaskDir().SecretsDir
 }
