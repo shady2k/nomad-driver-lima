@@ -23,15 +23,32 @@ type lsOutput struct {
 	Boxes []BoxRecord `json:"boxes"`
 }
 
-// cmdList lists the boxes on the cluster.
+// cmdList lists the boxes on the cluster, or one project's boxes.
 func (a *App) cmdList(ctx context.Context, args []string) error {
 	fs := newFlagSet("ls")
+	project := fs.String("project", "", "show only the boxes of this project")
+	mine := fs.Bool("mine", false, "show only the boxes of the project this directory belongs to "+
+		"($BOX_PROJECT, else the name of its git repository)")
 	if err := parseFlags(fs, args, 0); err != nil {
+		return err
+	}
+	only, err := a.lsProject(*project, *mine, flagSet(fs, "project"))
+	if err != nil {
 		return err
 	}
 	boxes, err := a.collectBoxes(ctx)
 	if err != nil {
 		return err
+	}
+	if only != "" {
+		boxes = boxesOfProject(boxes, only)
+		if len(boxes) == 0 {
+			if a.JSON {
+				return a.printJSON(lsOutput{Boxes: []BoxRecord{}})
+			}
+			a.note("this cluster has no boxes of the project %s; `box ls` lists every box", only)
+			return nil
+		}
 	}
 	volumes, err := a.Nomad.HostVolumes(ctx)
 	if err != nil {
@@ -102,6 +119,7 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 		alloc := shortID(box.AllocationID)
 		rows = append(rows, []string{
 			box.ID,
+			dash(box.Project),
 			dash(box.Node),
 			dash(box.Arch),
 			box.State,
@@ -115,7 +133,8 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 			idleCell(box),
 		})
 	}
-	a.printTable([]string{"ID", "NODE", "ARCH", "STATE", "CPU", "MEM", "DISK", "VOLUME", "USED", "ALLOC", "UPTIME", "IDLE"}, rows)
+	a.printTable([]string{"ID", "PROJECT", "NODE", "ARCH", "STATE", "CPU", "MEM", "DISK", "VOLUME", "USED",
+		"ALLOC", "UPTIME", "IDLE"}, rows)
 	for _, box := range boxes {
 		if box.Note != "" {
 			a.note("%s: %s", box.ID, box.Note)

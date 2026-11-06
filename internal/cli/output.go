@@ -15,11 +15,15 @@ import (
 
 // BoxRecord is one box as `box ls` and `box status` show it.
 type BoxRecord struct {
-	ID            string `json:"id"`
-	Job           string `json:"job"`
-	Node          string `json:"node,omitempty"`
-	Arch          string `json:"arch,omitempty"`
-	Image         string `json:"image,omitempty"`
+	ID    string `json:"id"`
+	Job   string `json:"job"`
+	Node  string `json:"node,omitempty"`
+	Arch  string `json:"arch,omitempty"`
+	Image string `json:"image,omitempty"`
+	// Project is the project label the box belongs to, empty for a box that has
+	// none. It is a label and not a protection: nothing is refused or stopped
+	// because of it.
+	Project       string `json:"project,omitempty"`
 	State         string `json:"state"`
 	JobStatus     string `json:"job_status,omitempty"`
 	ClientStatus  string `json:"client_status,omitempty"`
@@ -252,6 +256,7 @@ func boxRecord(job *api.Job, allocs []*api.AllocationListStub, now time.Time) Bo
 		Job:       derefStr(job.ID, derefStr(job.Name, "")),
 		Arch:      spec.Arch,
 		Image:     spec.ImageVersion,
+		Project:   spec.Project,
 		CPUs:      spec.CPUs,
 		MemoryMiB: spec.MemoryMiB,
 		DiskGiB:   spec.DiskGiB,

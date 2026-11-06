@@ -27,6 +27,7 @@ The environment the CLI reads:
 | `NOMAD_ADDR`, `NOMAD_TOKEN`, `NOMAD_CACERT`, `NOMAD_CLIENT_CERT`, `NOMAD_CLIENT_KEY`, `NOMAD_NAMESPACE` | the usual Nomad API settings |
 | `BOX_IMAGE_INDEX` | where the base image index lives; there is no built-in default, and without it (or `--image-index`) `box images` and `box create` say so and stop |
 | `BOX_VAULT_ROLE` | the Vault role a box reads its secrets with; it is the default of `box create --vault-role`, and empty means the cluster's default role |
+| `BOX_PROJECT` | the project a box belongs to when `--project` is not given; empty means the name of the git repository of the directory, if it has one (see "Projects and idle boxes") |
 
 ## Nodes, images, boxes
 
@@ -50,6 +51,10 @@ Each running box's line says how long it has been idle: `idle 3h12m` since its
 last turn ended, or `busy` while a turn runs. `?` is a guest that did not answer
 and `-` a boxd too old to report it. This is a report and nothing more: no box is
 ever stopped for being idle.
+
+Each box's disk line also says which project the box belongs to
+(`(dev1 is running, project my-project)`), and the disks of `--json` carry it as
+`project`: the nodes are shared, so whose box holds a disk is part of the picture.
 
 A VM with no task is an orphan to the driver after ten minutes, and that is what
 every stopped box looks like to it. So this command answers as `box ls` does: a box
@@ -241,7 +246,9 @@ version; without `--base` the newest base image is the parent.
 It refuses an image that carries no recipe: a rebuild replays the recipe that made
 the environment, and an image baked with `--no-recipe` has none.
 
-Then it creates a temporary box `NAME-rebuild` from the base image, runs the
+Then it creates a temporary box `NAME-rebuild` from the base image -- with the
+project this command resolves, like any box created here: a rebuild that fails
+keeps that box, and it is then the caller's own to find and to remove -- runs the
 recipe in it with the machinery of `box run` -- its output on the terminal, and no
 time limit other than `--timeout` (default 1h) -- bakes the result as the next
 `NAME-N` with the new parent, and deletes the temporary box. On a failure it keeps
@@ -309,6 +316,7 @@ waits until the box is running.
 | `--disk-gib N` | 8 | disk size (it can only grow later) |
 | `--node NAME` | – | pin the box to this node |
 | `--vault-role ROLE` | `BOX_VAULT_ROLE`, else the cluster's default role | the Vault role the box reads its secrets with, used when the executors hold a template item (see "Executor credentials") |
+| `--project NAME` | `BOX_PROJECT`, else the git repository's name | the project the box belongs to: a label `box ls` and `box capacity` show, so an agent can tell its boxes from other projects' (see "Projects and idle boxes") |
 | `--timeout D` | 10m | how long to wait for it to run |
 | `--wait [D]` | true | wait until it is running; with a duration, also wait that long for room |
 
@@ -359,8 +367,14 @@ between turns, and for a box whose guest has gone silent (it restarts it; the di
 is kept). Give back what you do not use: `box stop` an idle box and `box rm` a
 finished one, because a reservation held by an idle box keeps someone else's work
 from starting. If there is no room, stop your own idle boxes or tell the owner --
+the refusal names them (`your idle boxes: a 2h ...`, "Projects and idle boxes") --
 or let the command wait for room itself with `--wait 30m` (below), which says on
 stderr what it is waiting for; do not sit in a retry loop.
+
+A created box ends with one more line on stderr: a stopped box holds no CPU and no
+memory, `box stop <id>` gives them back, and `box start <id>` brings the box back
+with its disk and its sessions. It is advice for the moment the work pauses, and
+the exit code is the same with it and without it.
 
 An image built for bundles gets one mounted at `/opt/box` without asking: the
 newest bundle for the box's architecture. `--platform <version>` picks an older
@@ -369,10 +383,18 @@ bundle refuses `--platform` and says so, and an image that needs one is refused
 when the index has no bundle for its architecture: a box never boots with half
 of what its image expects.
 
-### `box ls`
+### `box ls [--project NAME | --mine]`
 
-Every box with its state, node, allocation, image, size, the disk it really
-occupies on the host, and its sessions.
+Every box with its project, state, node, allocation, image, size, the disk it
+really occupies on the host, and its sessions.
+
+The `PROJECT` column is the project the box belongs to, and `-` for a box that
+carries no label: nothing fails for such a box. `--project NAME` shows only that
+project's boxes, and `--mine` shows the boxes of the project this directory
+resolves to (`BOX_PROJECT`, else the name of its git repository). A box with no
+label is never one of a project's boxes, and `--mine` in a directory that belongs
+to no project is a usage error that says how to name one. The project is part of
+`--json` as `boxes[].project`, absent for a box that has none.
 
 The `IDLE` column says what a running box has been doing: `idle 3h12m` since its
 last turn ended, or `busy` while a turn runs. It comes from the guest -- `boxctl
@@ -478,6 +500,53 @@ The command needs the image index to know what the box's image expects:
   newest one for its architecture.
 
 `--wait=false` returns as soon as Nomad has taken the new job.
+
+## Projects and idle boxes
+
+Boxes are never stopped automatically: several projects share the nodes, and a box
+is somebody's work. What the tools do instead is say, in the moment an agent
+decides, which boxes are its own and what giving one back costs.
+
+**A box belongs to a project.** The project comes from `--project NAME`, else from
+`BOX_PROJECT`, else from the base name of the git repository the command runs in
+(`git rev-parse --git-common-dir`, so a linked worktree carries the name of the
+main repository), and else it has none. A label is lower-case letters, digits and
+dashes; `--project` and `BOX_PROJECT` are refused in a sentence when they are not
+that, because a label that does not say what was meant is worse than a refusal. A
+name read from a directory is sanitized into a label instead (`My Project` is
+`my-project`), because nobody typed it.
+
+The label is stored in the job's meta as `project`, and so in the description the
+box keeps: a resize, an upgrade and a start write it back, and the temporary box
+of `box bake --rebuild` carries it too. `box ls` and `box capacity` show it.
+
+**It is a label, not a protection.** Nothing is refused or stopped because of a
+project, and `box ls --project` is a view and nothing more: the label is what lets
+one agent tell its own boxes from another's. Deciding that another project's box
+may be stopped is its owner's call.
+
+**Hints, on stderr, in the moments that matter.** None of them changes an exit
+code, and none of them stops anything:
+
+- `box create` says, after the box is created, that a stopped box holds no CPU and
+  no memory and that `box start` brings it back;
+- `box wait` says so once a turn has finished and no session of the box has a turn
+  running;
+- `box create` refused for lack of room names the idle boxes on the nodes it could
+  have used, grouped by whether they are the caller's to stop:
+
+  ```
+  your idle boxes: a 2h, b 40m (box stop <id>)
+  other idle boxes: c 3h (not yours to stop)
+  ```
+
+  An idle box is one whose guest says so (`boxctl info`, under the same 20 second
+  bound every guest call has, asked in parallel so the whole list costs one bound
+  and not one per box); a box with a turn running, a guest that does not answer and
+  a boxd too old to report are left out, and a failure of any kind leaves the list
+  out rather than delaying the refusal. With no project of the caller's own the
+  list is simply `idle boxes: c 3h`. `--wait D` names them when it starts waiting
+  and again with the refusal it ends with.
 
 ## Preparing a box
 
@@ -688,6 +757,19 @@ going is how a coordinator reports work that was never done. Look before you go
 on, and say what you saw. `--json` carries the same list as `still_running`
 (`docs/boxctl-contract.md`, `Turn`); nothing is printed on stderr then, and the
 field is missing when the turn left nothing running.
+
+**When the turn is over and the box is doing nothing, the wait says so.** If the
+guest reports that no session of the box has a turn running, the wait ends with
+one line on stderr:
+
+```
+box stop dev1 if you do not need this box for a while: its disk and sessions are kept
+```
+
+It is advice for the next moment the box is not needed, not a change of the
+result: the exit code is the turn's, and `--json` prints nothing on stderr. A
+turn still running in another session, a guest that does not answer and a boxd too
+old to report its activity say nothing.
 
 ### `box events <id> <session> [--since N] [--limit N] [--tail N] [-f]`
 

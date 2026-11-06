@@ -142,6 +142,15 @@ box's environment an image instead of repeating it.
 - **Give the node back.** `box stop` a box whose work is paused and `box rm
   <id> --yes` one that is finished: an idle box holds its node's memory, and the
   node is shared with every other agent's boxes.
+- **A box you do not need right now: stop it.** `box stop <id>`, even for an
+  hour: its disk, its environment and its sessions are kept, and `box start`
+  brings it back. An idle box holds its memory and its cores, and another agent
+  may be refused because of it. A finished box: `box rm <id> --yes`. Boxes of
+  other projects are not yours to stop: ask their owner.
+- **A box's project is `box create --project NAME`, else `BOX_PROJECT`, else the
+  name of this directory's git repository.** It is a label, not a protection:
+  `box ls --mine` shows your boxes, `box ls --project NAME` another project's, and
+  a refusal for lack of room names the idle boxes that are yours to stop.
 - **`box wait --timeout` instead of sleep loops.** A turn may take twenty
   minutes; `box wait` returns the moment it ends, and `box events --since`
   resumes a stream you already read. Do not write `while ...; sleep 60; done`

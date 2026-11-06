@@ -55,6 +55,15 @@ type App struct {
 	// BOX_VAULT_ROLE, the tests set it directly. Empty means the cluster's default
 	// role, which is what a job with no role gets.
 	vaultRole string
+	// ProjectDir is the directory a box's project is resolved from when neither
+	// --project nor BOX_PROJECT says: the name of the git repository it belongs
+	// to. Empty means the process's working directory.
+	ProjectDir string
+	// Getenv reads the environment (BOX_PROJECT); nil means os.Getenv.
+	Getenv func(string) string
+	// repoName returns the name of the git repository a directory belongs to, or
+	// "" for a directory in none; nil means git is asked (gitRepoName).
+	repoName func(dir string) string
 }
 
 // New returns an App with the production defaults filled in.
@@ -312,8 +321,8 @@ func (a *App) commands() map[string]command {
 		"images":    {usage: "the images a box can be created from: box images | box images publish <version> --yes", run: a.cmdImages, subcommands: true},
 		"bake":      {usage: "bake a box into an image: box bake <id> --name NAME [--recipe FILE | --no-recipe] [--yes]; box bake --rebuild NAME [--base VERSION]", run: a.cmdBake},
 		"store":     {usage: "the image store a publish writes to: box store set --url URL --from-file FILE | --template FILE; box store show", run: a.cmdStore, subcommands: true},
-		"create":    {usage: "create a box: box create <id> --image <version> [--arch amd64|arm64] [--cpus N] [--memory-mib N] [--disk-gib N]", run: a.cmdCreate},
-		"ls":        {usage: "list boxes", run: a.cmdList},
+		"create":    {usage: "create a box: box create <id> --image <version> [--arch amd64|arm64] [--cpus N] [--memory-mib N] [--disk-gib N] [--project NAME]", run: a.cmdCreate},
+		"ls":        {usage: "list boxes; --project NAME or --mine shows one project's", run: a.cmdList},
 		"status":    {usage: "details of one box, its recent task events, the guest and its sessions: box status <id>", run: a.cmdStatus},
 		"stop":      {usage: "stop a box, keeping its disk: box stop <id>", run: a.cmdStop},
 		"start":     {usage: "start a stopped box, with the same disk: box start <id>", run: a.cmdStart},

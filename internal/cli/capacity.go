@@ -54,6 +54,9 @@ type BoxDisk struct {
 	BoxID        string `json:"box_id"`
 	UsedBytes    int64  `json:"used_bytes"`
 	VirtualBytes int64  `json:"virtual_bytes"`
+	// Project is the project of the box that owns this disk, empty for a box with
+	// no label and for a disk nothing describes.
+	Project string `json:"project,omitempty"`
 }
 
 // The driver's disk usage attributes (internal/driver/disk.go).

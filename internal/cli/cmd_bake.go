@@ -637,6 +637,11 @@ func (a *App) rebuildImage(ctx context.Context, named, base string, timeout time
 	if !a.JSON {
 		a.note("rebuilding %s: a temporary box %s from the base image %s, then its recipe", source.Version, boxID, parent.Version)
 	}
+	// The temporary box carries the project this command resolves, like any box
+	// created here: a rebuild that fails keeps it, and it is then the caller's own
+	// box to find and to remove. A BOX_PROJECT that is not usable is no label for a
+	// temporary box -- `box create` is where it is refused, in a sentence.
+	project, _ := a.ProjectLabel("", false)
 	created, err := a.createBox(ctx, boxRequest{
 		ID:            boxID,
 		Image:         parent,
@@ -645,6 +650,7 @@ func (a *App) rebuildImage(ctx context.Context, named, base string, timeout time
 		CPUs:          defaultCPUs,
 		MemoryMiB:     defaultMemoryMiB,
 		DiskGiB:       int(diskGiB),
+		Project:       project,
 		VaultRole:     a.VaultRole(),
 		ExecutorItems: a.executorItems(ctx),
 	}, true, timeout)

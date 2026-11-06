@@ -95,6 +95,10 @@ type BoxSpec struct {
 	// NodeID pins the box to one node. It is only used when the volume is
 	// created; the job itself is pinned by the volume.
 	NodeID string
+	// Project is the project the box belongs to, a label in the job's meta and so
+	// in its stored description. Empty means the box carries no label; the box is
+	// then shown with a "-" and nothing else changes.
+	Project string
 	// MemoryOverheadMiB is added to MemoryMiB for the task resources. Zero
 	// means BoxMemoryOverheadMiB.
 	MemoryOverheadMiB int
@@ -340,6 +344,19 @@ func RenderJob(spec BoxSpec) (*api.Job, error) {
 		Tasks: []*api.Task{task},
 	}
 
+	// The project is a label of the box, carried in the job's meta and so in its
+	// stored description: a resize, an upgrade or a start reads it back and writes
+	// it again, so the label survives every re-registration.
+	meta := map[string]string{
+		boxMetaMarker: "true",
+		"box_id":      spec.ID,
+		"image":       spec.ImageVersion,
+		"arch":        spec.Arch,
+	}
+	if spec.Project != "" {
+		meta["project"] = spec.Project
+	}
+
 	job := &api.Job{
 		ID:          strPtr(jobID),
 		Name:        strPtr(jobID),
@@ -351,12 +368,7 @@ func RenderJob(spec BoxSpec) (*api.Job, error) {
 			Operand: "=",
 			RTarget: LimaArch(spec.Arch),
 		}},
-		Meta: map[string]string{
-			boxMetaMarker: "true",
-			"box_id":      spec.ID,
-			"image":       spec.ImageVersion,
-			"arch":        spec.Arch,
-		},
+		Meta:       meta,
 		TaskGroups: []*api.TaskGroup{group},
 	}
 	return job, nil
@@ -455,6 +467,7 @@ func SpecFromJob(job *api.Job) (BoxSpec, error) {
 		spec.ID = job.Meta["box_id"]
 		spec.ImageVersion = job.Meta["image"]
 		spec.Arch = NormalizeArch(job.Meta["arch"])
+		spec.Project = job.Meta["project"]
 	}
 	if spec.ID == "" {
 		if id, ok := BoxIDFromJobName(derefStr(job.ID, derefStr(job.Name, ""))); ok {

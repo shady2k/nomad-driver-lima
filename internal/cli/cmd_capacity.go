@@ -65,6 +65,9 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 		for _, box := range boxes {
 			byBox[box.ID] = box
 		}
+		// The project goes with the disk it owns: a node's free room is a shared
+		// thing, and whose boxes hold it is what an agent needs to know.
+		countNodeProjects(nodes, byBox)
 	}
 	// How long the running boxes have been idle: a node that is full of boxes that
 	// are all waiting for their model is a different picture from a node of boxes
@@ -221,6 +224,18 @@ func countNodeBoxes(nodes []*NodeCapacity, boxes []BoxRecord) {
 	}
 }
 
+// countNodeProjects puts the project of every box on the disk that box owns, so
+// the per-box lines and the JSON say whose box a disk is.
+func countNodeProjects(nodes []*NodeCapacity, boxes map[string]BoxRecord) {
+	for _, node := range nodes {
+		for i := range node.Disks {
+			if box, ok := boxes[node.Disks[i].BoxID]; ok {
+				node.Disks[i].Project = box.Project
+			}
+		}
+	}
+}
+
 // boxesCell renders the box count of a node, saying which of them are stopped and
 // which of its disks nothing describes.
 func boxesCell(node *NodeCapacity) string {
@@ -250,14 +265,18 @@ func diskBoxNote(boxes map[string]BoxRecord, boxID string) string {
 	if !ok {
 		return " (no box of this cluster owns this disk)"
 	}
+	project := ""
+	if box.Project != "" {
+		project = ", project " + box.Project
+	}
 	switch box.State {
 	case "stopped":
-		return " (" + boxID + " is stopped: its disk is kept, and `box start " + boxID + "` runs it again)"
+		return " (" + boxID + " is stopped" + project + ": its disk is kept, and `box start " + boxID + "` runs it again)"
 	case "running":
-		return " (" + boxID + " is running)"
+		return " (" + boxID + " is running" + project + ")"
 	case "orphan":
-		return " (" + boxID + " is an orphan: nothing describes this disk, and `box rm " + boxID + " --yes` deletes it)"
+		return " (" + boxID + " is an orphan" + project + ": nothing describes this disk, and `box rm " + boxID + " --yes` deletes it)"
 	default:
-		return " (" + boxID + " is " + dash(box.State) + ")"
+		return " (" + boxID + " is " + dash(box.State) + project + ")"
 	}
 }

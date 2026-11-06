@@ -339,7 +339,11 @@ func (a *App) cmdWait(ctx context.Context, args []string) error {
 			cancel()
 			if err == nil {
 				contact.back("wait")
-				return a.reportTurn(got, id, sessionID, *timeout)
+				turnErr := a.reportTurn(got, id, sessionID, *timeout)
+				// The turn is over and nobody is waiting in this box any more:
+				// this is the moment its owner decides whether to keep it awake.
+				a.noteBoxIsIdle(ctx, client, id)
+				return turnErr
 			}
 		}
 		if !lostContact(err) {
@@ -375,6 +379,34 @@ func (a *App) cmdWait(ctx context.Context, args []string) error {
 			}
 		}
 	}
+}
+
+// noteBoxIsIdle tells the caller that the box it has been waiting in can be
+// stopped: the turn is over and no session of the box is running one.
+//
+// Every project's boxes share the nodes, and a box that waits for its model holds
+// its memory and its cores all the same, so this is the moment to say what
+// stopping it costs -- nothing: the disk, the environment and the sessions are
+// kept, and `box start` brings the box back. A guest that does not answer, a boxd
+// too old to report its activity, and a box with a turn still running in another
+// session say nothing: the first two do not know, and the last is at work.
+func (a *App) noteBoxIsIdle(ctx context.Context, client *Boxctl, id string) {
+	if client == nil {
+		return
+	}
+	var info *BoxInfo
+	err := a.guestCall(ctx, "`boxctl info`", func(callCtx context.Context) error {
+		got, err := client.Info(callCtx)
+		if err != nil {
+			return err
+		}
+		info = got
+		return nil
+	})
+	if err != nil || info == nil || info.Activity == nil || info.Activity.Busy {
+		return
+	}
+	a.note("box stop %s if you do not need this box for a while: its disk and sessions are kept", id)
 }
 
 // lastTurn returns the number of the last turn of a session, so a wait that lost

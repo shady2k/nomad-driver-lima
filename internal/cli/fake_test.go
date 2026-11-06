@@ -983,6 +983,11 @@ func newTestApp(t *testing.T, indexBody string) *testApp {
 		}
 	}
 	app.SetImageIndexURL("http://images.test/box-base/index.json")
+	// A box's project is resolved from the environment and from the git
+	// repository of the working directory; a test that reads either would get the
+	// machine's, so both answer nothing here and a test that wants one sets it.
+	app.Getenv = func(string) string { return "" }
+	app.repoName = func(string) string { return "" }
 	return &testApp{App: app, cluster: cluster, guest: guest, images: images, term: term, out: out, errOut: errOut, in: in, clock: clock}
 }
 

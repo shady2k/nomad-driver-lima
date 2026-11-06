@@ -51,6 +51,9 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 	prepTimeout := fs.Duration("prepare-timeout", defaultPrepareTimeout, "time limit of the preparation, and how long create waits for it")
 	vaultRole := fs.String("vault-role", a.VaultRole(), "the Vault role the box reads its secrets with "+
 		"(default: $BOX_VAULT_ROLE, else the cluster's default role)")
+	project := fs.String("project", "", "the project this box belongs to: a label `box ls` and `box capacity` show, "+
+		"so an agent can tell its boxes from other projects' (default: $BOX_PROJECT, else the name of the git "+
+		"repository of this directory)")
 	timeout := fs.Duration("timeout", defaultWaitTimeout, "how long to wait for the box to run")
 	// --wait is a flag whose value may be left out: "--wait" waits as it always
 	// did, "--wait 30m" also waits that long for room when no node has any.
@@ -87,6 +90,12 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		if err := requirePositive(name, value); err != nil {
 			return err
 		}
+	}
+	// The project is a label, not a protection: it is refused here only because a
+	// label that does not say what the caller meant is worse than a refusal.
+	label, err := a.ProjectLabel(*project, flagSet(fs, "project"))
+	if err != nil {
+		return err
 	}
 
 	// A box that already exists is never replaced: its disk is the work.
@@ -136,6 +145,9 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		MemoryMiB:       *memoryMiB,
 		DiskGiB:         *diskGiB,
 		DiskGiven:       flagSet(fs, "disk-gib"),
+		// The project is used by the hints only: a refusal for lack of room names
+		// the idle boxes of the caller's own project, so it can stop one.
+		Project: label,
 	}, waitFor)
 	if err != nil {
 		return err
@@ -151,6 +163,7 @@ func (a *App) cmdCreate(ctx context.Context, args []string) error {
 		CPUs:          *cpus,
 		MemoryMiB:     *memoryMiB,
 		DiskGiB:       *diskGiB,
+		Project:       label,
 		VaultRole:     strings.TrimSpace(*vaultRole),
 		ExecutorItems: a.executorItems(ctx),
 	}, wait.on, *timeout)
@@ -218,6 +231,10 @@ type placementArgs struct {
 	// DiskGiven says whether --disk-gib was on the command line: an image's own
 	// disk is the floor of a box's disk, and a disk asked for below it is refused.
 	DiskGiven bool
+	// Project is the project the box would belong to. It decides nothing about
+	// the placement: a refusal for lack of room names the idle boxes of this
+	// project as the caller's own.
+	Project string
 }
 
 // placeBox picks where a box goes: the architecture, the image and the node are
@@ -392,8 +409,19 @@ const (
 // command at once.
 func (a *App) placeAndWait(ctx context.Context, args placementArgs, waitFor time.Duration) (*boxPlacement, error) {
 	placed, err := a.placeBox(ctx, args)
-	if err == nil || waitFor <= 0 || !noRoom(err) {
-		return placed, err
+	if err == nil {
+		return placed, nil
+	}
+	if !noRoom(err) {
+		return nil, err
+	}
+	// A refusal for lack of room is the moment the caller decides whether to stop
+	// one of its own boxes, so the idle ones are named here -- whether this
+	// refusal is the answer or the wait is only starting. It is bounded guest
+	// calls in parallel, and it changes neither the sentence nor the exit code.
+	a.noteIdleBoxes(ctx, args.Project, args.Arch)
+	if waitFor <= 0 {
+		return nil, err
 	}
 	start := a.now()
 	deadline := start.Add(waitFor)
@@ -421,6 +449,8 @@ func (a *App) placeAndWait(ctx context.Context, args placementArgs, waitFor time
 		}
 		if !now.Before(deadline) {
 			a.noteWait("no room for box %s in %s; the placement is refused as it was", args.ID, span(waitFor))
+			// The refusal is final: the idle boxes are the answer to it.
+			a.noteIdleBoxes(ctx, args.Project, args.Arch)
 			return nil, refusal
 		}
 	}
@@ -441,6 +471,9 @@ type boxRequest struct {
 	CPUs      int
 	MemoryMiB int
 	DiskGiB   int
+	// Project is the project label the box carries, empty for a box that belongs
+	// to none.
+	Project string
 	// VaultRole is the Vault role the box reads its secrets with.
 	VaultRole string
 	// ExecutorItems are the items of the executors variable the job renders.
@@ -470,6 +503,7 @@ func (a *App) createBox(ctx context.Context, req boxRequest, wait bool, timeout 
 		MemoryMiB:     req.MemoryMiB,
 		DiskGiB:       req.DiskGiB,
 		NodeID:        node.NodeID,
+		Project:       req.Project,
 		// A project image carries its recipe: a box made from it passes it on, so
 		// baking this box again, or rebuilding it on a newer parent, has the
 		// recipe that made its environment.
@@ -612,6 +646,11 @@ func (a *App) printCreate(out *createOutput) error {
 	if box.State == "running" {
 		a.note("next: box session new %s --executor prime --model <provider>/<model>", box.ID)
 	}
+	// The same advice `box wait` gives, in the moment the box is made: a box is
+	// stopped when its work pauses, and stopping it costs nothing but the wait to
+	// start it again.
+	a.note("a stopped box holds no CPU and no memory: `box stop %s` gives them back, and `box start %s` "+
+		"brings it back with its disk and its sessions", box.ID, box.ID)
 	return nil
 }
 
