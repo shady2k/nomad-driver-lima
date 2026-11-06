@@ -43,7 +43,9 @@ subtracting the running VMs that no task owns.
 vCPU reserves -- and `OVERCOMMIT` is how many vCPUs its cores are shared out to
 (`cpu_overcommit` in the driver's plugin block, 1 on a node that does not set
 it). With overcommit 2 an 8-core node offers 16 vCPUs, so it takes eight boxes of
-2 vCPU instead of four. Nothing else changes: a box keeps its vCPUs, its memory
+2 vCPU instead of four. A vCPU's share of a core is rounded down, so a node never
+offers fewer vCPUs than its overcommit says (a 6-core node of 4349 MHz cores at
+overcommit 2 offers 12 vCPUs of 2174 MHz). Nothing else changes: a box keeps its vCPUs, its memory
 and its `cpu.max` cap (its vCPUs plus one core), so a busy box cannot take the
 node, and memory is never overcommitted -- a guest out of memory freezes.
 

@@ -168,6 +168,22 @@ func (i BoxInstance) RunningUncounted() bool {
 	return !i.Task && !isTerminalInstanceState(i.State)
 }
 
+// runningBoxIDs is the set of boxes Nomad has a running allocation for: the VMs
+// it accounts for. An allocation that is still starting says nothing about the
+// VM already on the disk, so only a running one counts.
+func runningBoxIDs(allocs []*api.Allocation) map[string]bool {
+	out := make(map[string]bool, len(allocs))
+	for _, alloc := range allocs {
+		if alloc == nil || alloc.ClientStatus != "running" {
+			continue
+		}
+		if id, ok := BoxIDFromJobName(alloc.JobID); ok {
+			out[id] = true
+		}
+	}
+	return out
+}
+
 // isTerminalInstanceState reports whether a Lima instance is down: a stopped box
 // holds its disk but no memory and no vCPUs.
 func isTerminalInstanceState(state string) bool {
@@ -415,9 +431,16 @@ func BuildCapacity(node *api.Node, allocs []*api.Allocation) *NodeCapacity {
 	cap.Disks, cap.DiskUsedBytes, cap.DiskVirtualBytes = boxDisksFromAttributes(attrs)
 	cap.DiskFreeBytes, _ = strconv.ParseInt(strings.TrimSpace(attrs[boxDiskFreeAttr]), 10, 64)
 	cap.Instances = boxInstancesFromAttributes(attrs)
+	// A box Nomad has a running allocation for is accounted for, whatever the
+	// driver's task flag says: that flag is a fingerprint (30 s) old, and right
+	// after a client restarts and re-attaches a box it still says no task owns
+	// the VM. Trusting it there made `box capacity` report a node with no free
+	// CPU and a box "with no running allocation" for up to a fingerprint, and a
+	// create asked in that window was refused for room it had.
+	liveBoxes := runningBoxIDs(allocs)
 	var uncountedVCPUs int64
 	for _, inst := range cap.Instances {
-		if !inst.RunningUncounted() {
+		if !inst.RunningUncounted() || liveBoxes[inst.BoxID] {
 			continue
 		}
 		cap.Uncounted = append(cap.Uncounted, inst)
@@ -567,7 +590,11 @@ func reservePerVCPU(total, reserved int64, numCores string, overcommit float64) 
 	if !(overcommit > 1) || math.IsInf(overcommit, 0) {
 		return mhz
 	}
-	shared := math.Round(float64(mhz) / overcommit)
+	// The share is rounded down, never up: 4349 MHz of a core shared out to two
+	// vCPUs is 2174.5, and a node that rounded it up would publish one vCPU less
+	// than its own overcommit says it has (six cores at 2 offer twelve, not
+	// eleven). A reservation never takes more than its share of a core.
+	shared := math.Floor(float64(mhz) / overcommit)
 	if shared < 1 {
 		return 1
 	}

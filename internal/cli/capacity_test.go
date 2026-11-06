@@ -400,6 +400,36 @@ func TestBuildCapacitySubtractsUncountedVMs(t *testing.T) {
 	require.Empty(t, cap.NodeProblem(PlacementRequest{}))
 }
 
+// TestBuildCapacityLiveAllocationCoversAStaleTaskFlag: the driver's per-box task
+// flag is one fingerprint (30 s) old, so right after a client restarts and
+// re-attaches a box it still says no task owns the VM. Nomad's running allocation
+// is what accounts for it: the box is not "uncounted", and its memory and vCPUs
+// are not taken off the free resources twice. An allocation that has not started
+// covers nothing, so a VM left by a gone allocation stays uncounted.
+func TestBuildCapacityLiveAllocationCoversAStaleTaskFlag(t *testing.T) {
+	cluster := newFakeCluster()
+	node := cluster.addNode("node-1", "node-1", "amd64", 12000, 8192, 150000)
+	withInstance(node, "adopted", "Running", "none", 2, 2048, 10)
+	alloc := &api.Allocation{
+		ID:           "alloc-1",
+		JobID:        "box-adopted",
+		ClientStatus: "running",
+		AllocatedResources: &api.AllocatedResources{
+			Tasks: map[string]*api.AllocatedTaskResources{
+				"box": {Cpu: api.AllocatedCpuResources{CpuShares: 4348}, Memory: api.AllocatedMemoryResources{MemoryMB: 2560}},
+			},
+		},
+	}
+	capacity := BuildCapacity(node, []*api.Allocation{alloc})
+	require.Empty(t, capacity.Uncounted, "the running allocation is what accounts for the VM")
+	require.Equal(t, int64(8192-2560), capacity.Memory.Free, "the VM is not taken off the free memory twice")
+	require.Equal(t, int64(12000-4348), capacity.CPU.Free)
+
+	alloc.ClientStatus = "pending"
+	capacity = BuildCapacity(node, []*api.Allocation{alloc})
+	require.Len(t, capacity.Uncounted, 1, "an allocation that has not started covers no VM")
+}
+
 // TestBuildCapacityUncountedNeverGoesNegative covers a node whose VMs alone
 // exceed what Nomad thinks is free.
 func TestBuildCapacityUncountedNeverGoesNegative(t *testing.T) {
@@ -503,6 +533,25 @@ func TestOvercommitFitsTwiceTheBoxes(t *testing.T) {
 	require.Contains(t, BuildCapacity(node, allocs).NodeProblem(req), "MHz of CPU free")
 }
 
+// TestOvercommitNeverLosesAVCPU: a vCPU's share of a core is rounded down, never
+// up. A six-core node measured at 26094 MHz, shared out to two vCPUs each, offers
+// twelve vCPUs of 2174 MHz; rounding the share up to 2175 offered eleven, one
+// fewer than the node's own overcommit says, and refused a box that took them all.
+func TestOvercommitNeverLosesAVCPU(t *testing.T) {
+	cluster := newFakeCluster()
+	node := cluster.addNode("node-1", "node-1", "amd64", 26094, 32000, 900000)
+	node.Attributes["cpu.numcores"] = "6"
+	node.Attributes["driver.box.cpu_overcommit"] = "2"
+	capacity := BuildCapacity(node, nil)
+	require.Equal(t, float64(2), capacity.CPUOvercommit)
+	require.Equal(t, int64(2174), capacity.CPUMHzPerVCPU, "4349 MHz of a core, shared out to two vCPUs")
+	require.Equal(t, int64(12), capacity.CPUVCPUs, "six cores at overcommit 2 offer twelve vCPUs")
+	require.Empty(t, capacity.NodeProblem(PlacementRequest{CPUs: 12, MemoryMiB: 1024, DiskGiB: 16}),
+		"a box that takes all twelve vCPUs fits")
+	// Eight cores of 1936 MHz at overcommit 1.5: twelve vCPUs of 1290, not eleven.
+	require.Equal(t, int64(1290), reservePerVCPU(15992, 500, "8", 1.5))
+}
+
 // TestCPUOvercommitFromAttributes: a node that does not say, or says something
 // that is not a usable number, is 1 -- a reservation is never quietly larger than
 // the node published.
@@ -526,7 +575,7 @@ func TestCPUOvercommitFromAttributes(t *testing.T) {
 		require.Equal(t, want, cpuOvercommitFromAttributes(attrs), "%q", value)
 	}
 	require.Equal(t, int64(968), reservePerVCPU(15992, 500, "8", 2))
-	require.Equal(t, int64(1291), reservePerVCPU(15992, 500, "8", 1.5))
+	require.Equal(t, int64(1290), reservePerVCPU(15992, 500, "8", 1.5))
 	require.Equal(t, int64(1936), reservePerVCPU(15992, 500, "8", 1))
 }
 
