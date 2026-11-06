@@ -73,21 +73,57 @@ box's environment an image instead of repeating it.
    published one is created from anywhere; a draft (`draft on node X`) only on
    that node.
 2. Install what the project needs in the box, and only that: toolchains, package
-   sets, the caches a build fills. No code, no task data, no credential -- the
-   seal deletes them from the image's copy, and code belongs to a box.
+   sets, the caches a build fills. Keep code in `/work` (`box prepare` puts it
+   there): that is the one place the seal removes code from.
 3. Write the recipe: the script that makes this environment from the parent
    image, and that can run on a fresh box of it. It is what a later `box bake
-   --rebuild` replays on a newer base image.
+   --rebuild` replays on a newer base image, in a temporary box of 2 vCPUs and
+   4 GiB with no sources and no credentials for your repositories. `box bake
+   --recipe` only stores the recipe and does not run it: run it on a fresh box
+   and bake that box, or a broken recipe shows only at the rebuild.
 4. `box bake <id> --name <project> --recipe recipe.sh`, between turns. The seal
    runs in a clone of the box's disk, so the box keeps its work: nothing has to be
    pushed out first, and a bake that fails leaves the box as it was. The box is not
-   usable while the bake runs -- a clone, a seal and a compression are minutes --
-   and it starts again with `/work` and its sessions when it ends.
-5. Create from the image with `box create <id> --image <project>-N`. The box you
-   baked keeps its disk and its sessions: `box rm <id> --yes` when its task is done.
+   usable while the bake runs, and it starts again with `/work` and its sessions
+   when it ends. If another box took its room meanwhile, `box start` it later.
+5. Create from the image with `box create <id> --image <project>-N`, and check the
+   environment there. A draft is on one node only, so the box goes to that node.
+   The box you baked keeps its disk and its sessions: `box rm <id> --yes` when its
+   task is done.
 6. Propose publishing, and let the owner decide: `box images publish <version>
    --yes` puts the image in the operator's store, which is what makes it
    available on every node. A published version never changes.
+
+**What a seal removes:** `/work` and the `box prepare` destination, the sessions,
+`/tmp`, `/var/tmp`, `/var/log`, the SSH host keys, the cloud-init state and the
+machine id. In `/root` and `/home/*`: the executors' state, shell histories, `.ssh`
+keys, `.netrc`, `.git-credentials`, tokens in `.npmrc` and credential helpers in
+`.gitconfig`.
+
+**Everything else stays, and nothing checks it.** That is the point for
+`/var/lib/docker` (images, layers, volumes), `/nix`, language caches and installed
+packages, so dockerd need not be stopped. It is also the danger: an image goes to
+anyone who can pull it. Before a bake:
+
+- `docker logout`: a seal leaves `~/.docker/config.json` in place.
+- `docker rm` every container: one with a restart policy starts in the clone.
+- No credential in an image's `ENV` or layers, and no code copied into a Docker
+  image; no checkout outside `/work` (`~/repo` stays). The seal's proof looks only
+  for executor state and for `auth.json` or `credentials.json` in the homes and
+  box directories, and such a file fails the bake.
+- `docker system prune` and delete what the image does not need: it is what every
+  box from this image starts with.
+
+**Size and time.** No size is refused, and a large image is fine when its caches
+save more than it costs. `box bake` and `box images publish` wait 30 minutes by
+default; the compression uses one core, so a disk of several GiB wants `--timeout
+2h`. After a timeout the job goes on: `box images` lists the draft when it is
+there. The node checks room only for the copy of the disk, yet it needs that plus
+the image, and the first box from the image adds an uncompressed copy of it: plan
+on three times what `box ls` says the disk occupies. The box's `--disk-gib` becomes
+the smallest disk any box from the image can have. Only an image with the
+`platform` field can be baked: `box create` the box from a current base image, not
+an old one.
 
 ## Choosing where and what
 
