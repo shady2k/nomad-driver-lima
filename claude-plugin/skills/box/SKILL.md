@@ -118,12 +118,12 @@ anyone who can pull it. Before a bake:
 save more than it costs. `box bake` and `box images publish` wait 30 minutes by
 default; the compression uses one core, so a disk of several GiB wants `--timeout
 2h`. After a timeout the job goes on: `box images` lists the draft when it is
-there. The node checks room only for the copy of the disk, yet it needs that plus
-the image, and the first box from the image adds an uncompressed copy of it: plan
-on three times what `box ls` says the disk occupies. The box's `--disk-gib` becomes
-the smallest disk any box from the image can have. Only an image with the
-`platform` field can be baked: `box create` the box from a current base image, not
-an old one.
+there. A bake is refused up front unless the node can hold the copy of the disk
+and the image, about twice what `box ls` says the disk occupies, and the first box
+from the image adds an uncompressed copy of it, so plan on three times that. The
+box's `--disk-gib` becomes the smallest disk any box from the image can have. Only
+an image with the `platform` field can be baked: `box create` the box from a
+current base image, not an old one.
 
 ## Choosing where and what
 
@@ -299,9 +299,10 @@ starts, so no key lands on a disk.
 - `box <id> is busy: ... nothing was stopped and nothing was baked` - a turn runs
   or a preparation is in progress, and `box bake` refuses it before it stops
   anything. `box wait` for the turn, then bake again.
-- `node <name> has ... free ... and the copy of box <id>'s disk needs ...` - the
-  node has no room for the bake's copy of the disk. Bake a box with a smaller
-  disk, or tell the owner which box to remove.
+- `node <name> has ... free where a bake writes the copy of the box's disk ... and
+  a bake of box <id> needs ... for the copy and ... for the image` - the node has
+  no room for the bake's copy of the disk and its image. `box rm <id> --yes` a box
+  you no longer need, bake a box with a smaller disk, or tell the owner.
 - `the box <id> is an orphan` - its disk is there and nothing describes it, so it
   cannot be started; `box rm <id> --yes` deletes the disk. Tell the owner.
 - `the guest did not answer boxctl info` - the box is up but `boxd` is not (yet);

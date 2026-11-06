@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/nomad/plugins/shared/structs"
 	"github.com/stretchr/testify/require"
 
+	"github.com/shady2k/nomad-driver-lima/internal/box"
 	"github.com/shady2k/nomad-driver-lima/internal/fakelima"
 	"github.com/shady2k/nomad-driver-lima/internal/limactl"
 )
@@ -162,6 +163,39 @@ func TestFingerprintReportsDiskUsage(t *testing.T) {
 	setDiskUsage(bare, nil)
 	require.Equal(t, "0", attrValue(t, bare, "driver.box.disk.used_bytes"))
 	require.Equal(t, "0", attrValue(t, bare, "driver.box.disk.virtual_bytes"))
+}
+
+// TestFingerprintReportsTheImageCachesRoomOnlyWhenItHasOne: a bake writes the copy
+// of the disk in the Lima home and the image in the image cache, and the second
+// number is published only when the cache is on a filesystem of its own. An absent
+// attribute means the two come out of one room, which is what a reader assumes.
+func TestFingerprintReportsTheImageCachesRoomOnlyWhenItHasOne(t *testing.T) {
+	f := fakelima.New(t)
+	same := newTestDriver(t, f) // its cache is under its Lima home
+	fp := same.buildFingerprint(context.Background())
+	require.NotEmpty(t, attrValue(t, fp, "driver.box.disk.free_bytes"))
+	_, ok := fp.Attributes[diskImageCacheFreeBytes]
+	require.False(t, ok, "a cache on the Lima home's filesystem is not published: %v", fp.Attributes)
+
+	// The cache on a filesystem of its own: /dev/shm is one on most Linux hosts,
+	// and a host where it is not has nothing to compare.
+	const other = "/dev/shm"
+	info, err := os.Stat(other)
+	if err != nil || !info.IsDir() {
+		t.Skipf("%s is not a directory on this host", other)
+	}
+	cache, err := os.MkdirTemp(other, "box-image-cache-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(cache) })
+	if sameFs, err := box.SameFilesystem(f.Home, cache); err == nil && sameFs {
+		t.Skipf("%s is on the same filesystem as %s here", other, f.Home)
+	}
+
+	split := newTestDriverWithCache(t, fakelima.New(t), filepath.Join(t.TempDir(), "box-files"), cache)
+	fp = split.buildFingerprint(context.Background())
+	require.NotEmpty(t, attrValue(t, fp, "driver.box.disk.free_bytes"))
+	require.Greater(t, attrInt(t, fp, diskImageCacheFreeBytes), int64(0),
+		"the room of the image cache's own filesystem is published")
 }
 
 // attrInt reads a string fingerprint attribute as a number.

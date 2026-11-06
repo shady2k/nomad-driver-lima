@@ -331,8 +331,45 @@ func (a *App) checkSealGate(ctx context.Context, id string) error {
 	return nil
 }
 
-// checkBakeRoom refuses a bake whose clone would not fit: a clone is a full copy
-// of the box's disk, and both live on the node's filesystem.
+// bakeCloneGrowthBytes is what a booted clone writes on top of the copy of the
+// box's disk before the seal trims it: systemd starts, boxd writes its state, and
+// the seal records what it removed. The driver holds the same number
+// (bakeCloneGrowth); this one is here so that the CLI reads no driver internals.
+const bakeCloneGrowthBytes = int64(1) << 30
+
+// bakeRoomProblem returns why a bake of a box does not fit on a node, in a
+// sentence, or "" when it fits.
+//
+// The clone is a copy of the box's disk plus what a booted clone writes before the
+// seal trims it, and the image is another disk's worth in the image cache. When
+// both directories are on one filesystem the two needs come out of free; otherwise
+// the node reports the cache's filesystem separately (split) and each must hold its
+// own. It is the whole decision, so that a test needs to fill no filesystem.
+func bakeRoomProblem(nodeName, boxID string, used, free, imageFree int64, split bool) string {
+	const advice = "free that much space on the node (`box rm <id> --yes` deletes the disk of a box you no longer " +
+		"need), or bake a box with a smaller disk"
+	copyNeeds := used + bakeCloneGrowthBytes
+	imageNeeds := used
+	if !split && free >= copyNeeds+imageNeeds {
+		return ""
+	}
+	if split && free >= copyNeeds && imageFree >= imageNeeds {
+		return ""
+	}
+	if split {
+		return fmt.Sprintf("node %s has %s free where a bake writes the copy of the box's disk and %s free on the "+
+			"filesystem of its image cache, and a bake of box %s needs %s for the copy and %s for the image: %s",
+			nodeName, humanBytes(free), humanBytes(imageFree), boxID, humanBytes(copyNeeds), humanBytes(imageNeeds),
+			advice)
+	}
+	return fmt.Sprintf("node %s has %s free where a bake writes the copy of the box's disk, and a bake of box %s "+
+		"needs %s for the copy and %s for the image, both there: %s",
+		nodeName, humanBytes(free), boxID, humanBytes(copyNeeds), humanBytes(imageNeeds), advice)
+}
+
+// checkBakeRoom refuses a bake whose copy or image would not fit on its node: a
+// clone is a full copy of the box's disk and the compression writes a disk of its
+// own, so the node must hold both.
 func (a *App) checkBakeRoom(ctx context.Context, box BoxRecord, spec BoxSpec) error {
 	if box.NodeID == "" {
 		return nil
@@ -346,23 +383,40 @@ func (a *App) checkBakeRoom(ctx context.Context, box BoxRecord, spec BoxSpec) er
 			continue
 		}
 		used := int64(0)
+		// A clone a killed bake left behind is the driver's to delete before it
+		// measures, and nobody else can: its room counts as free here, or a full
+		// node would refuse every later bake of this box.
+		leftover := int64(0)
 		for _, disk := range node.Disks {
 			if disk.BoxID == box.ID {
 				used = disk.UsedBytes
+			}
+			if isBakeCloneOf(disk.BoxID, box.ID) {
+				leftover += disk.UsedBytes
 			}
 		}
 		if used == 0 || node.DiskFreeBytes == 0 {
 			return nil // the driver reports neither yet: the bake checks the room itself
 		}
-		if node.DiskFreeBytes < used {
-			return errorf("node %s has %s free where a bake writes the copy of the box's disk, and the copy of box "+
-				"%s's disk needs %s: a bake clones the disk before it seals it. Free that much space on the node "+
-				"(`box rm <id> --yes` deletes the disk of a box you no longer need), or bake a box with a smaller "+
-				"disk", node.Name, humanBytes(node.DiskFreeBytes), box.ID, humanBytes(used))
+		// The cache's room is published only when it is a filesystem of its own;
+		// otherwise both needs come out of the Lima home's.
+		if problem := bakeRoomProblem(node.Name, box.ID, used, node.DiskFreeBytes+leftover,
+			node.ImageCacheFreeBytes, node.ImageCacheFreeBytes > 0); problem != "" {
+			return errorf("%s", problem)
 		}
 		return nil
 	}
 	return nil
+}
+
+// isBakeCloneOf reports whether an instance is a bake's clone of a box: its name
+// is <box id>-bake-<n>, the one the driver gives it.
+func isBakeCloneOf(instance, boxID string) bool {
+	n, ok := strings.CutPrefix(instance, boxID+"-bake-")
+	if !ok || n == "" {
+		return false
+	}
+	return strings.Trim(n, "0123456789") == ""
 }
 
 // bakeJobSpecFor is the job spec of a box's bake.

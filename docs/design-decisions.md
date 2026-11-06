@@ -400,7 +400,8 @@ from what the box looked like from outside.
   what it can see, register work and read what came of it. So the bake is a batch
   job of the box driver -- a task, which is what Nomad schedules, reports and stops,
   with a log when it fails -- and the CLI's part is the seal's gate inside the box,
-  the room for the copy, the stop, the registration, the wait and the start again.
+  the room for the copy and the image, the stop, the registration, the wait and the
+  start again.
   A bake that is stopped removes its temporary file and its clone before the task
   ends, so no half image and no copy of a box's disk stays in a cache; a bake that
   ran leaves a record and a file, not an allocation to keep.

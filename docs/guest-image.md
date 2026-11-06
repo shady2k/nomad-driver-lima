@@ -312,9 +312,15 @@ while it runs, and it starts again afterwards.
    would run: a turn running or a preparation in progress is refused there, with
    nothing stopped. That question cannot be asked of the clone, whose `boxd` is a
    fresh daemon that knows nothing of the box's turn.
-2. The node must have room for the copy. A clone is a full copy of the disk file,
-   written on the same Lima home, so less free space there than the box's disk
-   occupies refuses the bake with both numbers.
+2. The node must have room for the copy and for the image. A clone is a full copy
+   of the disk file, written on the Lima home, and it is booted once, so it writes
+   about 1 GiB more before the seal trims it; the compression then writes a
+   compressed disk of at most about the disk's size into the image cache. A node
+   with less room refuses the bake with all three numbers, before anything is
+   stopped. When the image cache is on another filesystem than the Lima home, each
+   must hold its own need: the driver publishes that room as
+   `driver.box.disk.image_cache_free_bytes`, and leaves the attribute out when the
+   cache is on the Lima home's filesystem, where the two come out of one pool.
 3. The box is stopped, and a batch job `box-bake-<box id>` of the driver mounts the
    box's volume -- which also places it on the node that holds the disk. The mount
    is read-write, although the task only reads: Nomad places a read-only request of

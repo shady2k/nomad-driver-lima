@@ -64,6 +64,15 @@ with a job or a stored description is named with its state from there -- a stopp
 box is `stopped`, and the line reads "no box task, and the cluster knows this box as
 stopped" -- and only a VM that is neither is an orphan.
 
+The free room of a node is the free room of the filesystem that holds its Lima
+home, which is where a box's disk and a bake's copy of it are written. A node whose
+image cache is on another filesystem also reports that room, as
+`disk_image_cache_free_bytes` in `--json` (the node attribute
+`driver.box.disk.image_cache_free_bytes`), because a bake writes the image there
+and the two needs do not share one pool. The field is left out when the cache is
+under the Lima home, and then a bake's copy and image both come out of
+`disk_free_bytes`.
+
 ### `box images`
 
 The images a box can be created from, newest first -- the base images published in
@@ -166,9 +175,10 @@ A bake is refused, with a sentence that says why, when:
   boxd cannot be baked;
 - a turn runs in the box, or a preparation is in progress: the seal would refuse
   it, and the box is asked before anything is stopped;
-- the node has less free space where the bake writes the copy than the box's disk
-  occupies: a bake clones the disk before it seals it, and the refusal names both
-  numbers;
+- the node cannot hold both the copy of the box's disk and the image: a bake
+  clones the disk before it seals it and compresses that copy, and the refusal
+  says how much room there is, how much the copy needs and how much the image may
+  need, and names the directory or directories;
 - `--recipe` and `--no-recipe` are both given: they say opposite things.
 
 A bake destroys nothing, so it asks nothing: `--yes` is not one of its flags. A
@@ -194,7 +204,11 @@ The steps, in this order:
    stopped. The check happens here because the clone's own boxd is a fresh daemon
    and cannot know about the box's turn. A box that is already stopped skips this
    step: it has no turn to lose.
-2. The room on the node, against the space the box's disk occupies there.
+2. The room on the node, against the space the box's disk occupies there: the
+   clone's copy plus the 1 GiB a booted clone writes before the seal trims it,
+   and the image the compression writes beside it. The two come out of one pool
+   when the Lima home and the image cache are on one filesystem, and each of its
+   own otherwise.
 3. `box stop`, on the path `box stop` takes, which records that the box was
    running: a clone of a running box is a copy of a disk being written.
 4. The batch job `box-bake-<id>`, which mounts the box's volume -- the volume also

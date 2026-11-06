@@ -35,6 +35,11 @@ const (
 	// it, so `box bake` reads this to refuse a copy that does not fit -- with a
 	// sentence, before it stops the box.
 	diskFreeBytes = diskAttributePrefix + "free_bytes"
+	// diskImageCacheFreeBytes is the space free on the filesystem of the image
+	// cache, and it is published only when that is a filesystem of its own: a bake
+	// writes the image there too, and an absent attribute means the cache is on
+	// the filesystem of the Lima home, out of the same room.
+	diskImageCacheFreeBytes = diskAttributePrefix + "image_cache_free_bytes"
 )
 
 // DiskUsage is the host footprint of one box disk.
@@ -99,13 +104,25 @@ func boxDiskUsages(instances []*limactl.Instance) []DiskUsage {
 	return out
 }
 
-// setDiskFree publishes the space free where this node writes its box disks.
+// setDiskFree publishes the space free where this node writes its box disks, and
+// where it writes their images when that is another filesystem.
 //
-// It is one statfs per fingerprint.
-func setDiskFree(fp *drivers.Fingerprint, limaHome string) {
+// It is at most one stat, one comparison and two statfs per fingerprint. A cache on
+// the filesystem of the Lima home is not published: a reader then takes the two out
+// of one number, which is what the node does.
+func setDiskFree(fp *drivers.Fingerprint, limaHome, imageCacheDir string) {
 	free, err := box.FreeBytes(limaHome)
 	if err != nil {
 		return
 	}
 	fp.Attributes[diskFreeBytes] = structs.NewStringAttribute(strconv.FormatInt(free, 10))
+	same, err := box.SameFilesystem(limaHome, imageCacheDir)
+	if err != nil || same {
+		return
+	}
+	cacheFree, err := box.FreeBytes(imageCacheDir)
+	if err != nil {
+		return
+	}
+	fp.Attributes[diskImageCacheFreeBytes] = structs.NewStringAttribute(strconv.FormatInt(cacheFree, 10))
 }

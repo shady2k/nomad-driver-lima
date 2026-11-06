@@ -252,7 +252,7 @@ func isPerBoxKey(key string) bool {
 		return true
 	}
 	switch key {
-	case diskTotalUsed, diskTotalVirtual, diskFreeBytes:
+	case diskTotalUsed, diskTotalVirtual, diskFreeBytes, diskImageCacheFreeBytes:
 		return false
 	}
 	return strings.HasPrefix(key, diskAttributePrefix)
@@ -341,7 +341,7 @@ func (d *Driver) fingerprintOnce(ctx context.Context) *drivers.Fingerprint {
 	// What each box disk really occupies on this host, per box and in total, and
 	// how much room is left where a bake copies a disk.
 	setDiskUsage(fp, instances)
-	setDiskFree(fp, d.config.LimaHome)
+	setDiskFree(fp, d.config.LimaHome, d.config.ImageCacheDir)
 	// Every live VM with its size and whether a task owns it: `box capacity`
 	// counts the ones Nomad does not.
 	setInstanceAttributes(fp, instanceInfos(instances, d.tasks.BoxIDs()))

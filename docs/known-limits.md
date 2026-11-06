@@ -205,10 +205,14 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   again, and a box that was stopped stays stopped. It is not usable while the bake
   runs: the job clones the disk, boots the clone, seals it and compresses the
   result.
-- **A bake needs room on the node for a second copy of the disk.** The clone is a
-  full copy of the disk file, written beside it in the node's Lima home, so a node
-  with less free space there than the box's disk occupies refuses the bake, and the
-  refusal names both numbers.
+- **A bake needs room on the node for a second copy of the disk and for the
+  image.** The clone is a full copy of the disk file, written beside it in the
+  node's Lima home, plus about 1 GiB a booted clone writes before the seal trims
+  it; the compression writes a compressed disk of at most about the disk's size
+  into the image cache. A node that cannot hold both refuses the bake before
+  anything is stopped, and the refusal says how much room there is and how much
+  each needs. The two needs share one filesystem when the image cache is under the
+  Lima home, and each must fit on its own when it is not.
 - **The clone path is measured on qemu only.** `limactl clone` was measured with
   Lima 2.2.0 on qemu: a full copy of a stopped instance's disk, a new hostname, no
   snapshot. The same bake on a Mac's vz has not been run end to end, so run it

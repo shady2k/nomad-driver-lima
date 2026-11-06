@@ -68,6 +68,10 @@ const (
 	// disks to (the Lima home): a bake copies a whole disk there before it seals
 	// it, so this is the number that decides whether it can.
 	boxDiskFreeAttr = boxDiskAttrPrefix + "free_bytes"
+	// boxDiskImageCacheFreeAttr is the space free on the filesystem of the image
+	// cache, and the driver publishes it only when that is a filesystem of its
+	// own: otherwise a bake's image comes out of the room boxDiskFreeAttr reports.
+	boxDiskImageCacheFreeAttr = boxDiskAttrPrefix + "image_cache_free_bytes"
 )
 
 // boxDisksFromAttributes reads the driver's per-box disk attributes of a node.
@@ -92,6 +96,9 @@ func boxDisksFromAttributes(attrs map[string]string) (disks []BoxDisk, totalUsed
 			totalUsed, sawTotalUsed = n, true
 		case rest == "virtual_bytes":
 			totalVirtual, sawTotalVirtual = n, true
+		case rest == "image_cache_free_bytes":
+			// The room of the image cache's own filesystem, not the footprint of
+			// a disk: it is no box, and BuildCapacity reads it separately.
 		case strings.HasSuffix(rest, boxDiskUsedSuffix) || strings.HasSuffix(rest, boxDiskVirtualSuffix):
 			isUsed := strings.HasSuffix(rest, boxDiskUsedSuffix)
 			id := strings.TrimSuffix(strings.TrimSuffix(rest, boxDiskUsedSuffix), boxDiskVirtualSuffix)
@@ -310,6 +317,10 @@ type NodeCapacity struct {
 	// DiskFreeBytes is the space free on the filesystem the node writes its box
 	// disks to, as the box driver measures it: a bake copies a whole disk there.
 	DiskFreeBytes int64 `json:"disk_free_bytes"`
+	// ImageCacheFreeBytes is the space free on the filesystem of the node's image
+	// cache, and it is zero when that is the filesystem of the Lima home: a bake
+	// then writes both the copy and the image out of DiskFreeBytes.
+	ImageCacheFreeBytes int64 `json:"disk_image_cache_free_bytes,omitempty"`
 	// Instances is every live Lima instance on the node, with its size and
 	// whether a running task owns it.
 	Instances []BoxInstance `json:"box_instances,omitempty"`
@@ -430,6 +441,7 @@ func BuildCapacity(node *api.Node, allocs []*api.Allocation) *NodeCapacity {
 	}
 	cap.Disks, cap.DiskUsedBytes, cap.DiskVirtualBytes = boxDisksFromAttributes(attrs)
 	cap.DiskFreeBytes, _ = strconv.ParseInt(strings.TrimSpace(attrs[boxDiskFreeAttr]), 10, 64)
+	cap.ImageCacheFreeBytes, _ = strconv.ParseInt(strings.TrimSpace(attrs[boxDiskImageCacheFreeAttr]), 10, 64)
 	cap.Instances = boxInstancesFromAttributes(attrs)
 	// A box Nomad has a running allocation for is accounted for, whatever the
 	// driver's task flag says: that flag is a fingerprint (30 s) old, and right

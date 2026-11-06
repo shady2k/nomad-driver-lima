@@ -34,10 +34,96 @@ const (
 	bakeCloneStopTimeout = 3 * time.Minute
 )
 
-// bakeFreeBytes measures the room a bake's copy of a disk needs on this node. A
-// test replaces it: the answer is about the real filesystem, and a test cannot
-// fill one.
-var bakeFreeBytes = box.FreeBytes
+// bakeCloneGrowth is what a booted clone writes on top of the copy of the box's
+// disk before the seal trims it: systemd starts, boxd writes its state, and the
+// seal records what it removed. The CLI holds the same number (bakeCloneGrowthBytes),
+// because it refuses the same bake before the box is stopped.
+const bakeCloneGrowth = int64(1) << 30
+
+// The room a bake's copy of a disk and its image need is measured with these. A
+// test replaces them: the answers are about the real filesystems, and a test
+// cannot fill one.
+var (
+	bakeFreeBytes           = box.FreeBytes
+	bakeImageCacheFreeBytes = box.FreeBytes
+	bakeSameFilesystem      = box.SameFilesystem
+)
+
+// bakeRoom is what a bake of one box needs of a node, and what the node has.
+//
+// The clone is a copy of the box's disk written in the Lima home, and it is booted
+// once, so it writes a little more before the seal trims it. The image is another
+// disk's worth in the image cache: `qemu-img convert -c` reads the clone's disk and
+// writes a compressed qcow2 of at most about that size. When both directories are
+// on one filesystem the three numbers come out of one pool; otherwise each
+// directory must hold its own.
+type bakeRoom struct {
+	// Used is what the box's disk occupies: the size of the clone's copy.
+	Used int64
+	// LimaHome is where the clone's disk is written, ImageCache where the image is.
+	LimaHome   string
+	ImageCache string
+	// LimaFree is the room on the filesystem of LimaHome, ImageCacheFree the room
+	// on the image cache's, which is measured only when it has one of its own.
+	LimaFree       int64
+	ImageCacheFree int64
+	// SameFilesystem says both directories are on one filesystem, so both needs
+	// come out of LimaFree.
+	SameFilesystem bool
+}
+
+// copyNeeds is the room the clone takes: the copy of the disk plus what a booted
+// clone writes before the seal trims it.
+func (r bakeRoom) copyNeeds() int64 { return r.Used + bakeCloneGrowth }
+
+// imageNeeds is the room the image may take: the compressed disk is at most about
+// the size of the disk it comes from.
+func (r bakeRoom) imageNeeds() int64 { return r.Used }
+
+// problem returns why the bake does not fit on this node, in a sentence, or "" when
+// it does. It is the whole decision, so that a test needs to fill no filesystem.
+func (r bakeRoom) problem(id string) string {
+	const advice = "free space on the node, or bake a box with a smaller disk"
+	if r.SameFilesystem {
+		if r.LimaFree >= r.copyNeeds()+r.imageNeeds() {
+			return ""
+		}
+		return fmt.Sprintf("this node has %s free on the filesystem of its Lima home %s, where a bake of box %s "+
+			"writes both the copy of its disk and the image in %s, and it needs %s for the copy and %s for the "+
+			"image: %s", humanSize(r.LimaFree), r.LimaHome, id, r.ImageCache, humanSize(r.copyNeeds()),
+			humanSize(r.imageNeeds()), advice)
+	}
+	if r.LimaFree >= r.copyNeeds() && r.ImageCacheFree >= r.imageNeeds() {
+		return ""
+	}
+	return fmt.Sprintf("this node has %s free on the filesystem of its Lima home %s and %s free on the one of its "+
+		"image cache %s, and a bake of box %s needs %s for the copy of its disk and %s for the image: %s",
+		humanSize(r.LimaFree), r.LimaHome, humanSize(r.ImageCacheFree), r.ImageCache, id,
+		humanSize(r.copyNeeds()), humanSize(r.imageNeeds()), advice)
+}
+
+// bakeRoomOf measures what this node has for a bake of one box.
+func (d *Driver) bakeRoomOf(used int64) (bakeRoom, error) {
+	opts := d.boxm.Options()
+	room := bakeRoom{Used: used, LimaHome: opts.LimaHome, ImageCache: opts.ImageCacheDir}
+	free, err := bakeFreeBytes(room.LimaHome)
+	if err != nil {
+		return room, err
+	}
+	room.LimaFree = free
+	same, err := bakeSameFilesystem(room.LimaHome, room.ImageCache)
+	if err != nil {
+		return room, err
+	}
+	room.SameFilesystem = same
+	if same {
+		return room, nil
+	}
+	if room.ImageCacheFree, err = bakeImageCacheFreeBytes(room.ImageCache); err != nil {
+		return room, err
+	}
+	return room, nil
+}
 
 // bakeImage runs a bake: clone, start, seal, stop, compress, and delete the clone.
 func (d *Driver) bakeImage(ctx context.Context, h *taskHandle) *drivers.ExitResult {
@@ -90,20 +176,9 @@ func (d *Driver) bakeImage(ctx context.Context, h *taskHandle) *drivers.ExitResu
 		return fail("cannot put the platform bundle on this node: %v", err)
 	}
 
-	// The copy needs room: a clone is a full copy of the disk file.
-	if used, ok := box.DiskUsed(h.diskPath); ok {
-		free, err := bakeFreeBytes(d.boxm.Options().LimaHome)
-		if err != nil {
-			step("cannot measure the free space on this node (%v); cloning anyway", err)
-		} else if free < used {
-			return fail("this node has %s free on the filesystem of its Lima home and the copy of box %s's disk "+
-				"needs %s: a bake clones the disk before it seals it. Free space on the node, or bake the box on a "+
-				"node with room", humanSize(free), id, humanSize(used))
-		}
-	}
-
-	// A clone a killed bake left behind is removed here: it holds a copy of this
-	// box's disk, and nothing will ever seal it.
+	// A clone a killed bake left behind goes first: it holds a copy of this box's
+	// disk, and nothing will ever seal it. Its room would make the check below
+	// refuse a bake that fits.
 	left, err := d.boxm.BakeClones(ctx, id)
 	if err != nil {
 		return fail("cannot look for clones of box %s on this node: %v", id, err)
@@ -115,6 +190,16 @@ func (d *Driver) bakeImage(ctx context.Context, h *taskHandle) *drivers.ExitResu
 				"Remove it on the node with `limactl delete %s` as the driver's runtime user", id, name, err, name)
 		}
 		step("removed the clone %s that a previous bake of box %s left behind", name, id)
+	}
+	// Both the copy and the image need room: a clone is a full copy of the disk
+	// file, and the compression writes a compressed disk of its own.
+	if used, ok := box.DiskUsed(h.diskPath); ok {
+		room, err := d.bakeRoomOf(used)
+		if err != nil {
+			step("cannot measure the free space on this node (%v); cloning and compressing anyway", err)
+		} else if problem := room.problem(id); problem != "" {
+			return fail("%s", problem)
+		}
 	}
 	name := box.NextBakeCloneName(id, left)
 

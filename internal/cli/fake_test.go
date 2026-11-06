@@ -566,8 +566,8 @@ func (c *fakeCluster) addNodeDiskLocked(nodeID, boxID string, used, virtual int6
 			totalUsed = n
 		case rest == "virtual_bytes":
 			totalVirtual = n
-		case rest == "free_bytes":
-			// The room left on the filesystem, not the footprint of a disk.
+		case rest == "free_bytes", rest == "image_cache_free_bytes":
+			// The room left on a filesystem, not the footprint of a disk.
 		case strings.HasSuffix(rest, ".used_bytes"):
 			totalUsed += n
 		case strings.HasSuffix(rest, ".virtual_bytes"):

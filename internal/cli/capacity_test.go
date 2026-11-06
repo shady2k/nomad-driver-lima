@@ -119,6 +119,31 @@ func TestBoxDisksFromAttributes(t *testing.T) {
 	require.Zero(t, virtual)
 }
 
+// TestImageCacheRoomIsNoBoxsDisk: the room of the image cache's filesystem shares
+// the prefix of the per-box disk attributes, and it is the node's, not a box's: it
+// must not appear as a box, and it must not be added to the footprint.
+func TestImageCacheRoomIsNoBoxsDisk(t *testing.T) {
+	cluster := newFakeCluster()
+	node := withDisks(cluster.addNode("node-1", "node-1", "amd64", 12000, 11961, 150000),
+		"dev1", 200<<20, int64(8)<<30)
+	node.Attributes[boxDiskFreeAttr] = strconv.FormatInt(5<<30, 10)
+	node.Attributes[boxDiskImageCacheFreeAttr] = strconv.FormatInt(3<<30, 10)
+
+	disks, used, virtual := boxDisksFromAttributes(node.Attributes)
+	require.Len(t, disks, 1, "the image cache's room is no box's disk: %v", disks)
+	require.Equal(t, "dev1", disks[0].BoxID)
+	require.Equal(t, int64(200<<20), used)
+	require.Equal(t, int64(8)<<30, virtual)
+
+	cap := BuildCapacity(node, nil)
+	require.NotNil(t, cap)
+	require.Len(t, cap.Disks, 1)
+	require.Equal(t, int64(200<<20), cap.DiskUsedBytes)
+	require.Equal(t, int64(5<<30), cap.DiskFreeBytes)
+	require.Equal(t, int64(3<<30), cap.ImageCacheFreeBytes,
+		"the image cache's own room is the node's, and it is read")
+}
+
 // TestShareNoteNamesWhatIsOverAQuarter: the note says what the box takes of the
 // node it runs on, and says nothing about a resource it leaves alone. It is a
 // note, so a box that fits and a box that does not both come back from the same

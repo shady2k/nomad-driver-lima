@@ -220,6 +220,115 @@ func TestBakeRefusesACopyThatDoesNotFit(t *testing.T) {
 	require.Zero(t, callCount(ta, "RegisterJob box-bake"), "nothing is registered")
 }
 
+// TestBakeCountsALeftoverCloneAsRoom: the clone a killed bake left is deleted by
+// the driver before it measures, so its disk must not refuse the bake here.
+func TestBakeCountsALeftoverCloneAsRoom(t *testing.T) {
+	const used = int64(300 << 20)
+	const both = used + bakeCloneGrowthBytes + used
+	for _, tc := range []struct {
+		name    string
+		clone   string
+		refuses bool
+	}{
+		{name: "this box's clone frees its room", clone: "dev1-bake-1"},
+		{name: "another box's clone does not", clone: "dev1-other-bake-1", refuses: true},
+		{name: "a box named like a clone without a number does not", clone: "dev1-bake-x", refuses: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, platformIndexJSON)
+			ta.addBoxSpec(t, goodProjectSpec())
+			ta.sealMayRun()
+			ta.cluster.mu.Lock()
+			ta.cluster.addNodeDiskLocked("node-1", tc.clone, used, 8<<30)
+			ta.cluster.nodes["node-1"].Attributes[boxDiskAttrPrefix+"free_bytes"] = strconv.FormatInt(both-used, 10)
+			ta.cluster.mu.Unlock()
+
+			rc := ta.run(t, "bake", "dev1", "--name", "project")
+			if tc.refuses {
+				require.Equal(t, ExitError, rc)
+				require.Contains(t, ta.errOut.String(), "free where a bake writes the copy")
+				require.Zero(t, callCount(ta, "StopJob box-dev1"))
+				return
+			}
+			require.NotContains(t, ta.errOut.String(), "free where a bake writes the copy")
+			require.NotZero(t, callCount(ta, "RegisterJob box-bake"), "the bake goes on to the driver")
+		})
+	}
+}
+
+// TestBakeNeedsRoomForTheCopyAndTheImage: a bake writes the copy of the disk and
+// then the image beside it, so the node must hold both: one filesystem holds the
+// sum, and a node whose image cache is a filesystem of its own must hold each.
+func TestBakeNeedsRoomForTheCopyAndTheImage(t *testing.T) {
+	const used = int64(300 << 20) // what addBoxSpec makes the box's disk occupy
+	const copyNeed = used + bakeCloneGrowthBytes
+	const both = copyNeed + used
+	for _, tc := range []struct {
+		name      string
+		limaFree  int64
+		cacheFree int64
+		refuses   bool
+		refusal   []string
+	}{
+		{
+			name:     "one filesystem, exactly enough",
+			limaFree: both,
+		},
+		{
+			name:     "one filesystem, one byte short",
+			limaFree: both - 1,
+			refuses:  true,
+			refusal:  []string{"free where a bake writes the copy", "needs", humanBytes(copyNeed), humanBytes(used)},
+		},
+		{
+			name:      "two filesystems, the Lima home one byte short",
+			limaFree:  copyNeed - 1,
+			cacheFree: used,
+			refuses:   true,
+			refusal:   []string{"free where a bake writes the copy", "image cache", "needs"},
+		},
+		{
+			name:      "two filesystems, the image cache one byte short",
+			limaFree:  copyNeed,
+			cacheFree: used - 1,
+			refuses:   true,
+			refusal:   []string{"free where a bake writes the copy", "image cache"},
+		},
+		{
+			name:      "two filesystems, each exactly enough",
+			limaFree:  copyNeed,
+			cacheFree: used,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, platformIndexJSON)
+			ta.addBoxSpec(t, goodProjectSpec())
+			ta.finishWorkJobs(t, bakeDetails(), "")
+			ta.sealMayRun()
+			ta.cluster.mu.Lock()
+			attrs := ta.cluster.nodes["node-1"].Attributes
+			attrs[boxDiskFreeAttr] = strconv.FormatInt(tc.limaFree, 10)
+			if tc.cacheFree > 0 {
+				attrs[boxDiskImageCacheFreeAttr] = strconv.FormatInt(tc.cacheFree, 10)
+			}
+			ta.cluster.mu.Unlock()
+
+			rc := ta.run(t, "bake", "dev1", "--name", "project")
+			if !tc.refuses {
+				require.Equal(t, ExitOK, rc, ta.errOut.String())
+				require.True(t, callCount(ta, "RegisterJob box-bake-dev1") > 0, "the bake is registered")
+				return
+			}
+			require.Equal(t, ExitError, rc, ta.errOut.String())
+			for _, want := range tc.refusal {
+				require.Contains(t, ta.errOut.String(), want)
+			}
+			require.Zero(t, callCount(ta, "StopJob box-dev1"), "the refusal comes before anything is stopped")
+			require.Zero(t, callCount(ta, "RegisterJob box-bake"), "nothing is registered")
+		})
+	}
+}
+
 // TestBakeTakesNoYes: nothing is destroyed any more, so the flag that said "seal
 // it anyway" is gone.
 func TestBakeTakesNoYes(t *testing.T) {

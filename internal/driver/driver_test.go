@@ -34,6 +34,14 @@ func newTestDriver(t *testing.T, f *fakelima.Fake) *Driver {
 // files root is the same directory before and after the restart.
 func newTestDriverAt(t *testing.T, f *fakelima.Fake, filesRoot string) *Driver {
 	t.Helper()
+	return newTestDriverWithCache(t, f, filesRoot, filepath.Join(f.Home, "_images"))
+}
+
+// newTestDriverWithCache is a driver whose image cache is cacheDir: a node whose
+// cache is on a filesystem of its own reports that room, and one whose cache is
+// under its Lima home does not.
+func newTestDriverWithCache(t *testing.T, f *fakelima.Fake, filesRoot, cacheDir string) *Driver {
+	t.Helper()
 	d := NewDriver(context.Background(), hclog.NewNullLogger())
 	t.Cleanup(func() { _ = d.Shutdown(context.Background()) })
 
@@ -41,7 +49,7 @@ func newTestDriverAt(t *testing.T, f *fakelima.Fake, filesRoot string) *Driver {
 		LimactlPath:       f.Bin,
 		LimaHome:          f.Home,
 		FilesRoot:         filesRoot,
-		ImageCacheDir:     filepath.Join(f.Home, "_images"),
+		ImageCacheDir:     cacheDir,
 		MemoryOverheadMiB: 150,
 		VMType:            "qemu",
 	}

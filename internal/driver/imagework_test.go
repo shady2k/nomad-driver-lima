@@ -257,6 +257,111 @@ func TestBakeRefusesACopyThatDoesNotFit(t *testing.T) {
 	require.False(t, f.HasCall(t, "clone"), "nothing is cloned when the copy does not fit")
 }
 
+// TestBakeRoomProblem is the whole decision of both refusals, in one pool of room
+// and in two: no filesystem is filled, so the boundary is one byte.
+func TestBakeRoomProblem(t *testing.T) {
+	const gib = int64(1) << 30
+	const used = int64(2) << 30 // a box disk of 2 GiB
+	copyNeed, imageNeed := used+bakeCloneGrowth, used
+	room := func(free int64) bakeRoom {
+		return bakeRoom{Used: used, LimaHome: "/lima", ImageCache: "/lima/_image-cache",
+			LimaFree: free, SameFilesystem: true}
+	}
+	split := func(limaFree, cacheFree int64) bakeRoom {
+		return bakeRoom{Used: used, LimaHome: "/lima", ImageCache: "/dev/shm/cache",
+			LimaFree: limaFree, ImageCacheFree: cacheFree}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		room    bakeRoom
+		fits    bool
+		message []string
+	}{
+		{
+			name: "one filesystem, exactly enough",
+			room: room(copyNeed + imageNeed),
+			fits: true,
+		},
+		{
+			name: "one filesystem, one byte short",
+			room: room(copyNeed + imageNeed - 1),
+			fits: false,
+			// The sentence names the room, both needs and the directory they come
+			// out of.
+			message: []string{"free on the filesystem", "needs", humanSize(copyNeed + imageNeed - 1), humanSize(copyNeed),
+				humanSize(imageNeed), "/lima", "smaller disk"},
+		},
+		{
+			name: "one filesystem, room for the copy only",
+			room: room(copyNeed),
+			fits: false,
+		},
+		{
+			name: "two filesystems, each exactly enough",
+			room: split(copyNeed, imageNeed),
+			fits: true,
+		},
+		{
+			name:    "two filesystems, the Lima home short",
+			room:    split(copyNeed-1, gib),
+			fits:    false,
+			message: []string{"free on the filesystem", "needs", "/lima", "/dev/shm/cache", humanSize(imageNeed)},
+		},
+		{
+			name:    "two filesystems, the image cache short",
+			room:    split(gib, imageNeed-1),
+			fits:    false,
+			message: []string{"free on the filesystem", "needs", "/dev/shm/cache", "smaller disk"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			problem := tc.room.problem("box1")
+			if tc.fits {
+				require.Empty(t, problem)
+				return
+			}
+			require.NotEmpty(t, problem)
+			for _, want := range tc.message {
+				require.Contains(t, problem, want)
+			}
+		})
+	}
+}
+
+// TestBakeRemovesTheLeftoverBeforeTheRoomCheck: the clone a killed bake left holds
+// a copy of the disk, so it is removed before the room is measured -- a node with
+// room only after that removal bakes.
+func TestBakeRemovesTheLeftoverBeforeTheRoomCheck(t *testing.T) {
+	d, _, f, vol := bakeSetup(t, fakeQEMUImg(t, okQEMUImg), "QFI\xfb\x00\x00\x00\x03 disk\n")
+	require.NoError(t, os.MkdirAll(f.InstanceDir("box1-bake-1"), 0o755))
+	require.NoError(t, os.WriteFile(f.DiskPath("box1-bake-1"), []byte("STALE COPY"), 0o644))
+	f.SetState(t, "box1-bake-1", map[string]any{"status": "Stopped"})
+
+	// The room is measured once, and by then the leftover must be gone: a bake
+	// that fits only after its removal bakes.
+	used, ok := box.DiskUsed(f.DiskPath("box1"))
+	require.True(t, ok)
+	measured := 0
+	oldFree, oldSame := bakeFreeBytes, bakeSameFilesystem
+	bakeFreeBytes = func(string) (int64, error) {
+		measured++
+		_, err := os.Stat(f.DiskPath("box1-bake-1"))
+		require.True(t, os.IsNotExist(err), "the leftover clone is removed before the room is measured")
+		return 2*used + bakeCloneGrowth, nil
+	}
+	bakeSameFilesystem = func(string, string) (bool, error) { return true, nil }
+	t.Cleanup(func() { bakeFreeBytes, bakeSameFilesystem = oldFree, oldSame })
+
+	tc, _ := bakeTaskConfig(t, vol)
+	_, _, err := d.StartTask(tc)
+	require.NoError(t, err)
+	res := waitExit(t, d, "task1", 60*time.Second)
+	require.True(t, res.Successful(), "the bake exited %+v", res)
+	require.Equal(t, 1, measured)
+	require.True(t, f.HasCall(t, "clone --tty=false --mount-none box1 box1-bake-2"), f.Calls(t))
+}
+
 // TestBakeDeletesTheCloneWhenTheSealFails: a failed seal leaves the box alone and
 // takes the clone with it, so no copy of the box stays on the node.
 func TestBakeDeletesTheCloneWhenTheSealFails(t *testing.T) {
