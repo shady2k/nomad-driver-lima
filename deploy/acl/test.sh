@@ -74,6 +74,7 @@ cleanup() {
   fi
   exit $status
 }
+trap cleanup EXIT
 
 main() {
   command -v curl >/dev/null 2>&1 || die "curl is required"
@@ -103,7 +104,9 @@ EOF
 
   log "starting nomad agent -dev -acl-enabled on $ADDR"
   (
-    echo $$ >"$WORK/agent.pid"
+    # $BASHPID, not $$: in a subshell $$ is the script, and the agent would
+    # outlive the test on its port.
+    echo "$BASHPID" >"$WORK/agent.pid"
     exec "$NOMAD" agent -dev -config "$WORK/agent.hcl" >>"$WORK/agent.log" 2>&1
   ) &
   local deadline=$((SECONDS + 60))

@@ -228,6 +228,14 @@ cmd_check() {
   expect "box capacity: list the nodes" GET "/v1/nodes" 200
   expect "box ls: list the host volumes" GET "/v1/volumes?type=host&namespace=$NS" 200
   expect "box executors show: read the executors variable" GET "/v1/var/nomad/jobs/box-executors?namespace=$NS" "200 404"
+  # A box's description and its clock are variables below nomad/jobs/box-<id>.
+  # `box create` deletes the clock before it creates anything, so a token that
+  # may touch the description but not the clock refuses every new box. The probe
+  # id has an underscore, which no box id may have, so it never names a real box.
+  local probe_box="nomad/jobs/box-_acl-probe"
+  expect "box ls, box start: read the description of a box" GET "/v1/var/$probe_box/spec?namespace=$NS" "200 404"
+  expect "box create, box rm: read the clock of a box" GET "/v1/var/$probe_box/stopped?namespace=$NS" "200 404"
+  expect "box ls, box status: read the stopped-box term" GET "/v1/var/nomad/jobs/box-reap?namespace=$NS" "200 404"
 
   node=$(curl -sS --max-time 30 -H "X-Nomad-Token: $token" "$NOMAD_ADDR/v1/nodes" \
     | python3 -c 'import json,sys
@@ -251,6 +259,17 @@ print(nodes[0]["ID"] if nodes else "")' 2>/dev/null || true)
   fi
 
   if $write_probe; then
+    # The description and the clock of a box nobody can create (see probe_box):
+    # written, read and deleted again, as create, start and rm do.
+    local kind name
+    for kind in spec stopped; do
+      name=description
+      [[ $kind == stopped ]] && name=clock
+      expect "box create, box start: write the $name of a box" PUT "/v1/var/$probe_box/$kind?namespace=$NS" 200 \
+        '{"Items":{"acl-probe":"1"}}'
+      expect "box rm, box create: delete the $name of a box" DELETE "/v1/var/$probe_box/$kind?namespace=$NS" "200 204"
+    done
+
     # Writes the variable and puts it back (or deletes it if it did not exist).
     # This is the probe that proves `box executors set` works; run it only on a
     # cluster you may touch.
