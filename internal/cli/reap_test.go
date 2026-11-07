@@ -214,9 +214,9 @@ func TestReapKeepsTheDiskOfAPendingBox(t *testing.T) {
 // unreadable state is never "stopped".
 func TestReapNeverDeletesWhatItCannotRead(t *testing.T) {
 	cases := []struct {
-		name  string
+		name   string
 		break_ func(ta *testApp)
-		want  string
+		want   string
 	}{
 		{
 			name:   "the job cannot be read",

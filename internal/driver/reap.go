@@ -37,7 +37,7 @@ import (
 // taskAPIVars are the two variables the client sets for a task that has a
 // workload identity (client/taskenv: WorkloadToken, UnixAddr).
 const (
-	envTaskAPIAddr = "NOMAD_UNIX_ADDR"
+	envTaskAPIAddr  = "NOMAD_UNIX_ADDR"
 	envTaskAPIToken = "NOMAD_TOKEN"
 )
 
