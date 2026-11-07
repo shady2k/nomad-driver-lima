@@ -196,6 +196,10 @@ func (a *App) reapBox(ctx context.Context, id string, volume *api.HostVolumeStub
 		// the two places that say so (the other is `box start`).
 		out.Outcome = reapRunning
 		out.Note = why
+		// A dry run only looks: the clock stays for the pass that really runs.
+		if dryRun {
+			return out
+		}
 		if _, err := a.clearBoxClock(ctx, id); err != nil {
 			out.Note = joinNotes(why, "and its clock could not be cleared: "+oneLine(err.Error(), 200))
 		}

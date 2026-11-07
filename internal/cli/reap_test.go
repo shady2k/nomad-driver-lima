@@ -457,6 +457,53 @@ func TestReapDryRunDeletesNothing(t *testing.T) {
 	require.False(t, ok, "a dry run writes no clock")
 }
 
+// TestReapDryRunChangesNothing: a dry run is what an operator runs to look at a
+// pass before trusting it, so it asks Nomad only questions, whatever state a box
+// is in. The list names what may be asked, so a write added on any path fails
+// here without this test having to know about it.
+func TestReapDryRunChangesNothing(t *testing.T) {
+	ta := newReapApp(t)
+	ta.addBox(t, "running")
+	ta.setReapClock(t, "running", reapNow.Add(-40*time.Hour))
+	ta.addBox(t, "due")
+	ta.stopForReap(t, "due")
+	ta.setReapClock(t, "due", reapNow.Add(-25*time.Hour))
+	ta.addBox(t, "waiting")
+	ta.stopForReap(t, "waiting")
+	ta.setReapClock(t, "waiting", reapNow.Add(-3*time.Hour))
+	ta.addBox(t, "unseen")
+	ta.stopForReap(t, "unseen")
+	due, _ := ta.reapClock(t, "due")
+	running, _ := ta.reapClock(t, "running")
+
+	ta.cluster.callsMu.Lock()
+	ta.cluster.calls = nil
+	ta.cluster.callsMu.Unlock()
+	require.Equal(t, ExitOK, ta.run(t, "reap", "--dry-run"), ta.errOut.String())
+
+	ta.cluster.callsMu.Lock()
+	calls := append([]string(nil), ta.cluster.calls...)
+	ta.cluster.callsMu.Unlock()
+	require.NotEmpty(t, calls)
+	readOnly := []string{"HostVolumes", "HostVolume ", "JobList", "Job ", "JobAllocations ", "Allocations",
+		"Allocation ", "NodeInfo ", "NodeList", "VariableRead "}
+	for _, call := range calls {
+		asks := false
+		for _, prefix := range readOnly {
+			asks = asks || strings.HasPrefix(call, prefix)
+		}
+		require.True(t, asks, "a dry run must only read, and it called %s", call)
+	}
+
+	// What an operator would see afterwards: the clocks say what they said.
+	got, ok := ta.reapClock(t, "running")
+	require.True(t, ok, "a dry run leaves the clock of a box that runs")
+	require.Equal(t, running, got)
+	got, ok = ta.reapClock(t, "due")
+	require.True(t, ok)
+	require.Equal(t, due, got)
+}
+
 // TestReapReadsAClockItCannotParseAsAFailure: a clock that is not a time is not a
 // missing clock, and not a zero one either.
 func TestReapReadsAClockItCannotParseAsAFailure(t *testing.T) {
