@@ -78,7 +78,7 @@ func (a *App) readBoxClock(ctx context.Context, id string) (boxClock, bool, erro
 	path := BoxStoppedVariable(id)
 	v, err := a.Nomad.VariableRead(ctx, path)
 	if err != nil {
-		if isNotFoundErr(err) {
+		if isConfirmedNotFound(err) {
 			return boxClock{}, false, nil
 		}
 		return boxClock{}, false, wrapf(err, "cannot read %s, the clock of box %s%s", path, id, variableDenied(err, path))

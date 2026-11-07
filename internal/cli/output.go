@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -217,6 +218,18 @@ func isNotFoundErr(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "404") || strings.Contains(strings.ToLower(msg), "not found")
+}
+
+// isConfirmedNotFound reports whether Nomad itself answered that the thing is not
+// there. isNotFoundErr also goes by the words of an error, which suits a message
+// to a person; a decision to delete a disk must not rest on them: a refused
+// connection on port 14046 has "404" in it, and a 500 can say "not found".
+func isConfirmedNotFound(err error) bool {
+	if errors.Is(err, api.ErrVariablePathNotFound) {
+		return true
+	}
+	var coded interface{ StatusCode() int }
+	return errors.As(err, &coded) && coded.StatusCode() == 404
 }
 
 // isPermissionDeniedErr reports whether Nomad answered 403.

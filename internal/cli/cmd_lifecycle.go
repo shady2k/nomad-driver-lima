@@ -277,7 +277,7 @@ func (a *App) deleteBox(ctx context.Context, box BoxRecord, timeout time.Duratio
 // it deleted.
 func (a *App) deleteBoxVolumes(ctx context.Context, box BoxRecord, timeout time.Duration) ([]string, error) {
 	id := box.ID
-	if err := a.Nomad.StopJob(ctx, BoxJobName(id), true); err != nil && !isNotFoundErr(err) {
+	if err := a.Nomad.StopJob(ctx, BoxJobName(id), true); err != nil && !isConfirmedNotFound(err) {
 		return nil, wrapf(err, "Nomad could not delete the job %s", BoxJobName(id))
 	}
 	if box.AllocationID != "" {

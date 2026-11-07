@@ -362,13 +362,13 @@ func (a *App) readReapFacts(ctx context.Context, id string) (reapFacts, error) {
 				BoxJobName(id))
 		}
 		facts.job = job
-	case isNotFoundErr(err):
+	case isConfirmedNotFound(err):
 		// Nomad's job GC deletes a dead job: the box is its disk and its clock.
 	default:
 		return facts, wrapf(err, "cannot read the job of box %s", id)
 	}
 	allocs, err := a.Nomad.JobAllocations(ctx, BoxJobName(id))
-	if err != nil && !isNotFoundErr(err) {
+	if err != nil && !isConfirmedNotFound(err) {
 		return facts, wrapf(err, "cannot read the allocations of box %s", id)
 	}
 	newest := uint64(0)

@@ -48,7 +48,7 @@ const (
 func (a *App) boxStoppedTermSetting(ctx context.Context) (time.Duration, bool, error) {
 	v, err := a.Nomad.VariableRead(ctx, boxReapVariable)
 	if err != nil {
-		if isNotFoundErr(err) {
+		if isConfirmedNotFound(err) {
 			return boxStoppedTermDefault, false, nil
 		}
 		return 0, false, wrapf(err, "cannot read %s, the cluster's stopped-box term%s",
