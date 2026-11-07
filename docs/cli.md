@@ -58,11 +58,18 @@ Each box's disk line also says which project the box belongs to
 (`(dev1 is running, project my-project)`), and the disks of `--json` carry it as
 `project`: the nodes are shared, so whose box holds a disk is part of the picture.
 
+A disk whose box is not running says when it is deleted: "its disk is deleted in
+22h", "on the next reap pass" when its term has run out, or that no pass has seen
+the box stopped yet. A stopped box is deleted 24 hours after it stopped, and so is
+an `orphan` disk with a Nomad volume.
+
 A VM with no task is an orphan to the driver after ten minutes, and that is what
 every stopped box looks like to it. So this command answers as `box ls` does: a box
 with a job or a stored description is named with its state from there -- a stopped
 box is `stopped`, and the line reads "no box task, and the cluster knows this box as
-stopped" -- and only a VM that is neither is an orphan.
+stopped" -- and only a VM that is neither is an orphan. A Lima instance with no
+Nomad volume is reported here and never removed; one with a volume is deleted by
+`box reap` like a stopped box.
 
 The free room of a node is the free room of the filesystem that holds its Lima
 home, which is where a box's disk and a bake's copy of it are written.
@@ -256,7 +263,8 @@ The steps, in this order:
    work.
 
 The box is not deleted and not emptied: it keeps its disk, its `/work` and its
-sessions, and `box rm <id> --yes` is what deletes it. The bake job is purged when
+sessions, and `box rm <id> --yes` deletes it -- or `box reap`, 24 hours after the
+box stops. The bake job is purged when
 it ends, and the task reserves the box's own CPU and memory plus a core for the
 converter, because it boots a VM as big as the box.
 
@@ -392,27 +400,28 @@ failure leaves no disk behind.
 created whatever its size, as long as the node has the room: nothing here refuses
 a box for taking a large part of a node. When a box takes more than a quarter of
 its node's CPU, memory or disk, the command says so on stderr -- `this box takes
-8 of 16 vCPU on node X; the node is shared: box stop or box rm it when the work
+8 of 16 vCPU on node X; the node is shared: box rm <id> --yes when the task
 is done` -- and the exit code is the same as without the note.
 
 Choose the size for the task when the box is created. The default (2 vCPU,
 4096 MiB, 8 GiB) is for light work without a build; a build or a test run needs
-more memory from the start. When in doubt take more: a box can be stopped, but a
-guest out of memory cannot be noticed from inside -- it freezes, `box top` and
-`box status` stop answering, and the host loses several cores -- so do not wait
-for `box top` to show a shortage. `box resize` is for growth you can see coming,
-between turns, and for a box whose guest has gone silent (it restarts it; the disk
-is kept). Give back what you do not use: `box stop` an idle box and `box rm` a
-finished one, because a reservation held by an idle box keeps someone else's work
-from starting. If there is no room, stop your own idle boxes or tell the owner --
-the refusal names them (`your idle boxes: a 2h ...`, "Projects and idle boxes") --
-or let the command wait for room itself with `--wait 30m` (below), which says on
-stderr what it is waiting for; do not sit in a retry loop.
+more memory from the start. When in doubt take more: `box resize` gives a box
+more between turns, but a guest out of memory cannot be noticed from inside -- it
+freezes, `box top` and `box status` stop answering, and the host loses several
+cores -- so do not wait for `box top` to show a shortage. `box resize` is also for
+a box whose guest has gone silent (it restarts it; the disk is kept). Give back
+what you do not use: `box rm <id> --yes` a box whose task is done, because a
+reservation held by an idle box keeps someone else's work from starting. If there
+is no room, delete your own finished boxes or tell the owner -- the refusal names
+them (`your idle boxes: a 2h ...`, "Projects and idle boxes") -- or let the command
+wait for room itself with `--wait 30m` (below), which says on stderr what it is
+waiting for; do not sit in a retry loop.
 
-A created box ends with one more line on stderr: a stopped box holds no CPU and no
-memory, `box stop <id>` gives them back, and `box start <id>` brings the box back
-with its disk and its sessions. It is advice for the moment the work pauses, and
-the exit code is the same with it and without it.
+A created box ends with one more line on stderr: it is for this task, the results
+go to git, and `box rm <id> --yes` deletes the box and its disk when the task is
+done; a box that is not running has its disk deleted 24 hours after it stopped.
+It is advice for the end of the task, and the exit code is the same with it and
+without it.
 
 An image built for bundles gets one mounted at `/opt/box` without asking: the
 newest bundle for the box's architecture. `--platform <version>` picks an older
@@ -424,7 +433,7 @@ of what its image expects.
 ### `box ls [--project NAME | --mine]`
 
 Every box with its project, state, node, allocation, image, size, the disk it
-really occupies on the host, and its sessions.
+really occupies on the host, when its disk is deleted, and its sessions.
 
 The `PROJECT` column is the project the box belongs to, and `-` for a box that
 carries no label: nothing fails for such a box. `--project NAME` shows only that
@@ -450,10 +459,21 @@ the Nomad variable `nomad/jobs/box-<id>/spec`. A disk with neither a job nor a
 description - a box made before boxes kept one - is shown as `orphan`: `box rm
 <id> --yes` deletes it, and there is no way to start it again.
 
+The `DISK UNTIL` column says when the disk of a box that is not running is
+deleted: how long is left, `due` when the term has run out and the next pass
+deletes it, `-` for a box that runs (a running box is never touched, however long
+it idles), and `not seen` for a box no pass has seen not running yet. The same two
+times are `stopped_at` and `removes_at` under `--json`, and a box with no pass yet
+has neither field: the command says so instead of inventing a time.
+
 ### `box status <id> [--events N]`
 
 One box in detail: state, task events (default 10), the platform bundle it
-mounts, the guest and its executors, the sessions, the disk.
+mounts, the guest and its executors, the sessions, the disk. A box that is not
+running also has a `disk` line: when its disk is deleted ("deleted at
+2026-11-03T11:00:00Z, 24 hours after it stopped (in 23h)"), or that no pass has
+seen it stopped yet. Under `--json` it is `disk_term` with `stopped_at`,
+`removes_at` and the sentence. A box that runs has none: it is never on a term.
 
 A session whose turn ended in an error while the executor went on working shows
 as `idle (active outside a turn)`, with `executor_active` (the seconds since its
@@ -476,23 +496,35 @@ whole of what the status had to show.
 
 ### `box stop <id> [--timeout D]` / `box start <id> [--timeout D] [--wait]`
 
-Stop keeps the disk and frees the RAM, and the box stays a box: the description
-of it is a Nomad variable (`nomad/jobs/box-<id>/spec`) that no garbage collection
-removes, so `box start` brings the same disk back tomorrow as well as in a minute.
-Start registers the stored job again, with the executor credentials that are
-staged now and the CPU reservation of the box's node; on a box that is already
-running it only refreshes that description. A node whose `cpu_overcommit`
-changed therefore takes effect at the box's next `box start`, `box resize` or
-`box upgrade`: an existing box keeps the reservation it was made with, so an
-operator can raise the variable and refill the node without touching the boxes
-already on it.
+**A box is for one task, and `box stop` is a pause, not storage.** Stop frees the
+RAM and keeps the disk for **24 hours**: a box that is not running has its disk
+deleted 24 hours after it stopped, whether you stopped it, Nomad did or it
+crashed. `box start` brings the same disk back in a minute or a day later, as long
+as the term has not run out; after that the disk is gone. There is no extension,
+no `box keep` and no per-box setting: a disk worth keeping is baked into an image
+with `box bake`. Get the results out (push a branch, or `box cp`) before the
+pause, and delete the box with `box rm <id> --yes` when the task is done.
+
+While the box exists, `box start` registers the stored job again, with the
+executor credentials that are staged now and the CPU reservation of the box's
+node; on a box that is already running it only refreshes that description. The
+description is the Nomad variable `nomad/jobs/box-<id>/spec`, which no garbage
+collection removes, so a start works after Nomad has collected the dead job. A
+node whose `cpu_overcommit` changed takes effect at the box's next `box start`,
+`box resize` or `box upgrade`: an existing box keeps the reservation it was made
+with, so an operator can raise the variable and refill the node without touching
+the boxes already on it.
 
 ### `box rm <id> [--yes] [--timeout D]`
 
 Deletes the box **and its disk**: the VM is stopped, the instance deleted, the
-volume and its directory removed, and the stored description deleted with it. It
-works when Nomad no longer has the job, and on an `orphan` disk. It asks first
-unless `--yes` is given, and it refuses to ask from a non-interactive shell.
+volume and its directory removed, and the stored description and the stopped
+clock of the box deleted with it. It works when Nomad no longer has the job, and
+on an `orphan` disk. It asks first unless `--yes` is given, and it refuses to ask
+from a non-interactive shell.
+
+This is the last step of a task: push the results to git (or copy them out with
+`box cp`) first, then delete the box, because nothing on the disk survives it.
 
 When the disk is deleted and the description cannot be, the command says it is
 **partial** instead of reporting a failure of the whole: the box is gone, the
@@ -506,6 +538,38 @@ and `box start dev1` would find a box with no disk. Delete the record with
 `nomad var delete nomad/jobs/box-dev1/spec` (Nomad could not delete the variable
 nomad/jobs/box-dev1/spec: Permission denied)
 ```
+
+### `box reap [--dry-run]`
+
+One pass over the cluster that deletes the disks of the boxes whose term ran out:
+a box that is not running has its disk deleted 24 hours after it stopped. It is
+the backstop for an agent that forgot to delete its box, not the normal path: the
+normal path is `box rm <id> --yes`.
+
+The pass is run every 15 minutes by the periodic Nomad job `reap-boxes`, which is a
+task of the box driver (deploy/reap-boxes.nomad.hcl, deploy/acl/box-reap.policy.hcl).
+Its name is outside `box-<id>` on purpose: a job named `box-reap` would be a box of
+the id `reap` and could be taken for one.
+`box reap` runs the same pass by hand, from the coordinator; `box reap --dry-run`
+lists what the next pass would delete and when, and changes nothing -- not even
+the clock of a box no pass has seen yet.
+
+At the first pass that sees a box not running it writes the time into the Nomad
+variable `nomad/jobs/box-<id>/stopped`. Every way a box can stop is covered
+because the pass looks at Nomad, not at how the box was stopped: `box stop`,
+`nomad job stop`, a crash and the stop a bake makes all leave a box that is not
+running. `box start` deletes that variable before it registers the job, and so
+does `box rm`, so a box that comes back is not on a term any more, and a disk can
+only ever be deleted late, never early. `broken` boxes and `orphan` disks with a
+Nomad volume count as not running and get the same 24 hours.
+
+One deletion prints one line, with the box, the size of its disk and how long it
+had been stopped; the task log of the periodic job is the record. The pass does
+not delete, and tries again on the next one, when it cannot read the state of the
+box, when the box has a live allocation, when a bake or publish on its disk is
+alive, or when its node is down or unreachable. A box that fails to delete does
+not stop the pass over the others, and the command exits `1` so the job's log says
+so.
 
 ### `box resize <id> [--cpus N] [--memory-mib N] [--disk-gib N] [--timeout D] [--wait]`
 
@@ -566,15 +630,15 @@ may be stopped is its owner's call.
 **Hints, on stderr, in the moments that matter.** None of them changes an exit
 code, and none of them stops anything:
 
-- `box create` says, after the box is created, that a stopped box holds no CPU and
-  no memory and that `box start` brings it back;
+- `box create` says, after the box is created, that the box is for this task, that
+  the results go to git, and that `box rm <id> --yes` deletes the box and its disk;
 - `box wait` says so once a turn has finished and no session of the box has a turn
   running;
 - `box create` refused for lack of room names the idle boxes on the nodes it could
   have used, grouped by whether they are the caller's to stop:
 
   ```
-  your idle boxes: a 2h, b 40m (box stop <id>)
+  your idle boxes: a 2h, b 40m (box rm <id> --yes when their task is done)
   other idle boxes: c 3h (not yours to stop)
   ```
 
@@ -801,13 +865,13 @@ guest reports that no session of the box has a turn running, the wait ends with
 one line on stderr:
 
 ```
-box stop dev1 if you do not need this box for a while: its disk and sessions are kept
+box rm dev1 --yes when the task is done: the box and its disk go with it. `box stop dev1` is only a pause, and a box that is not running loses its disk 24 hours after it stopped
 ```
 
-It is advice for the next moment the box is not needed, not a change of the
-result: the exit code is the turn's, and `--json` prints nothing on stderr. A
-turn still running in another session, a guest that does not answer and a boxd too
-old to report its activity say nothing.
+It is advice for the moment the box is done, not a change of the result: the exit
+code is the turn's, and `--json` prints nothing on stderr. A turn still running in
+another session, a guest that does not answer and a boxd too old to report its
+activity say nothing.
 
 ### `box events <id> <session> [--since N] [--limit N] [--tail N] [-f]`
 

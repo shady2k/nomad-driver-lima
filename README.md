@@ -16,8 +16,8 @@ goes with it.
 
 - **driver** `box` — the Nomad task driver (`cmd/box-driver`)
 - **volume plugin** `box-volume` — creates and deletes a box's disk (`cmd/box-volume`)
-- **CLI** `box` — create, start, stop, rm, resize, run, ssh, cp, logs, status,
-  capacity, sessions, executor credentials (`cmd/box`)
+- **CLI** `box` — create, start, stop, rm, reap, resize, run, ssh, cp, logs,
+  status, capacity, sessions, executor credentials (`cmd/box`)
 - **guest daemon** `boxd` / `boxctl` — runs agent sessions inside the box and
   answers the CLI (`cmd/boxd`)
 - **skill** — a `box` skill an agent reads, packaged as a Claude Code plugin
@@ -37,7 +37,7 @@ Where a role only needs a minimum, that minimum is named.
 - **TLS and ACLs as your installation sets them.** The client role configures
   both (`nomad_tls_*`, `nomad_acl_*`); the CLI reads the usual `NOMAD_*`
   variables.
-- **A management token, once.** `acl.yml` writes the two box policies, and only a
+- **A management token, once.** `acl.yml` writes the box policies, and only a
   management token may. It belongs to the operator; no node and no coordinator
   gets it.
 - The servers are **not** part of this kit: the clients join servers you already
@@ -454,9 +454,9 @@ box session new dev1 --executor prime --model <provider>/<model> --title "first 
 box send dev1 s-7f3a2c "make the tests pass; the repository is in /root/repo"
 box wait dev1 s-7f3a2c --timeout 15m          # returns the moment the turn ends
 
-box stop dev1                                # keep the disk, free the RAM
-box start dev1                               # same disk, also after Nomad's job GC
-box rm dev1 --yes                            # the disk is deleted
+box stop dev1                                # a pause: free the RAM; the disk goes in 24 hours
+box start dev1                               # same disk, if its 24 hours have not run out
+box rm dev1 --yes                            # the last step of the task: box and disk are deleted
 ```
 
 ### 11. Acceptance

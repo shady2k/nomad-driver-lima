@@ -27,7 +27,7 @@ creating a new one.
 | --- | --- |
 | `cmd/box-driver` (`internal/driver`) | the Nomad task driver named `box`: it turns one task into one Lima VM |
 | `cmd/box-volume` (`internal/volume`) | the Nomad dynamic host volume plugin `box-volume`: it creates and deletes a box's disk directory, and deletes the VM that owns it |
-| `cmd/box` (`internal/cli`) | the CLI: create, start, stop, rm, resize, upgrade, run, ssh, cp, logs, status, capacity, sessions, executors, images, platform bundles |
+| `cmd/box` (`internal/cli`) | the CLI: create, start, stop, rm, reap, resize, upgrade, run, ssh, cp, logs, status, capacity, sessions, executors, images, platform bundles |
 | `cmd/boxd` (`internal/boxd`) | `boxd` and `boxctl` in one binary: the guest daemon that runs agent sessions, and the client the CLI execs |
 | `internal/box` | one Lima instance: the disk on a volume, the image cache, resize, the cgroup memory cap |
 | `internal/limactl` | a thin wrapper over `limactl` (list, create, start, stop, edit, shell, copy) |

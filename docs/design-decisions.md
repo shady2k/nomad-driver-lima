@@ -360,12 +360,12 @@ from what the box looked like from outside.
   task `box`) plus the volume `box-<id>` mounted as `disk`. `box start`
   re-renders the job from its own spec, so a hand-written box job is normalised on
   start. That is deliberate: one definition, in the CLI.
-- **A box is its volume; Nomad's job is not a durable record of a stopped box.**
-  `box stop` leaves the job dead, and Nomad's job GC deletes a dead job with its
-  history after `job_gc_threshold` (4 hours by default). On a real cluster a box
-  stopped at 02:16 answered "no such box" at 07:13, with its disk intact, while
-  `box stop` had promised that `box start` brings it back. The rendered job is
-  therefore kept where GC does not reach: the Nomad variable
+- **A box is its volume while it exists; Nomad's job is not a durable record of a
+  stopped box.** `box stop` leaves the job dead, and Nomad's job GC deletes a dead
+  job with its history after `job_gc_threshold` (4 hours by default). On a real
+  cluster a box stopped at 02:16 answered "no such box" at 07:13, with its disk
+  intact, while `box stop` had promised that `box start` brings it back. The
+  rendered job is therefore kept where GC does not reach: the Nomad variable
   `nomad/jobs/box-<id>/spec`, written by `create`, `start`, `resize` and `upgrade`
   and deleted by `rm`. It is the job as JSON and nothing else, so it holds no
   secret: a credential reaches a box through a template that names a Vault path or
@@ -373,6 +373,9 @@ from what the box looked like from outside.
   Rejected: keeping the description in a file on the coordinator (a second state,
   which the coordinator's loss would take with it) and in the volume directory on
   the node (a node-side API the CLI does not have).
+  This promise ends with the 24 hour term of a stopped box (next section): the
+  volume and the description are the box while it exists, and not a place to keep
+  data between tasks.
 - **A box with a description, a volume and no job is `stopped`; a volume with
   neither is an orphan.** A box made before descriptions existed cannot be started
   once its job is collected: there is no way back, so `box start` refuses it and
@@ -401,6 +404,70 @@ from what the box looked like from outside.
   instance (state, cpus, memory, disk, whether a task owns it) and `box capacity`
   subtracts the running instances without a running task from the node's free cpu
   and memory, reporting them as uncounted.
+
+## A box is for one task
+
+- **A box is for one task, and its disk is not storage.** The agent hands the
+  results over through git and deletes the box itself with `box rm <id> --yes`.
+  A box that is not running has its disk deleted 24 hours after it stopped; the
+  pass that does it (`box reap`, a periodic job of the box driver) is the
+  backstop for a box whose agent forgot, not the normal path. This supersedes "a
+  box is its volume" wherever that read as a promise to keep a disk forever: the
+  volume is the box while the box exists.
+  The decision was forced by a node of the owner's: eight stopped boxes held
+  86.5 GiB on it, free space fell below the disk reserve, and no box could be
+  created -- the stopped boxes blocked the very work they were kept for. The
+  owner decided against reopening it, so nothing here offers a way round the term.
+  Rejected: an extension and a `box keep` (the same "keep it for later" with more
+  state to reason about); a per-box or per-cluster term (the rule is the product);
+  deleting at `box stop` (a stop must stay a short pause that frees memory); and
+  an idle limit on running boxes (a running box may be doing a task for days).
+  A disk worth keeping is baked into an image with `box bake`, which is where the
+  rule points. `broken` boxes and orphan disks that have a Nomad volume count as
+  not running and get the same 24 hours. A Lima instance with no Nomad volume is
+  out of reach of the pass: the driver reports it and the operator removes it.
+- **The clock is a Nomad variable written by looking at the cluster, not by
+  `box stop`.** `nomad/jobs/box-<id>/stopped` holds the first time a pass saw the
+  box not running. It covers `box stop`, `nomad job stop`, a crash and the stop a
+  bake makes, because all of them leave a box that is not running, and it lives
+  where Nomad's job GC does not reach. `box start` deletes it with a check on the
+  index it read, and so does `box rm`; a pass that sees a box running deletes it
+  too. So the disk can only ever be deleted late, never early.
+- **The pass claims the clock before it deletes the disk.** The claim is a
+  checked update of the variable to `state = "deleting"`, and `box start` refuses
+  a claimed clock instead of registering a job on a disk that is going. Either
+  the start's checked delete comes first (the claim conflicts and the pass leaves
+  the disk alone), or the claim comes first (the start's delete conflicts, it
+  reads the clock again, sees the claim and stops). Nomad has no transaction
+  across a variable and a volume, so this is as far as the race can be closed;
+  the window that remains is inside one command's own two calls, not between the
+  two commands.
+  A deletion that fails puts the clock back to `stopped` at the time it had, so
+  the next pass tries again instead of leaving an unclaimed disk.
+- **The pass runs as a task of the box driver, not as a daemon.** There is no
+  daemon, the coordinator may be a laptop, and a Mac node may have neither
+  `exec` nor `docker`. A periodic Nomad job (`reap-boxes`, every 15 minutes,
+  `prohibit_overlap`) runs `reap` as a task of the driver, as a bake and a
+  publish do, and the task reaches the Nomad API through the task API with its
+  own workload identity (`NOMAD_UNIX_ADDR`, `NOMAD_TOKEN`) under
+  `deploy/acl/box-reap.policy.hcl`. The CLI calls the same pass, so `box reap`
+  and the job cannot drift.
+- **The task API's socket is a host path when the pass dials it.** Nomad builds
+  `NOMAD_UNIX_ADDR` for the filesystem isolation the driver declares, and this
+  driver declares image isolation, so the task environment says
+  `unix:///secrets/api.sock`: the path a process inside the task's filesystem
+  would use. The pass runs in the plugin process on the host, where the same
+  socket is `<alloc dir>/<task>/secrets/api.sock` (measured with Nomad 2.0.7;
+  `TaskConfig.AllocDir` is the alloc directory and the task directory is
+  `<alloc dir>/<task>`). The driver therefore reads the token and the address from
+  the task's own environment, `TaskConfig.Env`, and maps the socket path; reading
+  the plugin's `os.Getenv` would be wrong twice over -- one environment for every
+  task of the node, and a token that belongs to whoever started the client.
+- **A box deleted by the pass leaves nothing to find.** The job is purged and the
+  disk, the description and the clock are deleted with it. `box start` of that id
+  answers "no such box", exactly as for an id never used; the task log of
+  `reap-boxes` is the record. Telling the two apart would need a record that lives
+  forever for every box, which is a worse cost than the ambiguity.
 
 ## ACLs and credentials
 

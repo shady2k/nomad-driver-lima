@@ -36,16 +36,21 @@ box cp ./results dev1:/root/in            # files in
 box cp dev1:/root/repo/out ./out          # files out
 box status dev1                           # state, task events, guest, sessions, disk used
 box top dev1 -f                           # CPU, iowait, load, memory, disk, the biggest processes
-box stop dev1                             # keep the disk, free the RAM
-box start dev1                            # same disk, same files, also tomorrow
-box rm dev1 --yes                         # the disk is deleted
+box stop dev1                             # a pause: free the RAM, and the disk goes in 24 hours
+box start dev1                            # same disk, if its 24 hours have not run out
+box rm dev1 --yes                         # the last step of the task: the box and its disk are deleted
 ```
 
-A box is its disk, not its Nomad job: `box stop` keeps a description of the box
-in a Nomad variable, so `box start` brings it back on the same disk after Nomad
-has collected the dead job (its GC runs every few hours). A disk nothing
-describes - a box made before boxes kept one - shows as `orphan` and cannot be
-started again.
+**A box is for one task.** Its disk is not storage: it is deleted with the box,
+and a box that is not running loses its disk 24 hours after it stopped. Push the
+work to git (or copy it out with `box cp`) before the task ends, then delete the
+box with `box rm <id> --yes`: that is the last step of the task, and it is yours
+to run. A disk worth keeping is baked into an image with `box bake`.
+
+`box stop` keeps a description of the box in a Nomad variable, so `box start`
+brings it back on the same disk after Nomad has collected the dead job (its GC
+runs every few hours) - but only while the 24 hours have not run out. A disk
+nothing describes shows as `orphan`, and it is deleted on the same term.
 
 `--json` on any command gives one JSON document to parse.
 
@@ -158,17 +163,18 @@ current base image, not an old one.
   size for the task when you create the box. The default (2 vCPU, 4096 MiB,
   8 GiB) is for light work without a build; a build or a test run needs more
   memory from the start, so say `--memory-mib 8192` (or more) when the task
-  compiles, installs or runs tests. When in doubt take more: a box can be
-  stopped, but a guest out of memory cannot be noticed from inside -- it
+  compiles, installs or runs tests. When in doubt take more: `box resize` gives
+  a box more between turns, but a guest out of memory cannot be noticed from
+  inside -- it
   freezes, `box top` and `box status` stop answering, and the host loses several
   cores -- so do not wait for `box top` to show a shortage. `box resize` is for
   growth you can see coming, between turns, and for a box whose guest has gone
   silent (it restarts it; the disk is kept). Several boxes are fine when the
   work is really parallel and there is room; work on one task usually fits in
-  sessions of one box. Give back what you do not use: `box stop` an idle box and
-  `box rm` a finished one, because a reservation held by an idle box keeps
-  someone else's work from starting. If there is no room, stop your own idle
-  boxes or tell the owner, or let `box create --wait 30m` wait for room and say
+  sessions of one box. Give back what you do not use: `box rm` a finished box, and
+  `box stop` one you are pausing, because a reservation held by an idle box
+  keeps someone else's work from starting. If there is no room, delete your own
+  finished boxes or tell the owner, or let `box create --wait 30m` wait for room and say
   on stderr what it waits for; do not sit in a retry loop. A box that takes more
   than a quarter of its node is created anyway and said on stderr: it fits, it is
   yours to watch.
@@ -183,14 +189,16 @@ current base image, not an old one.
   `box session new` for a second piece of work instead of a second VM: the
   disk, the toolchain and the git checkout are shared, the executors are not.
   Sessions are cheap; VMs are not.
-- **Give the node back.** `box stop` a box whose work is paused and `box rm
-  <id> --yes` one that is finished: an idle box holds its node's memory, and the
-  node is shared with every other agent's boxes.
-- **A box you do not need right now: stop it.** `box stop <id>`, even for an
-  hour: its disk, its environment and its sessions are kept, and `box start`
-  brings it back. An idle box holds its memory and its cores, and another agent
-  may be refused because of it. A finished box: `box rm <id> --yes`. Boxes of
-  other projects are not yours to stop: ask their owner.
+- **Give the node back.** `box stop` a box for a short pause and `box rm <id>
+  --yes` one that is finished: an idle box holds its node's memory, and the node
+  is shared with every other agent's boxes.
+- **`box stop` is a pause, never storage.** It frees the RAM and keeps the disk
+  for 24 hours. After that the disk is deleted, whether you stopped the box,
+  Nomad did or it crashed; `box start <id>` before then brings the box back on
+  the same disk, and after it there is nothing left to start. Get the work out
+  (git, or `box cp`) before the pause. There is no extension, no `box keep` and
+  no per-box setting: a disk worth keeping is baked into an image with `box
+  bake`. Boxes of other projects are not yours to stop: ask their owner.
 - **A box's project is `box create --project NAME`, else `BOX_PROJECT`, else the
   name of this directory's git repository.** It is a label, not a protection:
   `box ls --mine` shows your boxes, `box ls --project NAME` another project's, and
@@ -237,27 +245,34 @@ current base image, not an old one.
   and do not start a session after a step that failed. Give `box run` its own
   `--timeout D` instead of wrapping it in `timeout`: both stop the command in
   the box, but `--timeout` says so with exit 4.
-- **Results travel by git or `box cp`.** A box is disposable; its disk is not
-  backed up. Push a branch, or copy the files out with `box cp`, before you
-  stop or delete the box. `box cp` streams a tar over `alloc exec`, so it works
-  for whole directories.
+- **Results travel by git or `box cp`, before the task ends.** A box is for one
+  task and is disposable: its disk is not backed up, and a box that is not
+  running loses it 24 hours after it stopped. Push a branch, or copy the files
+  out with `box cp`, before you stop or delete the box. `box cp` streams a tar
+  over `alloc exec`, so it works for whole directories.
 - **Check a result yourself.** The agent's answer is a claim: `box run` the
   test, or `box cp` the file out, before you report the task done.
 
 ## Cleaning up
 
-A box holds its node's memory while it runs and its disk until it is deleted;
-nothing deletes it for you.
+A box is for one task. It holds its node's memory while it runs, and its disk
+until it is deleted. `box rm <id> --yes` is the last step of the task, and it is
+yours to run. A box that is not running loses its disk 24 hours after it stopped:
+stopping one is a pause, not a way to keep it.
 
 - **Your own box, task done:** move the results out (push, `box cp`), then
-  `box rm <id> --yes`. No need to ask: you created it for this task.
-- **Your own box, work paused:** `box stop <id>` frees the memory and keeps the
-  disk.
+  `box rm <id> --yes`. No need to ask: you created it for this task, and this is
+  the step that gives the disk back.
+- **Your own box, short pause:** `box stop <id>` frees the memory and starts a
+  24 hour clock. `box start <id>` before it ends brings the box back; a box
+  forgotten for a day has no disk to come back to. Only `box bake` keeps a disk.
 - **A box you did not create:** leave it alone, even when it looks abandoned;
   tell the owner its id and what `box status` says.
 - **An orphan** in `box capacity` (a VM with no box task and no description, or
   without its disk) is the operator's: the driver only reports it. Say so; do not
-  try to remove it. A box you stopped is `stopped` there, not an orphan.
+  try to remove it. A disk with a Nomad volume that nothing describes is deleted
+  like a stopped box's disk, 24 hours after a pass first saw it. A box you
+  stopped is `stopped` there, not an orphan.
 
 ## Executors
 
@@ -315,11 +330,13 @@ starts, so no key lands on a disk.
   says and the free space it names, and do not recreate the box: its disk holds
   the work, and a new box on a full node freezes the same way.
 - `Nomad could not place the box: 3 node(s) ran out of memory` - the scheduler
-  refused it. Ask for less, or stop a box you own with `box stop`.
+  refused it. Ask for less, or `box rm <id> --yes` a finished box of yours (a
+  `box stop` frees the memory too, but starts the 24 hour clock on its disk).
 - `Nomad rejected the box job ... the Nomad token needs ...` - the token lacks
   a rule, and the message names it. Tell the operator; do not retry.
 - `the box <id> is stopped` - `box start <id>` brings it back on its disk, also
-  when Nomad no longer has its job.
+  when Nomad no longer has its job, as long as it stopped less than 24 hours
+  ago: after that its disk is deleted. `box status <id>` says when.
 - `box <id> is busy: ... nothing was stopped and nothing was baked` - a turn runs
   or a preparation is in progress, and `box bake` refuses it before it stops
   anything. `box wait` for the turn, then bake again.
@@ -372,5 +389,7 @@ starts, so no key lands on a disk.
    generous `--timeout`.
 4. Read the answer from `box wait` or `box events`, check it with `box run`,
    and copy results out with `box cp` or push a branch.
-5. `box stop` when the work pauses; `box rm --yes` when the task is done. A
+5. `box rm --yes` when the task is done, after its results are in git: that is
+   the last step, and it gives the disk back. `box stop` only for a pause of
+   hours, because a box that is not running loses its disk in 24 hours. A
    finished box left running keeps someone else's work from starting.
