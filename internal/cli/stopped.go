@@ -51,8 +51,6 @@ const (
 	boxStoppedStateStopped = "stopped"
 	// boxStoppedStateDeleting is a clock a pass has claimed: the disk is going.
 	boxStoppedStateDeleting = "deleting"
-	// boxStoppedSchema is the version of the document stored in the clock.
-	boxStoppedSchema = 1
 )
 
 // BoxStoppedVariable returns the Nomad Variable path that holds the time a box
