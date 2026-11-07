@@ -181,19 +181,28 @@ func (a *App) newContact(box string) *contactOfBox {
 // lost, and whether this stream was the first to notice.
 func (c *contactOfBox) lost(stream string, err error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.down[stream] {
+		c.mu.Unlock()
 		return
 	}
 	c.down[stream] = true
 	if len(c.down) > 1 {
+		c.mu.Unlock()
 		return
 	}
 	c.since = c.a.now()
+	c.mu.Unlock()
 	// One line, the same words every time: the cause is in what the attempt
 	// reports when the box does not come back, and a coordinator greps this one.
 	_ = err
-	c.a.note("lost contact with the box; retrying")
+	// A VM qemu has paused looks exactly like a guest that stopped answering, so
+	// the line that says contact is lost is where the reason belongs.
+	message := "lost contact with the box"
+	if note := c.a.vmNoteFor(context.Background(), c.box); note != "" {
+		c.a.note("%s. Retrying", withVMNote(message, note))
+		return
+	}
+	c.a.note("%s; retrying", message)
 }
 
 // back records that a stream is in contact again and prints the line once, when

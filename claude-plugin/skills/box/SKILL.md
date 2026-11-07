@@ -131,6 +131,14 @@ current base image, not an old one.
   node that has room, Linux or Mac. A task that needs a platform says so:
   `--arch amd64` or `--arch arm64`. `box capacity` lists both, never add their
   free resources together.
+- **Only one of `box capacity`'s disk columns is free space.** `FREE disk
+  (driver)` is what the node can really write, and the number a box's disk grows
+  into. `DISK free/total (scheduler)` is Nomad's scheduling arithmetic, its total
+  less what the node reserves and allocates: it stays large on a node whose
+  filesystem is full, so never read it as free space. A node below the reserve it
+  keeps for itself says `LOW DISK` on stderr and takes no new box. `unknown` in
+  the driver column means that node's driver did not measure its filesystem --
+  not that the node is roomy.
 - **Take the newest image** from `box images`; an older one lacks fixes. Then
   look for a project image of your project: a `project` row whose parent is the
   newest base image already holds the toolchain and the caches, and a box from it
@@ -290,6 +298,22 @@ starts, so no key lands on a disk.
 - `no node can take this box: ...` - the message says which node failed and
   why (no memory, no `box-volume` plugin, wrong architecture). Fix the request,
   or let `box create --wait 30m` wait for room instead of retrying in a loop.
+- `node <name> is low on disk: ... is free where it keeps ... in reserve` - the
+  node has less free space than it keeps for itself, so it takes no new box:
+  `box create` is refused, and `box start` and a `box resize --disk-gib` that
+  grows a disk are refused with "Nothing was changed". Nothing is wrong with your
+  box; the node is out of room. Free space on it (`box rm <id> --yes` a box you
+  no longer need, yours or one whose owner agreed), or tell the owner: this is
+  the one thing you cannot fix from inside a box. Do not retry in a loop, and do
+  not recreate a box whose start was refused - it has the same disk.
+- `the VM of box <id> is paused by qemu (io-error)` - the host could not write
+  the box's disk, and qemu froze the VM. Nomad and `box ls` still say the box
+  runs, so `box run`, `box exec`, `box session` and `box wait` find a guest that
+  does not answer. Stop retrying: the guest cannot answer until the VM is
+  resumed, and resuming is the operator's decision (`cont` in qemu's monitor, see
+  `docs/known-limits.md`). Tell the owner with the box id, what `box status <id>`
+  says and the free space it names, and do not recreate the box: its disk holds
+  the work, and a new box on a full node freezes the same way.
 - `Nomad could not place the box: 3 node(s) ran out of memory` - the scheduler
   refused it. Ask for less, or stop a box you own with `box stop`.
 - `Nomad rejected the box job ... the Nomad token needs ...` - the token lacks

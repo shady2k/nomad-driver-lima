@@ -26,6 +26,10 @@ const (
 	instanceCPUsSuffix      = ".cpus"
 	instanceMemorySuffix    = ".memory_mib"
 	instanceDiskSuffix      = ".disk_gib"
+	// instanceQEMUStateSuffix is qemu's own run state, published only for a VM
+	// qemu is not running: io-error, paused, postmigrate, ... A box that runs
+	// normally has no key here.
+	instanceQEMUStateSuffix = ".qemu_status"
 )
 
 // Values of driver.box.instance.<box-id>.task.
@@ -51,11 +55,16 @@ type InstanceInfo struct {
 	CPUs      int
 	MemoryMiB int64
 	DiskGiB   int64
+	// QEMUStatus is what qemu says it is doing, empty when qemu is running the VM
+	// normally or when its state is not known (a vz box, a VM that does not
+	// answer). It is the one place that says a full host disk froze a box.
+	QEMUStatus string
 }
 
 // instanceInfos describes every listed instance, sorted by box id. attached maps
-// a box id to the task that owns it (see taskStore.BoxIDs).
-func instanceInfos(instances []*limactl.Instance, attached map[string]string) []InstanceInfo {
+// a box id to the task that owns it (see taskStore.BoxIDs), and qemu is what qemu
+// last said about each VM (see Driver.qemuStatuses).
+func instanceInfos(instances []*limactl.Instance, attached map[string]string, qemu map[string]string) []InstanceInfo {
 	out := make([]InstanceInfo, 0, len(instances))
 	for _, inst := range instances {
 		if inst == nil || inst.Name == "" {
@@ -72,6 +81,11 @@ func instanceInfos(instances []*limactl.Instance, attached map[string]string) []
 		if _, ok := attached[inst.Name]; ok {
 			info.Task = taskRunning
 		}
+		// Only a VM qemu is not running is worth a key: a running one says nothing
+		// a reader needs, and a stale key on every box would be noise.
+		if status := qemu[inst.Name]; status != "" && status != qemuStateRunning {
+			info.QEMUStatus = status
+		}
 		out = append(out, info)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].BoxID < out[j].BoxID })
@@ -87,6 +101,9 @@ func setInstanceAttributes(fp *drivers.Fingerprint, infos []InstanceInfo) {
 		fp.Attributes[prefix+instanceCPUsSuffix] = structs.NewStringAttribute(strconv.Itoa(info.CPUs))
 		fp.Attributes[prefix+instanceMemorySuffix] = structs.NewStringAttribute(strconv.FormatInt(info.MemoryMiB, 10))
 		fp.Attributes[prefix+instanceDiskSuffix] = structs.NewStringAttribute(strconv.FormatInt(info.DiskGiB, 10))
+		if info.QEMUStatus != "" {
+			fp.Attributes[prefix+instanceQEMUStateSuffix] = structs.NewStringAttribute(info.QEMUStatus)
+		}
 	}
 }
 

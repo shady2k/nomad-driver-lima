@@ -65,7 +65,27 @@ box is `stopped`, and the line reads "no box task, and the cluster knows this bo
 stopped" -- and only a VM that is neither is an orphan.
 
 The free room of a node is the free room of the filesystem that holds its Lima
-home, which is where a box's disk and a bake's copy of it are written. A node whose
+home, which is where a box's disk and a bake's copy of it are written.
+
+**Two disk columns, and only one of them is free space.** `FREE disk (driver)` is
+the free space the node's box driver measures on that filesystem, and the number a
+box disk grows into; `unknown` means the driver has not reported it (an older
+driver, or a filesystem it could not measure), never that the node is roomy.
+`DISK free/total (scheduler)` is Nomad's scheduling arithmetic -- the node's total
+less what it reserves and what its allocations take -- and it stays large on a node
+whose filesystem is full, so it is no measure of free space. `disk_mib` in
+`--json` is that same arithmetic, kept for compatibility; the free space is
+`disk_free_bytes`, with `disk_free_known` saying whether there is one,
+`disk_total_bytes` the size of the filesystem, and `disk_reserve_bytes` the part of
+it the node keeps for itself (see `disk_reserve_gib` and `disk_reserve_percent` in
+the driver's plugin block). The summary line of the per-architecture subtotals
+gives the drivers' free space and says what Nomad's figure is, so the scheduler's
+sum is never read as free disk.
+
+A node below its reserve is printed as `LOW DISK` on stderr, with what is free,
+what it keeps back and what that means: a new box is refused there, and a running
+VM freezes when the free space reaches zero. A node whose driver did not report its
+free space is listed in one line of its own, because "unknown" is not "roomy". A node whose
 image cache is on another filesystem also reports that room, as
 `disk_image_cache_free_bytes` in `--json` (the node attribute
 `driver.box.disk.image_cache_free_bytes`), because a bake writes the image there
@@ -335,6 +355,8 @@ waits until the box is running.
 | `--project NAME` | `BOX_PROJECT`, else the git repository's name | the project the box belongs to: a label `box ls` and `box capacity` show, so an agent can tell its boxes from other projects' (see "Projects and idle boxes") |
 | `--timeout D` | 10m | how long to wait for it to run |
 | `--wait [D]` | true | wait until it is running; with a duration, also wait that long for room |
+
+A new box's job is shown in Nomad as `<project>/box-<id>`: the jobs page has no column for its meta, and the job's id stays `box-<id>` for every command and link. A box without a project keeps `box-<id>`, and a box keeps the name it was created with: a resize, an upgrade or a start does not change it.
 
 **`--wait 30m` waits for room.** `box create` refuses at once when nothing fits,
 and room is a moving target: another box finishes, another agent creates one, a

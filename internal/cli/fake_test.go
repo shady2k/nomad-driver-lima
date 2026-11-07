@@ -76,6 +76,10 @@ type fakeCluster struct {
 	jobErr error
 	// stopErr makes StopJob fail.
 	stopErr error
+	// stopLeavesAllocFailed makes StopJob leave the allocation's client status
+	// where it was when the VM failed: Nomad keeps a failed status for good, and
+	// that is what a stop of a failed box waits on.
+	stopLeavesAllocFailed bool
 	// volumeDeleteLag is how many HostVolumes calls still list a volume after
 	// it was deleted: Nomad's volume list can trail the delete.
 	volumeDeleteLag int
@@ -244,7 +248,11 @@ func (c *fakeCluster) StopJob(ctx context.Context, id string, purge bool) error 
 	job.Status = strPtr("dead")
 	for _, alloc := range c.allocs {
 		if alloc.JobID == id {
-			alloc.ClientStatus = "complete"
+			if c.stopLeavesAllocFailed {
+				alloc.ClientStatus = "failed"
+			} else {
+				alloc.ClientStatus = "complete"
+			}
 			alloc.DesiredStatus = "stop"
 			if task := alloc.TaskStates[boxTaskName]; task != nil {
 				task.State = "dead"
@@ -536,6 +544,31 @@ func (c *fakeCluster) addNode(id, name, arch string, cpuShares, memoryMB, diskMB
 	}
 	c.nodes[id] = node
 	return node
+}
+
+// setNodeDiskRoom publishes what the driver reports about the filesystem a node
+// writes its box disks to: the space free, the size of the filesystem and the part
+// of it the node keeps for itself. free < 0 removes the free space, which is a
+// driver that did not measure it.
+func (c *fakeCluster) setNodeDiskRoom(nodeID string, free, total, reserve int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	node := c.nodes[nodeID]
+	if node == nil {
+		return
+	}
+	if node.Attributes == nil {
+		node.Attributes = map[string]string{}
+	}
+	if free < 0 {
+		delete(node.Attributes, boxDiskAttrPrefix+"free_bytes")
+	} else {
+		node.Attributes[boxDiskAttrPrefix+"free_bytes"] = strconv.FormatInt(free, 10)
+	}
+	if total > 0 {
+		node.Attributes[boxDiskAttrPrefix+"total_bytes"] = strconv.FormatInt(total, 10)
+	}
+	node.Attributes[boxDiskAttrPrefix+"reserve_bytes"] = strconv.FormatInt(reserve, 10)
 }
 
 // addNodeDiskLocked publishes the driver's disk usage attributes for one box

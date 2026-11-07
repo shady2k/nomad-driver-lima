@@ -99,6 +99,11 @@ type BoxSpec struct {
 	// in its stored description. Empty means the box carries no label; the box is
 	// then shown with a "-" and nothing else changes.
 	Project string
+	// JobName is what Nomad shows as the job's name: "<project>/box-<id>" for a box
+	// created with a project, so the jobs page says whose it is, and the job id
+	// otherwise. It is decided once, when the box is created: a box keeps the name
+	// it has through a resize, an upgrade or a start.
+	JobName string
 	// MemoryOverheadMiB is added to MemoryMiB for the task resources. Zero
 	// means BoxMemoryOverheadMiB.
 	MemoryOverheadMiB int
@@ -127,6 +132,24 @@ func BoxJobName(id string) string { return boxJobPrefix + id }
 
 // BoxVolumeName returns the dynamic host volume name of a box.
 func BoxVolumeName(id string) string { return boxVolumePrefix + id }
+
+// projectJobName is the name a new box's job is shown under: its project, then
+// its job id. The id stays what every command and link uses.
+func projectJobName(project, id string) string {
+	if project == "" {
+		return ""
+	}
+	return project + "/" + BoxJobName(id)
+}
+
+// jobDisplayName is the name a box's job is registered under: the one the box
+// has, or the job id for a box that has none.
+func jobDisplayName(spec BoxSpec, jobID string) string {
+	if spec.JobName != "" {
+		return spec.JobName
+	}
+	return jobID
+}
 
 // BoxBakeJobName returns the Nomad job name of a box's bake.
 func BoxBakeJobName(id string) string { return boxBakeJobPrefix + id }
@@ -359,7 +382,7 @@ func RenderJob(spec BoxSpec) (*api.Job, error) {
 
 	job := &api.Job{
 		ID:          strPtr(jobID),
-		Name:        strPtr(jobID),
+		Name:        strPtr(jobDisplayName(spec, jobID)),
 		Type:        strPtr("service"),
 		Datacenters: []string{"*"},
 		// Datacenters are chosen by the volume: the box disk lives on one node.
@@ -462,7 +485,7 @@ func SpecFromJob(job *api.Job) (BoxSpec, error) {
 	if job == nil {
 		return BoxSpec{}, errorf("no job was returned by Nomad")
 	}
-	spec := BoxSpec{}
+	spec := BoxSpec{JobName: derefStr(job.Name, "")}
 	if job.Meta != nil {
 		spec.ID = job.Meta["box_id"]
 		spec.ImageVersion = job.Meta["image"]

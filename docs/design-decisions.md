@@ -70,6 +70,44 @@ and versions named in "What was measured".
   never from `lima.yaml`: right after create, a 4 GiB disk still showed 3 GiB of
   partition. The cost is real downtime.
 
+## A VM qemu has paused
+
+- **A full disk is read from qemu, not guessed.** When a write to a box disk
+  fails, qemu stops the VM and reports `io-error`; Nomad and Lima both go on
+  saying the box runs, and every command that talks to the guest only finds
+  silence. So the driver asks qemu itself, on the QMP socket Lima gives it
+  (`<lima_home>/<instance>/qmp.sock`, lima 2.2.0 starts qemu with a `-qmp`
+  character device there), with `qmp_capabilities` then `query-status`. QEMU
+  serves one QMP client at a time and the hostagent may hold it, so the probe is
+  bounded by a two-second deadline on the socket: a refusal, a timeout, garbage
+  and a socket that accepts and never answers all mean "unknown", never "paused",
+  and never an error that touches the task.
+- **The probe runs off the fingerprint's path.** One goroutine of the driver's own
+  asks every running qemu VM every ten seconds, each probe bounded and side by
+  side, and the fingerprint publishes what the cache holds -- a node's fingerprint
+  must not wait two seconds on a VM. The attribute is per instance and appears
+  only for a VM qemu is not running: `driver.box.instance.<box>.qemu_status`.
+  `vz` has no QMP, so a Mac reports nothing and says nothing.
+- **One event per transition, and no cause qemu did not report.** A VM that enters
+  `io-error` gets one task event (once, not once per probe) saying the host could
+  not write its disk, with the free space of the node, and a VM that leaves it
+  gets one more. `io-error` is an I/O error; a full host disk is the *usual*
+  reason for one, which is what the message says -- it does not claim qemu
+  reported a full disk.
+- **The CLI shows the state without changing the state it switches on.**
+  `BoxRecord.State` stays what Nomad reports (a frozen VM is still a box Nomad
+  runs) and qemu's state is its own field, `vm_state`, with the STATE column of
+  `box ls` printing `paused:io-error` for a person. `box status` prints the whole
+  sentence at the top, `box wait`, `box events -f` and the lost-contact line say
+  it when the guest goes quiet, and nothing resumes the VM: `cont` in qemu's
+  monitor is the operator's call, and `docs/known-limits.md` says how.
+- **A failed box is a stopped box for `box stop`.** Nomad keeps the client status
+  an allocation reached, so an allocation that failed and whose job was then
+  stopped stays `failed` for good; a stop that waited for the word `stopped`
+  waited out its whole timeout and exited 4. A terminal allocation of a stopped
+  job is `stopped` for the box (`boxRecord`), while a failed box nobody stopped
+  stays `failed`.
+
 ## A guest that stops answering
 
 Measured on a real node: a box of 2 vCPU and 2 GiB ran a large cgo build, the
@@ -181,6 +219,30 @@ from what the box looked like from outside.
   - **Known risk:** with overcommit 2 and every box busy, the node's cores are
     oversubscribed and every box runs at about half speed. That is the trade the
     operator makes; the cap keeps it from being a box that takes the node.
+- **The node keeps a disk reserve, and it is a share of the filesystem as well
+  as a number of GiB.** `disk_reserve_gib` (default 20) and
+  `disk_reserve_percent` (default 10) are made into one number,
+  `max(gib, percent of the filesystem)`; 0 for both is no reserve. A small node
+  needs a floor a box can live in, a large one needs a share of itself, and the
+  larger of the two is the only rule that is right for both. The driver publishes
+  `driver.box.disk.total_bytes` and `driver.box.disk.reserve_bytes`, so a reader
+  says what "low" means instead of guessing it, and the CLI refuses a new box on
+  a node below its reserve -- a box that starts writes to its disk at once, and a
+  node with no room left freezes the VM. It deliberately does **not** refuse a
+  restart of a box that is already on the node: that would turn a low node into a
+  node of dead boxes, and the operator is the one who decides what to stop. The
+  NaN-free shape of the number matters more than its size: an unknown filesystem
+  size keeps the GiB floor, an absent attribute is "unknown" and never "roomy".
+- **An absent disk attribute is not a zero.** A fingerprint attribute that is
+  missing parses to 0, and 0 free is a full node; the two were the same number in
+  every reader before this change, which is how a full node kept its healthy
+  face. `NodeCapacity.DiskFreeKnown` comes from the presence of the key
+  (`driver.box.disk.free_bytes`), `LowDisk()` is true only when the free space
+  and the reserve are both known and free is below reserve, and a node whose
+  driver has not measured it is listed as `unknown` and takes every box as
+  before. `box bake` uses the same distinction: a free space that was reported
+  and is zero refuses the bake before the box is stopped, while a missing one
+  leaves the check to the driver.
 - **The memory cap is a systemd user scope with `memory.max` and
   `memory.swap.max=0`.** The budget is guest RAM plus about 150 MB (qemu about
   guest RAM plus 60 MB, the hostagent about 60 MB). `memory.max` alone is soft:

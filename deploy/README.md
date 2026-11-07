@@ -251,7 +251,7 @@ no `runtime_user` to give a volume directory to, so keep the two the same.
 | file | contents |
 | --- | --- |
 | `10-base.json` | region, datacenter, node name, `data_dir`, bind/advertise, ports, the client block (servers to join, node pool, meta, reserved resources, host volumes directory), telemetry, ACL, mTLS |
-| `50-box.json` | `plugin_dir`, `client.host_volume_plugin_dir`, `client.options["driver.allowlist"]`, and the `plugin "box"` block (limactl, lima home, image cache, memory overhead, `cpu_overcommit`, vm type, `runtime_user`) |
+| `50-box.json` | `plugin_dir`, `client.host_volume_plugin_dir`, `client.options["driver.allowlist"]`, and the `plugin "box"` block (limactl, lima home, image cache, memory overhead, `cpu_overcommit`, the disk reserve, vm type, `runtime_user`) |
 | `nomad.env` (Linux) | the tokens, mode 0600, loaded with `EnvironmentFile=`; on macOS they travel in the plist's `EnvironmentVariables` |
 
 The Linux unit is `nomad.service`: `nomad agent -config /etc/nomad.d`, `Type=notify`,
@@ -289,6 +289,34 @@ box_cpu_overcommit: 2
 
 Do not raise it past what the node's memory and disk can hold: those are still
 counted in full, and a node that is full of memory is full whatever the CPU says.
+
+### The room a node keeps for itself: `box_disk_reserve_gib` and `box_disk_reserve_percent`
+
+A node whose filesystem fills up does not fail loudly: qemu stops the VM it cannot
+write to, Nomad and `box ls` go on saying the box runs, and an agent only finds a
+guest that does not answer. Nomad's own disk figure is scheduling arithmetic - its
+total less what it reserves and allocates - so it stays large on a full node and
+cannot be used to see it coming.
+
+So the driver keeps a reserve and refuses new work below it:
+
+```yaml
+# group_vars/box_nodes.yml
+box_disk_reserve_gib: 20       # the floor, in GiB (default 20)
+box_disk_reserve_percent: 10   # or the share of the filesystem (default 10)
+```
+
+The reserve is the larger of the two, and `0` for both turns it off. The driver
+measures the filesystem of `box_lima_home` and publishes
+`driver.box.disk.free_bytes`, `driver.box.disk.total_bytes` and
+`driver.box.disk.reserve_bytes`; `box capacity` prints the free space (and `LOW
+DISK` when it is below the reserve), `box create` goes to another node or refuses
+with the numbers, and `box start` and a growing `box resize` are refused with
+"nothing was changed". A restart of a box that is already on the node is never
+refused by the driver: that would turn a low node into a node of dead boxes.
+
+The variable is written into `50-box.json` even at its default, so a node says
+what it keeps instead of leaving the driver's default to be assumed.
 
 ## macOS: the launchd daemon
 

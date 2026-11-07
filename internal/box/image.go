@@ -13,15 +13,20 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // qemuImgName is the qemu-img binary EnsureImageDisk looks for when the manager
 // names none. It comes from PATH the way limactl does.
 const qemuImgName = "qemu-img"
 
-// uncompressedSuffix names the uncompressed copy of an image in the cache: it
-// sits next to the verified download and carries the same sha256 key.
-const uncompressedSuffix = ".uncompressed.qcow2"
+// UncompressedSuffix names the uncompressed copy of an image in the cache: it
+// sits next to the verified download and carries the same sha256 key. The driver
+// cleans up these copies and nothing else of the cache, so it is exported.
+const UncompressedSuffix = ".uncompressed.qcow2"
+
+// uncompressedSuffix is the same name inside this package.
+const uncompressedSuffix = UncompressedSuffix
 
 // DraftURLPrefix is the url of a project image that was baked on this node: the
 // file is in the cache under its digest, and there is nothing to download.
@@ -129,6 +134,11 @@ func (b *Box) EnsureImageDisk(ctx context.Context, url, wantSHA256 string, progr
 	}
 	dest := uncompressedPath(imagePath)
 	if st, err := os.Stat(dest); err == nil && st.Mode().IsRegular() && st.Size() > 0 {
+		now := time.Now()
+		// The copy just got used, and the driver deletes an old one it believes
+		// nothing uses: the mtime is what makes "recently used" real. A copy that
+		// cannot be touched still boots its box, so nothing fails here.
+		_ = os.Chtimes(dest, now, now)
 		b.event("image", fmt.Sprintf("Using the uncompressed image %s", filepath.Base(dest)))
 		return dest, nil
 	}

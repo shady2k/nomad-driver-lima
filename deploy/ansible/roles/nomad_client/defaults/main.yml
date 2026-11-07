@@ -169,6 +169,12 @@ nomad_box_memory_overhead_mib: '{{ box_memory_overhead_mib | default(512) }}'
 # divides its per-vCPU reservation by it. Written out even at 1, so the node says
 # what it reserves instead of leaving the driver's default to be assumed.
 nomad_box_cpu_overcommit: '{{ box_cpu_overcommit | default(1) }}'
+# The room the node keeps free on the filesystem its boxes write to: the larger of
+# the GiB floor and the share of that filesystem. Below it the node takes no new
+# box (a box that starts writes to its disk at once, and a VM qemu cannot write to
+# freezes). Written out even at the defaults, so the node says what it keeps.
+nomad_box_disk_reserve_gib: '{{ box_disk_reserve_gib | default(20) }}'
+nomad_box_disk_reserve_percent: '{{ box_disk_reserve_percent | default(10) }}'
 # The memory cap of a box: "enforce" fails a box whose cgroup scope cannot be made,
 # "off" runs it uncapped - the only possible value on macOS, which has no cgroup
 # v2. The driver works this default out by itself (aba99dc), but the v0.1.0

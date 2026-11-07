@@ -17,3 +17,13 @@ func FreeBytes(dir string) (int64, error) {
 	}
 	return int64(st.Bavail) * int64(st.Bsize), nil
 }
+
+// TotalBytes is the size of the filesystem that holds dir: what the node's disk
+// reserve is a share of, since a share of nothing is nothing.
+func TotalBytes(dir string) (int64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return 0, err
+	}
+	return int64(st.Blocks) * int64(st.Bsize), nil
+}

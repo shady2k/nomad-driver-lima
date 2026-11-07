@@ -40,6 +40,13 @@ box_install_deps: false
 # with until `box start`, `box resize` or `box upgrade`.
 # box_cpu_overcommit: 2
 
+# The room this node keeps free where its boxes write: the larger of the GiB floor
+# and the share of that filesystem. Below it a new box is refused and `box capacity`
+# says LOW DISK; a running VM freezes when the free space reaches zero. 0 for both
+# turns the reserve off.
+# box_disk_reserve_gib: 20
+# box_disk_reserve_percent: 10
+
 # ---------------------------------------------------------------- the Nomad client
 # The node name in the cluster. The node ID is not this: the ID comes from
 # nomad_data_dir, so a node keeps its ID as long as it keeps its data directory.

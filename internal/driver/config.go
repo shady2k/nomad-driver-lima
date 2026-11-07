@@ -73,6 +73,14 @@ type Config struct {
 	// from taking the node. The driver only publishes the number: the CLI divides
 	// its per-vCPU reservation by it, and Nomad then places that many more boxes.
 	CPUOvercommit float64 `codec:"cpu_overcommit"`
+	// DiskReserveGiB and DiskReservePercent are the room this node keeps free on
+	// the filesystem its boxes write to: the larger of the two, so a small node
+	// keeps a workable number of GiB and a large one keeps a share of itself.
+	// `box create`, `box start` and a growing `box resize` are refused on a node
+	// that is below it, and a running box that reaches zero freezes in qemu. 0
+	// for both turns the reserve off.
+	DiskReserveGiB     int64 `codec:"disk_reserve_gib"`
+	DiskReservePercent int64 `codec:"disk_reserve_percent"`
 
 	// identity is the resolved RuntimeUser; identityErr is why it could not be
 	// resolved. A root client without runtime_user is reported by the
@@ -125,6 +133,17 @@ var configSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 		hclspec.NewAttr("cpu_overcommit", "number", false),
 		hclspec.NewLiteral("1"),
 	),
+	// The defaults are literals here and not in validate: 0 is a value the
+	// operator asks for ("no reserve"), while a key left out means the default
+	// this node was built for.
+	"disk_reserve_gib": hclspec.NewDefault(
+		hclspec.NewAttr("disk_reserve_gib", "number", false),
+		hclspec.NewLiteral(fmt.Sprintf("%d", defaultDiskReserveGiB)),
+	),
+	"disk_reserve_percent": hclspec.NewDefault(
+		hclspec.NewAttr("disk_reserve_percent", "number", false),
+		hclspec.NewLiteral(fmt.Sprintf("%d", defaultDiskReservePercent)),
+	),
 })
 
 // validate fills in defaults and rejects configurations that cannot work.
@@ -166,6 +185,13 @@ func (c *Config) validate() error {
 	}
 	if !(c.CPUOvercommit >= 1) {
 		return fmt.Errorf("cpu_overcommit must be at least 1 (1 disables it, 2 shares a core between two vCPUs), got %v", c.CPUOvercommit)
+	}
+	if c.DiskReserveGiB < 0 || c.DiskReservePercent < 0 {
+		return fmt.Errorf("disk_reserve_gib and disk_reserve_percent must not be negative (0 for both turns the reserve off), got %d and %d",
+			c.DiskReserveGiB, c.DiskReservePercent)
+	}
+	if c.DiskReservePercent > 100 {
+		return fmt.Errorf("disk_reserve_percent must not exceed 100, got %d: a node that keeps its whole filesystem free writes no box disk", c.DiskReservePercent)
 	}
 	if c.LimaHome == "" {
 		home, err := os.UserHomeDir()

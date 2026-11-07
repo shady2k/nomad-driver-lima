@@ -395,8 +395,12 @@ func (a *App) checkBakeRoom(ctx context.Context, box BoxRecord, spec BoxSpec) er
 				leftover += disk.UsedBytes
 			}
 		}
-		if used == 0 || node.DiskFreeBytes == 0 {
-			return nil // the driver reports neither yet: the bake checks the room itself
+		if used == 0 || !node.DiskFreeKnown {
+			// The driver has not reported what this needs, so the check is left to
+			// the driver alone. A free space that WAS reported and is zero is a
+			// full node, not a missing number: a bake there stops the box and
+			// fails later, which is what this refuses.
+			return nil
 		}
 		// The cache's room is published only when it is a filesystem of its own;
 		// otherwise both needs come out of the Lima home's.

@@ -130,6 +130,16 @@ box_memory_overhead_mib: 512
 # memory and no vCPU count.
 box_cpu_overcommit: 1
 
+# The room this node keeps free on the filesystem its boxes write to, written into
+# the driver's plugin block. The reserve is the larger of these two numbers, and 0
+# for both turns it off. Below it `box create` is refused (with the numbers) and so
+# are `box start` and a growing `box resize`, because a box that starts writes to
+# its disk at once and a VM qemu cannot write to freezes in qemu while Nomad still
+# says it runs. 20 GiB: room for a box to boot and for a bake's copy of a disk; 10%:
+# a large node keeps a share of itself instead of a number it outgrew.
+box_disk_reserve_gib: 20
+box_disk_reserve_percent: 10
+
 # qemu on Linux, vz on macOS; empty means the driver's default for the OS.
 box_vm_type: ''
 

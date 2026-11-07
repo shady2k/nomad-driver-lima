@@ -82,7 +82,11 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 		return nil
 	}
 	rows := make([][]string, 0, len(nodes)+len(arches))
-	headers := []string{"NODE", "ARCH", "OS", "STATUS", "ELIGIBLE", "CPU free/total", "vCPU", "OVERCOMMIT", "MEM free/total", "DISK free/total", "BOX DISKS used", "UNCOUNTED VMs", "DRIVER", "VOLUME PLUGIN", "BOXES"}
+	// Two disk columns on purpose: Nomad's disk figure is scheduling arithmetic
+	// (a node's total less what it reserves and allocates), and the driver's free
+	// space is what the node can really write. A reader who took the first for
+	// free space was told a full node had 235 GiB.
+	headers := []string{"NODE", "ARCH", "OS", "STATUS", "ELIGIBLE", "CPU free/total", "vCPU", "OVERCOMMIT", "MEM free/total", "DISK free/total (scheduler)", "FREE disk (driver)", "BOX DISKS used", "UNCOUNTED VMs", "DRIVER", "VOLUME PLUGIN", "BOXES"}
 	for _, node := range nodes {
 		eligible := "no"
 		if node.Eligible {
@@ -112,6 +116,7 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 			humanOvercommit(node.CPUOvercommit),
 			fmt.Sprintf("%s/%s", humanMiB(node.Memory.Free), humanMiB(node.Memory.Total)),
 			fmt.Sprintf("%s/%s", humanMiB(node.Disk.Free), humanMiB(node.Disk.Total)),
+			node.freeDiskCell(),
 			diskSummary(node),
 			uncountedSummary(node),
 			driver,
@@ -175,12 +180,41 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 		}
 	}
 
+	// A node below its disk reserve takes no new box, and a box already running
+	// there freezes when the free space reaches zero: that is the line an operator
+	// has to act on, so it is said before the sums.
+	for _, node := range nodes {
+		if node.LowDisk() {
+			a.note("%s: LOW DISK — %s", node.Name, node.lowDiskSentence())
+		}
+	}
+	// A driver that has not reported its free space leaves the node's room
+	// unknown, which is not the same as roomy: say it once, so nobody reads the
+	// empty number as a healthy node.
+	var unknown []string
+	for _, node := range nodes {
+		if !node.DiskFreeKnown {
+			unknown = append(unknown, node.Name)
+		}
+	}
+	if len(unknown) > 0 {
+		a.note("%s did not report free disk space (an older driver, or a filesystem it could not measure): "+
+			"whether those nodes are low on disk is unknown, and no box is refused there for it", strings.Join(unknown, ", "))
+	}
+
 	// Architectures are never added together: a vCPU on amd64 cannot run an
 	// arm64 image. The subtotals are therefore per architecture.
 	for _, summary := range arches {
-		a.note("%s: %s with %s free memory, %s MHz free CPU, %s free disk (%d of %d ready for boxes)",
+		a.note("%s: %s with %s free memory, %s MHz free CPU (%d of %d ready for boxes)",
 			summary.Arch, describeCount(summary.Nodes, "node"), humanMiB(summary.MemoryMiB),
-			humanMHz(summary.CPUShares), humanMiB(summary.DiskMiB), summary.ReadyNodes, summary.Nodes)
+			humanMHz(summary.CPUShares), summary.ReadyNodes, summary.Nodes)
+		unknownNote := ""
+		if summary.DiskFreeUnknown > 0 {
+			unknownNote = fmt.Sprintf(" (%d node(s) did not report it)", summary.DiskFreeUnknown)
+		}
+		a.note("%s: %s free disk as the box drivers report it%s; Nomad's disk figure of %s is its scheduling "+
+			"arithmetic (node total less reserved less allocated), not free space",
+			summary.Arch, humanBytes(summary.DiskFreeBytes), unknownNote, humanMiB(summary.DiskMiB))
 	}
 	var problems []string
 	for _, node := range nodes {

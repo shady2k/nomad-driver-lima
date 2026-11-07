@@ -89,6 +89,12 @@ func (a *App) cmdStart(ctx context.Context, args []string) error {
 	// the node's overcommit may have changed since the box was created, and a
 	// start re-registers the job anyway. A resize and an upgrade do the same.
 	a.refreshCPUReservation(ctx, &spec, box.NodeID)
+	// A node below its disk reserve takes no box back on: the disk is written to
+	// as soon as the VM boots, and a node with no room left freezes it. Refused
+	// here, before the job is registered, so nothing is changed.
+	if err := a.lowDiskRefusal(ctx, box.NodeID, id, "start"); err != nil {
+		return err
+	}
 	if !*wait {
 		// The job is registered even when the command does not wait: the box
 		// starts, and `box status` shows when it is ready.
@@ -312,6 +318,7 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 			spec.MemoryMiB = *memoryMiB
 		}
 	}
+	growsDisk := false
 	if *diskGiB > 0 {
 		if *diskGiB < spec.DiskGiB {
 			return usagef("the disk of box %s is %d GiB and can only grow, not shrink to %d GiB", id, spec.DiskGiB, *diskGiB)
@@ -319,6 +326,7 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 		if *diskGiB != spec.DiskGiB {
 			out.Changes = append(out.Changes, fmt.Sprintf("disk %d -> %d GiB", spec.DiskGiB, *diskGiB))
 			spec.DiskGiB = *diskGiB
+			growsDisk = true
 		}
 	}
 	if len(out.Changes) == 0 {
@@ -326,6 +334,13 @@ func (a *App) cmdResize(ctx context.Context, args []string) error {
 		return a.printLifecycle(&out)
 	}
 	a.refreshCPUReservation(ctx, &spec, box.NodeID)
+	// A box that grows its disk needs the room to write it; a resize that only
+	// changes CPU or memory writes nothing new, and a low node still runs it.
+	if growsDisk {
+		if err := a.lowDiskRefusal(ctx, box.NodeID, id, "grow its disk"); err != nil {
+			return err
+		}
+	}
 	note := a.shareNote(ctx, box.NodeID, id, spec.CPUs, spec.MemoryMiB, spec.DiskGiB)
 
 	spec.ExecutorItems = a.executorItems(ctx)
@@ -383,6 +398,37 @@ func (a *App) shareNote(ctx context.Context, nodeID, id string, cpus, memoryMiB,
 		}
 	}
 	return ""
+}
+
+// lowDiskRefusal refuses a command that would write to a box disk on a node
+// below its disk reserve, before anything is registered or changed.
+//
+// The driver never refuses to restart a task for this: a node that is low is a
+// node whose boxes must keep running, and stopping them would turn low disk into
+// dead boxes. What a node refuses is more work on it -- a box started or grown
+// there -- and the sentence says what is free, what the node keeps back, and that
+// nothing was changed.
+func (a *App) lowDiskRefusal(ctx context.Context, nodeID, id, action string) error {
+	if nodeID == "" {
+		return nil
+	}
+	nodes, err := a.nodeCapacities(ctx)
+	if err != nil {
+		return nil // a node Nomad cannot describe is no proof of a full disk
+	}
+	for _, node := range nodes {
+		if node.NodeID != nodeID && node.Name != nodeID {
+			continue
+		}
+		if !node.LowDisk() {
+			return nil
+		}
+		return errorf("box %s cannot %s on node %s: it has %s free where it keeps %s in reserve for itself, so "+
+			"it takes no new work. Nothing was changed. Free space on the node first: `box rm <id> --yes` deletes "+
+			"the disk of a box you no longer need", id, action, node.Name, humanSpace(node.DiskFreeBytes),
+			humanSpace(node.DiskReserveBytes))
+	}
+	return nil
 }
 
 // printLifecycle writes the result of a lifecycle command.

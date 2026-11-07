@@ -265,3 +265,35 @@ func TestLimaArch(t *testing.T) {
 	require.Equal(t, "aarch64", LimaArch("arm64"))
 	require.Equal(t, "aarch64", LimaArch("aarch64"))
 }
+
+// TestJobNameIsDecidedAtCreation: a new box's job is shown under its project, and a
+// box keeps the name it has, so a re-registration of an older box changes nothing.
+func TestJobNameIsDecidedAtCreation(t *testing.T) {
+	require.Equal(t, "nocx/box-w8", projectJobName("nocx", "w8"))
+	require.Empty(t, projectJobName("", "w8"))
+
+	spec := goodSpec()
+	spec.Project = "nocx"
+	job, err := RenderJob(spec)
+	require.NoError(t, err)
+	require.Equal(t, BoxJobName(spec.ID), *job.ID)
+	require.Equal(t, BoxJobName(spec.ID), *job.Name, "a project alone renames nothing: an older box has one too")
+
+	back, err := SpecFromJob(job)
+	require.NoError(t, err)
+	again, err := RenderJob(back)
+	require.NoError(t, err)
+	require.Equal(t, *job.Name, *again.Name)
+
+	spec.JobName = projectJobName("nocx", spec.ID)
+	job, err = RenderJob(spec)
+	require.NoError(t, err)
+	require.Equal(t, BoxJobName(spec.ID), *job.ID, "the id stays what commands use")
+	require.Equal(t, "nocx/"+BoxJobName(spec.ID), *job.Name)
+
+	back, err = SpecFromJob(job)
+	require.NoError(t, err)
+	again, err = RenderJob(back)
+	require.NoError(t, err)
+	require.Equal(t, *job.Name, *again.Name, "a resize, an upgrade or a start keeps the name")
+}

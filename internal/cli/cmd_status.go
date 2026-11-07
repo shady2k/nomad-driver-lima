@@ -19,6 +19,11 @@ type statusOutput struct {
 	Sessions   []Session        `json:"sessions,omitempty"`
 	// GuestError explains why the guest could not be asked, if it could not.
 	GuestError string `json:"guest_error,omitempty"`
+	// VMNote says qemu has paused this box's VM, and why that is what a silent
+	// guest means here; NodeNote says the node itself is low on disk, even when
+	// this box is healthy.
+	VMNote   string `json:"vm_note,omitempty"`
+	NodeNote string `json:"node_note,omitempty"`
 }
 
 type statusSpec struct {
@@ -115,10 +120,27 @@ func (a *App) cmdStatus(ctx context.Context, args []string) error {
 	if nodeID == "" && out.Volume != nil {
 		nodeID = out.Volume.NodeID
 	}
-	if byBox, err := a.nodeDisks(ctx, map[string]map[string]BoxDisk{}, nodeID); err == nil {
-		if disk, ok := byBox[box.ID]; ok {
-			out.Box.DiskUsedBytes = disk.UsedBytes
-			out.Box.DiskVirtualBytes = disk.VirtualBytes
+	// One read of the box's node is what the disk's size, qemu's state and the
+	// node's own room all come from.
+	var capacity *NodeCapacity
+	if nodeID != "" {
+		if node, err := a.Nomad.NodeInfo(ctx, nodeID); err == nil {
+			capacity = BuildCapacity(node, nil)
+		}
+	}
+	if capacity != nil {
+		for _, disk := range capacity.Disks {
+			if disk.BoxID == box.ID {
+				out.Box.DiskUsedBytes = disk.UsedBytes
+				out.Box.DiskVirtualBytes = disk.VirtualBytes
+			}
+		}
+		if inst, ok := capacity.instanceState(box.ID); ok {
+			out.Box.VMState = inst.QEMUState
+			out.VMNote = vmStateSentence(box.ID, inst.QEMUState, capacity.DiskFreeBytes, capacity.DiskFreeKnown)
+		}
+		if capacity.LowDisk() {
+			out.NodeNote = capacity.lowDiskSentence()
 		}
 	}
 
@@ -224,6 +246,14 @@ func (out *statusOutput) showedNomadFacts() bool {
 func (a *App) printStatus(out *statusOutput) {
 	box := out.Box
 	a.note("box %s (job %s)", box.ID, box.Job)
+	// A VM qemu paused is the first thing a status says: Nomad's state below is
+	// still "running", and the two together are the whole story.
+	if out.VMNote != "" {
+		a.note("  PAUSED  %s", out.VMNote)
+	}
+	if out.NodeNote != "" {
+		a.note("  node    %s", out.NodeNote)
+	}
 	a.note("  state   %s", box.State)
 	if box.Node != "" {
 		a.note("  node    %s", box.Node)

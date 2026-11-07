@@ -18,6 +18,17 @@ func diskColumn(box BoxRecord) string {
 	return humanBytes(box.DiskUsedBytes)
 }
 
+// stateCell is the STATE column of `box ls`. A VM qemu has paused says so in the
+// state a person reads -- "paused:io-error" -- while the JSON keeps Nomad's state
+// and carries qemu's in a field of its own, because every command switches on the
+// state and a frozen VM is still a box Nomad runs.
+func stateCell(box BoxRecord) string {
+	if box.VMState == "" {
+		return dash(box.State)
+	}
+	return "paused:" + box.VMState
+}
+
 // lsOutput is the JSON document of `box ls`.
 type lsOutput struct {
 	Boxes []BoxRecord `json:"boxes"`
@@ -88,6 +99,9 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 			boxes[i].DiskVirtualBytes = disk.VirtualBytes
 		}
 	}
+	// What qemu says about a VM it stopped: a box the host cannot write to is
+	// "running" to Nomad and frozen in fact, and this column is where that shows.
+	a.fillVMStates(ctx, boxes)
 	// How long each running box has been idle is the one thing only its guest
 	// knows; it is asked in parallel, under the guest call bound, and a box that
 	// does not answer says so in its cell.
@@ -122,7 +136,7 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 			dash(box.Project),
 			dash(box.Node),
 			dash(box.Arch),
-			box.State,
+			stateCell(box),
 			fmt.Sprintf("%d", box.CPUs),
 			fmt.Sprintf("%d MiB", box.MemoryMiB),
 			fmt.Sprintf("%d GiB", box.DiskGiB),
@@ -138,6 +152,10 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 	for _, box := range boxes {
 		if box.Note != "" {
 			a.note("%s: %s", box.ID, box.Note)
+		}
+		if box.VMState != "" {
+			a.note("%s: qemu has paused its VM (%s); a full host disk is the usual reason; "+
+				"`box status %s` says what the node reports, and resuming it is the operator's decision", box.ID, box.VMState, box.ID)
 		}
 	}
 	_ = now

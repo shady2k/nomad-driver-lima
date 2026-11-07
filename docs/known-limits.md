@@ -104,12 +104,45 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   (11.1.2). Whether a box then reads its disk faster, and whether the guest was
   really out of RAM, were not measured - and a unit test does the same
   comparison with the real `qemu-img`, skipping a host that has none.
-- **The uncompressed copy costs cache space per image.** It sits next to the
-  download in `image_cache_dir` and nothing removes it: a node with three image
-  versions holds three compressed downloads and three uncompressed copies. The
-  size is the image's allocated data, which is uncompressed by definition; an
-  operator who needs the space removes a copy no `lima.yaml` of a running instance
-  names.
+- **The uncompressed copy costs cache space per image, and only the copy is
+  cleaned up.** It sits next to the download in `image_cache_dir`, and the driver
+  deletes it once nothing has used it for a week -- or for an hour on a node that
+  is below its disk reserve -- but the downloads, the baked records and the
+  platform bundles stay: they are the cache. A copy a box disk names as its
+  backing file is never deleted, and a copy that cannot be proven unused is kept
+  (a disk `qemu-img` cannot read, or a node whose instances cannot be listed).
+  A box disk this driver makes has no backing file at all (measured with
+  `qemu-img info`), so in practice a copy only has to be old.
+- **A full host disk is qemu's io-error, and nothing here resumes the VM.** When
+  the filesystem a box disk lives on fills, qemu stops the VM and reports
+  `io-error`: Nomad and `box ls` go on saying the box runs, and the guest simply
+  stops answering. `box status`, `box ls`, `box wait`, `box events -f` and the
+  error of `box run` now say what qemu reported, with the free space of the node,
+  and a task event marks the transition -- but the driver does not resume the VM,
+  because that is the operator's decision. Resume it by hand:
+
+  ```
+  printf '{"execute":"qmp_capabilities"}\n{"execute":"cont"}\n' |
+    socat - UNIX-CONNECT:<lima_home>/<box>​/qmp.sock
+  ```
+
+  (QEMU serves one QMP client at a time, so a `socat` that hangs is Lima's
+  hostagent holding the socket; the driver's own probe gives up after two
+  seconds for the same reason.) Free space on the node first: a resumed VM whose
+  disk is still full fails its writes and the guest's filesystem takes the error.
+  Measured on a real node: after the resume the guest ran on with the same boot
+  id, the same PID 1 and an unbroken uptime, and its write completed.
+- **The disk reserve is a number, not a quota.** The driver keeps a node's free
+  space above `disk_reserve_gib`/`disk_reserve_percent`, and `box create`,
+  `box start` and a growing `box resize` are refused below it -- but a box that
+  is already running writes until the filesystem is full, and nothing stops it
+  before qemu does. There is no per-box disk quota and no way to reserve space
+  for a box that is not running.
+- **The free space the driver reports is the Lima home's, not the volume's.** A
+  node whose box disks live on a filesystem of their own (a separate
+  `host_volumes_dir`) is measured by its Lima home: the reserve and the free
+  number are that filesystem's. A box whose volume is somewhere else can fill it
+  while the node still reports room.
 - **A guest that does not answer is only bounded in three commands.** `box
   status`, `box top` and `box session ls` give up after 20 seconds. `box wait`,
   `box send`, `box run` and `box exec` still wait as long as their work does, and

@@ -57,6 +57,11 @@ type BoxRecord struct {
 	GuestError string `json:"guest_error,omitempty"`
 	// Note explains a state that needs a sentence.
 	Note string `json:"note,omitempty"`
+	// VMState is what qemu says about the box's VM when it is not running
+	// normally: "io-error" for a VM qemu stopped because it could not write its
+	// disk, "paused" for one an operator paused. State stays what Nomad reports --
+	// a frozen VM is still a box Nomad runs -- and this is the extra fact.
+	VMState string `json:"vm_state,omitempty"`
 }
 
 // printJSON writes one JSON document.
@@ -306,6 +311,12 @@ func boxRecord(job *api.Job, allocs []*api.AllocationListStub, now time.Time) Bo
 		rec.State = "starting"
 	case rec.ClientStatus == "unknown":
 		rec.State = "unknown"
+	case jobStopped(job) && isTerminalAlloc(rec.ClientStatus):
+		// Nomad keeps the client status an allocation reached: an allocation that
+		// failed and whose job was then stopped stays "failed" for good. The box
+		// is stopped all the same -- nothing of it runs -- and a stop that waited
+		// for the word "stopped" waited out its whole timeout for it.
+		rec.State = "stopped"
 	case rec.ClientStatus == "failed":
 		rec.State = "failed"
 	case rec.ClientStatus == "complete":
@@ -319,6 +330,13 @@ func boxRecord(job *api.Job, allocs []*api.AllocationListStub, now time.Time) Bo
 		rec.Note = oneLine(alloc.ClientDescription, 200)
 	}
 	return rec
+}
+
+// jobStopped reports whether a job was asked to stop. Its allocations then keep
+// whatever client status they reached -- a failed one stays failed -- so the job
+// is what says the box is not running any more.
+func jobStopped(job *api.Job) bool {
+	return job != nil && job.Stop != nil && *job.Stop
 }
 
 // latestAllocation returns the newest allocation that is not complete.

@@ -72,6 +72,11 @@ const (
 	// cache, and the driver publishes it only when that is a filesystem of its
 	// own: otherwise a bake's image comes out of the room boxDiskFreeAttr reports.
 	boxDiskImageCacheFreeAttr = boxDiskAttrPrefix + "image_cache_free_bytes"
+	// boxDiskTotalAttr is the size of the filesystem a node writes its box disks
+	// to, and boxDiskReserveAttr the part of it the node keeps for itself. They
+	// are node totals, never the footprint of a disk.
+	boxDiskTotalAttr   = boxDiskAttrPrefix + "total_bytes"
+	boxDiskReserveAttr = boxDiskAttrPrefix + "reserve_bytes"
 )
 
 // boxDisksFromAttributes reads the driver's per-box disk attributes of a node.
@@ -96,9 +101,9 @@ func boxDisksFromAttributes(attrs map[string]string) (disks []BoxDisk, totalUsed
 			totalUsed, sawTotalUsed = n, true
 		case rest == "virtual_bytes":
 			totalVirtual, sawTotalVirtual = n, true
-		case rest == "image_cache_free_bytes":
-			// The room of the image cache's own filesystem, not the footprint of
-			// a disk: it is no box, and BuildCapacity reads it separately.
+		case rest == "image_cache_free_bytes", rest == "free_bytes", rest == "total_bytes", rest == "reserve_bytes":
+			// The room and the size of a filesystem, not the footprint of a disk:
+			// they are no box, and BuildCapacity reads them separately.
 		case strings.HasSuffix(rest, boxDiskUsedSuffix) || strings.HasSuffix(rest, boxDiskVirtualSuffix):
 			isUsed := strings.HasSuffix(rest, boxDiskUsedSuffix)
 			id := strings.TrimSuffix(strings.TrimSuffix(rest, boxDiskUsedSuffix), boxDiskVirtualSuffix)
@@ -167,6 +172,11 @@ type BoxInstance struct {
 	CPUs      int   `json:"cpus"`
 	MemoryMiB int64 `json:"memory_mib"`
 	DiskGiB   int64 `json:"disk_gib"`
+	// QEMUState is what qemu says it is doing when that is not "running": a VM it
+	// stopped because it could not write its disk says "io-error", and one an
+	// operator paused says "paused". Empty when qemu runs the box normally or when
+	// the driver has not read it (a vz box has no qemu).
+	QEMUState string `json:"qemu_state,omitempty"`
 }
 
 // RunningUncounted reports whether the VM occupies the node while Nomad's
@@ -209,7 +219,10 @@ const (
 	boxInstanceCPUsSuffix   = ".cpus"
 	boxInstanceMemorySuffix = ".memory_mib"
 	boxInstanceDiskSuffix   = ".disk_gib"
-	boxInstanceTaskRunning  = "running"
+	// boxInstanceQEMUStateSuffix is qemu's own run state, which the driver
+	// publishes only for a VM qemu is not running (io-error, paused, postmigrate).
+	boxInstanceQEMUStateSuffix = ".qemu_status"
+	boxInstanceTaskRunning     = "running"
 )
 
 // boxInstancesFromAttributes reads the driver's per-instance attributes.
@@ -225,7 +238,7 @@ func boxInstancesFromAttributes(attrs map[string]string) []BoxInstance {
 		boxID := ""
 		field := ""
 		for _, suffix := range []string{boxInstanceStateSuffix, boxInstanceTaskSuffix, boxInstanceCPUsSuffix,
-			boxInstanceMemorySuffix, boxInstanceDiskSuffix} {
+			boxInstanceMemorySuffix, boxInstanceDiskSuffix, boxInstanceQEMUStateSuffix} {
 			if strings.HasSuffix(rest, suffix) {
 				boxID, field = strings.TrimSuffix(rest, suffix), suffix
 				break
@@ -251,6 +264,8 @@ func boxInstancesFromAttributes(attrs map[string]string) []BoxInstance {
 			inst.MemoryMiB = intOrZero(value)
 		case boxInstanceDiskSuffix:
 			inst.DiskGiB = intOrZero(value)
+		case boxInstanceQEMUStateSuffix:
+			inst.QEMUState = strings.TrimSpace(value)
 		}
 	}
 	sort.Strings(order)
@@ -315,8 +330,19 @@ type NodeCapacity struct {
 	// DiskVirtualBytes is the size they may grow to, in bytes.
 	DiskVirtualBytes int64 `json:"disk_virtual_bytes"`
 	// DiskFreeBytes is the space free on the filesystem the node writes its box
-	// disks to, as the box driver measures it: a bake copies a whole disk there.
+	// disks to, as the box driver measures it: a bake copies a whole disk there,
+	// and a running box that reaches zero freezes in qemu.
+	//
+	// A missing attribute parses as 0, and 0 free is a full node: DiskFreeKnown
+	// is what tells the two apart, and nothing may treat a free space it was not
+	// given as a healthy one.
 	DiskFreeBytes int64 `json:"disk_free_bytes"`
+	DiskFreeKnown bool  `json:"disk_free_known"`
+	// DiskTotalBytes is the size of that filesystem, and DiskReserveBytes the
+	// part of it the node keeps for itself: below the reserve the node takes no
+	// new box. Both are absent from a driver that does not report them.
+	DiskTotalBytes   int64 `json:"disk_total_bytes,omitempty"`
+	DiskReserveBytes int64 `json:"disk_reserve_bytes,omitempty"`
 	// ImageCacheFreeBytes is the space free on the filesystem of the node's image
 	// cache, and it is zero when that is the filesystem of the Lima home: a bake
 	// then writes both the copy and the image out of DiskFreeBytes.
@@ -343,6 +369,51 @@ type NodeCapacity struct {
 
 // Ready reports whether the node can take a new box at all.
 func (n *NodeCapacity) Ready() bool { return n.NodeProblem(PlacementRequest{}) == "" }
+
+// LowDisk reports whether the node is below the disk reserve it keeps for itself:
+// a new box is refused there, and a running VM freezes in qemu when the free
+// space reaches zero.
+//
+// It is false for a node whose free space or reserve is unknown: an unknown
+// number is not a full node, and refusing every box on a node that cannot be
+// measured would turn a missing attribute into dead capacity.
+func (n *NodeCapacity) LowDisk() bool {
+	if !n.DiskFreeKnown || n.DiskReserveBytes <= 0 {
+		return false
+	}
+	return n.DiskFreeBytes < n.DiskReserveBytes
+}
+
+// lowDiskSentence says a node is low on disk in plain words: what is free, what
+// the node keeps back, and what that means for a box.
+func (n *NodeCapacity) lowDiskSentence() string {
+	return fmt.Sprintf("node %s is low on disk: %s is free where it keeps %s in reserve, so a new box is refused "+
+		"there, and a running VM freezes when the free space reaches zero; free space on the node "+
+		"(`box rm <id> --yes` deletes the disk of a box you no longer need)",
+		n.Name, humanSpace(n.DiskFreeBytes), humanSpace(n.DiskReserveBytes))
+}
+
+// humanSpace renders a free space, including a zero one: "-" reads as unknown, and
+// a node with nothing free is a fact, not a missing number.
+func humanSpace(n int64) string {
+	if n <= 0 {
+		return "0 B"
+	}
+	return humanBytes(n)
+}
+
+// freeDiskCell renders the free space the driver reports, and says so when it
+// has not reported any: a number it was not given is never shown as a healthy
+// one.
+func (n *NodeCapacity) freeDiskCell() string {
+	if !n.DiskFreeKnown {
+		return "unknown"
+	}
+	if n.DiskTotalBytes > 0 {
+		return fmt.Sprintf("%s/%s", humanSpace(n.DiskFreeBytes), humanBytes(n.DiskTotalBytes))
+	}
+	return humanSpace(n.DiskFreeBytes)
+}
 
 // hasVolumePlugin reports whether the node has the box-volume plugin.
 func (n *NodeCapacity) hasVolumePlugin(id string) bool {
@@ -440,7 +511,16 @@ func BuildCapacity(node *api.Node, allocs []*api.Allocation) *NodeCapacity {
 		Driver:   driver,
 	}
 	cap.Disks, cap.DiskUsedBytes, cap.DiskVirtualBytes = boxDisksFromAttributes(attrs)
-	cap.DiskFreeBytes, _ = strconv.ParseInt(strings.TrimSpace(attrs[boxDiskFreeAttr]), 10, 64)
+	// The presence of the key is the answer to "did the driver measure it": a
+	// node whose driver is too old, or that could not stat its filesystem, has
+	// no number here, and 0 is a full node.
+	if value, ok := attrs[boxDiskFreeAttr]; ok {
+		if free, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil && free >= 0 {
+			cap.DiskFreeBytes, cap.DiskFreeKnown = free, true
+		}
+	}
+	cap.DiskTotalBytes, _ = strconv.ParseInt(strings.TrimSpace(attrs[boxDiskTotalAttr]), 10, 64)
+	cap.DiskReserveBytes, _ = strconv.ParseInt(strings.TrimSpace(attrs[boxDiskReserveAttr]), 10, 64)
 	cap.ImageCacheFreeBytes, _ = strconv.ParseInt(strings.TrimSpace(attrs[boxDiskImageCacheFreeAttr]), 10, 64)
 	cap.Instances = boxInstancesFromAttributes(attrs)
 	// A box Nomad has a running allocation for is accounted for, whatever the
@@ -681,6 +761,13 @@ func (n *NodeCapacity) nodeRefusal(req PlacementRequest) (refusal, string) {
 	case NormalizeArch(req.Arch) != "" && n.Arch != NormalizeArch(req.Arch):
 		return refusalRequest, fmt.Sprintf("node %s runs %s images, the box needs %s", n.Name, n.Arch, NormalizeArch(req.Arch))
 	}
+	// A node below its disk reserve takes no new box, and the room a request asks
+	// for is not the question: a box disk is thin, so a box whose disk may grow
+	// past what is free now is still a box the node can hold today. What the node
+	// refuses is its own free space falling below what it keeps for itself.
+	if n.LowDisk() {
+		return refusalRoom, n.lowDiskSentence()
+	}
 	if need := req.TaskMemoryMiB(); need > 0 && n.Memory.Free < int64(need) {
 		return refusalRoom, fmt.Sprintf("node %s has %d MiB of memory free, the box needs %d MiB", n.Name, n.Memory.Free, need)
 	}
@@ -901,12 +988,21 @@ func (a *App) findNode(ctx context.Context, name string) (*NodeCapacity, error) 
 // archSummary sums the free resources per architecture. Architectures are never
 // added together: a vCPU on one architecture cannot run an image of the other.
 type archSummary struct {
-	Arch       string `json:"arch"`
-	Nodes      int    `json:"nodes"`
-	CPUShares  int64  `json:"cpu_shares_free"`
-	MemoryMiB  int64  `json:"memory_mib_free"`
-	DiskMiB    int64  `json:"disk_mib_free"`
-	ReadyNodes int    `json:"ready_nodes"`
+	Arch      string `json:"arch"`
+	Nodes     int    `json:"nodes"`
+	CPUShares int64  `json:"cpu_shares_free"`
+	MemoryMiB int64  `json:"memory_mib_free"`
+	// DiskMiB is Nomad's disk figure, which is scheduling arithmetic (the node's
+	// total less what it reserves and what its allocations take), not the free
+	// space of any filesystem. It is kept for compatibility; DiskFreeBytes is the
+	// number a person means by "free".
+	DiskMiB int64 `json:"disk_mib_free"`
+	// DiskFreeBytes is the free space the drivers of those nodes report, summed:
+	// the filesystem each node writes its box disks to.
+	DiskFreeBytes int64 `json:"disk_free_bytes"`
+	// DiskFreeUnknown is how many nodes of the architecture did not report it.
+	DiskFreeUnknown int `json:"disk_free_unknown,omitempty"`
+	ReadyNodes      int `json:"ready_nodes"`
 }
 
 func summarizeArches(nodes []*NodeCapacity) []archSummary {
@@ -927,6 +1023,11 @@ func summarizeArches(nodes []*NodeCapacity) []archSummary {
 		summary.CPUShares += node.CPU.Free
 		summary.MemoryMiB += node.Memory.Free
 		summary.DiskMiB += node.Disk.Free
+		if node.DiskFreeKnown {
+			summary.DiskFreeBytes += node.DiskFreeBytes
+		} else {
+			summary.DiskFreeUnknown++
+		}
 		if node.Ready() {
 			summary.ReadyNodes++
 		}

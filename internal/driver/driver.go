@@ -102,6 +102,9 @@ type Driver struct {
 	// published is the per-box attribute keys of the last fingerprint, so the
 	// next one can clear the keys of a box that is gone (see clearGoneKeys).
 	published map[string]bool
+	// vmState is what qemu last said about each VM, refreshed by a goroutine of
+	// its own so the fingerprint never waits on a VM.
+	vmState vmStates
 }
 
 // NewDriver returns a driver bound to ctx (the plugin's lifetime).
@@ -111,6 +114,7 @@ func NewDriver(ctx context.Context, logger hclog.Logger) *Driver {
 		tasks:      newTaskStore(),
 		logger:     logger,
 		unattached: map[string]time.Time{},
+		vmState:    vmStates{byBox: map[string]string{}, saidIOError: map[string]bool{}},
 	}
 	d.ctx, d.cancel = context.WithCancel(ctx)
 	return d
@@ -171,6 +175,10 @@ func (d *Driver) SetConfig(cfg *base.Config) error {
 	d.boxm = m
 	// Before any task starts: a box being started must not lose its files.
 	d.pruneTaskFiles()
+	// How often a VM's qemu state is read, and the cache cleanup of the image
+	// copies: both run for the life of the plugin.
+	go d.watchVMStates()
+	go d.watchImageCopies()
 	d.logger.Info("box driver configured",
 		"limactl", c.LimactlPath, "lima_home", c.LimaHome, "image_cache_dir", c.ImageCacheDir,
 		"memory_overhead_mib", c.MemoryOverheadMiB, "memory_limit", c.MemoryLimit, "vm_type", c.VMType,
@@ -252,7 +260,7 @@ func isPerBoxKey(key string) bool {
 		return true
 	}
 	switch key {
-	case diskTotalUsed, diskTotalVirtual, diskFreeBytes, diskImageCacheFreeBytes:
+	case diskTotalUsed, diskTotalVirtual, diskFreeBytes, diskImageCacheFreeBytes, diskTotalBytes, diskReserveBytes:
 		return false
 	}
 	return strings.HasPrefix(key, diskAttributePrefix)
@@ -341,10 +349,10 @@ func (d *Driver) fingerprintOnce(ctx context.Context) *drivers.Fingerprint {
 	// What each box disk really occupies on this host, per box and in total, and
 	// how much room is left where a bake copies a disk.
 	setDiskUsage(fp, instances)
-	setDiskFree(fp, d.config.LimaHome, d.config.ImageCacheDir)
+	setDiskFree(fp, d.config.LimaHome, d.config.ImageCacheDir, d.config.DiskReserveGiB, d.config.DiskReservePercent)
 	// Every live VM with its size and whether a task owns it: `box capacity`
 	// counts the ones Nomad does not.
-	setInstanceAttributes(fp, instanceInfos(instances, d.tasks.BoxIDs()))
+	setInstanceAttributes(fp, instanceInfos(instances, d.tasks.BoxIDs(), d.qemuStatuses()))
 	// The images this node baked: the drafts a coordinator can create a box from
 	// without a download.
 	setBakedImages(fp, d.boxm)

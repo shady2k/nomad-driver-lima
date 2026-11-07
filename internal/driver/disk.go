@@ -40,6 +40,21 @@ const (
 	// writes the image there too, and an absent attribute means the cache is on
 	// the filesystem of the Lima home, out of the same room.
 	diskImageCacheFreeBytes = diskAttributePrefix + "image_cache_free_bytes"
+	// diskTotalBytes is the size of the filesystem the node writes its box disks
+	// to. diskReserveBytes is the part of it the node keeps for itself: the room a
+	// box, a bake or a cleanup may not take.
+	//
+	// They are node totals and never name a box, exactly like the two sums above:
+	// a reader that looks for per-box disks by prefix must not see them as one.
+	diskTotalBytes   = diskAttributePrefix + "total_bytes"
+	diskReserveBytes = diskAttributePrefix + "reserve_bytes"
+)
+
+// Defaults of the disk reserve: a tenth of the node's filesystem, and never less
+// than 20 GiB. A node that sets both to 0 keeps no reserve at all.
+const (
+	defaultDiskReserveGiB     = 20
+	defaultDiskReservePercent = 10
 )
 
 // DiskUsage is the host footprint of one box disk.
@@ -110,12 +125,20 @@ func boxDiskUsages(instances []*limactl.Instance) []DiskUsage {
 // It is at most one stat, one comparison and two statfs per fingerprint. A cache on
 // the filesystem of the Lima home is not published: a reader then takes the two out
 // of one number, which is what the node does.
-func setDiskFree(fp *drivers.Fingerprint, limaHome, imageCacheDir string) {
+func setDiskFree(fp *drivers.Fingerprint, limaHome, imageCacheDir string, reserveGiB, reservePercent int64) {
 	free, err := box.FreeBytes(limaHome)
 	if err != nil {
 		return
 	}
 	fp.Attributes[diskFreeBytes] = structs.NewStringAttribute(strconv.FormatInt(free, 10))
+	// The size of the filesystem and the part of it this node keeps for itself,
+	// so `box capacity` can say what "low" means instead of guessing it. A
+	// filesystem whose size cannot be read still says how much is free: the
+	// reserve is then unknown, and an unknown reserve never refuses a box.
+	if total, err := box.TotalBytes(limaHome); err == nil && total > 0 {
+		fp.Attributes[diskTotalBytes] = structs.NewStringAttribute(strconv.FormatInt(total, 10))
+		fp.Attributes[diskReserveBytes] = structs.NewStringAttribute(strconv.FormatInt(diskReserve(total, reserveGiB, reservePercent), 10))
+	}
 	same, err := box.SameFilesystem(limaHome, imageCacheDir)
 	if err != nil || same {
 		return
@@ -125,4 +148,25 @@ func setDiskFree(fp *drivers.Fingerprint, limaHome, imageCacheDir string) {
 		return
 	}
 	fp.Attributes[diskImageCacheFreeBytes] = structs.NewStringAttribute(strconv.FormatInt(cacheFree, 10))
+}
+
+// diskReserve is the room a node keeps free on the filesystem it writes its box
+// disks to: the larger of the GiB figure and the share of the filesystem.
+//
+// A node that sets both to 0 keeps no reserve, and a node whose filesystem size
+// is unknown is given the GiB figure only: a share of nothing would be nothing,
+// and a node that cannot be measured is not a node with no reserve.
+func diskReserve(total, reserveGiB, reservePercent int64) int64 {
+	byPercent := int64(0)
+	if total > 0 && reservePercent > 0 {
+		byPercent = total / 100 * reservePercent
+	}
+	byGiB := int64(0)
+	if reserveGiB > 0 {
+		byGiB = reserveGiB << 30
+	}
+	if byPercent > byGiB {
+		return byPercent
+	}
+	return byGiB
 }

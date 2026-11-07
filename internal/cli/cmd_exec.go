@@ -153,9 +153,10 @@ func (a *App) cmdRun(ctx context.Context, args []string) error {
 			if gone := a.boxGone(ctx, id); gone != nil {
 				return gone
 			}
-			return unknownf("lost contact with the box %s while %q ran: what the command did is not known, and it may still be running in the box. "+
+			message := fmt.Sprintf("lost contact with the box %s while %q ran: what the command did is not known, and it may still be running in the box. "+
 				"It is not run again. `box run %s -- ps -ef` shows what runs when the box answers, `box logs %s -f` what it printed",
 				id, strings.Join(rest, " "), id, id)
+			return unknownf("%s", withVMNote(message, a.vmNote(ctx, box)))
 		}
 		return wrapf(err, "cannot run %q in box %s", strings.Join(rest, " "), id)
 	}

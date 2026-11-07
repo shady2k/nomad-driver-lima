@@ -504,6 +504,7 @@ func (a *App) createBox(ctx context.Context, req boxRequest, wait bool, timeout 
 		DiskGiB:       req.DiskGiB,
 		NodeID:        node.NodeID,
 		Project:       req.Project,
+		JobName:       projectJobName(req.Project, req.ID),
 		// A project image carries its recipe: a box made from it passes it on, so
 		// baking this box again, or rebuilding it on a newer parent, has the
 		// recipe that made its environment.

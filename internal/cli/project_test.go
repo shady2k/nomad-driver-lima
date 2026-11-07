@@ -136,6 +136,8 @@ func TestCreateCarriesTheProject(t *testing.T) {
 	require.Equal(t, ExitOK, rc, ta.errOut.String())
 	job := ta.cluster.jobs["box-dev1"]
 	require.Equal(t, "my-project", job.Meta["project"])
+	require.Equal(t, "box-dev1", *job.ID)
+	require.Equal(t, "my-project/box-dev1", *job.Name, "the jobs page of Nomad shows the name")
 
 	ta.out.Reset()
 	ta.errOut.Reset()
