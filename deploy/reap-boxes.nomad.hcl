@@ -2,9 +2,11 @@
 # ran out.
 #
 # A box is for one task: an agent hands its results over through git and deletes
-# the box itself with `box rm <id> --yes`. A stopped box's disk is deleted 24
-# hours after it stopped, as the backstop for an agent that forgot, and this job is
-# what runs that pass: every 15 minutes, on a node that runs the box driver.
+# the box itself with `box rm <id> --yes`. A stopped box's disk is deleted after
+# the cluster's stopped-box term, 24 hours by default (`box reap term` shows it,
+# `box reap term set 48h` sets another), as the backstop for an agent that forgot,
+# and this job is what runs that pass: every 15 minutes, on a node that runs the
+# box driver.
 #
 # It is a task of the box driver, as a bake and a publish are, and not a daemon:
 # this project has no daemon, the coordinator may be a laptop, and a Mac node may
@@ -59,8 +61,9 @@ job "reap-boxes" {
       }
 
       config {
-        # The block carries nothing: the term is one number for everyone, and
-        # there is no extension, no `box keep` and no per-box setting.
+        # The block carries nothing: the term is one value for the whole cluster,
+        # in the variable nomad/jobs/box-reap, and there is no extension, no
+        # `box keep` and no per-box setting. `box reap term set` writes it.
         reap {}
       }
 

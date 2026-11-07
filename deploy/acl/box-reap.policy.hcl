@@ -1,14 +1,16 @@
 # deploy/acl/box-reap.policy.hcl -- what the box reap task may do.
 #
-# `box reap` deletes the disk of a box that has not run for 24 hours. It runs as
-# a periodic Nomad job of the box driver (deploy/reap-boxes.nomad.hcl), and the task
-# authenticates with its own workload identity: the token is a file and an
-# environment variable of the task, never a secret of the cluster.
+# `box reap` deletes the disk of a box that has not run for the cluster's
+# stopped-box term (24 hours unless the operator set another, in the variable
+# nomad/jobs/box-reap). It runs as a periodic Nomad job of the box driver
+# (deploy/reap-boxes.nomad.hcl), and the task authenticates with its own workload
+# identity: the token is a file and an environment variable of the task, never a
+# secret of the cluster.
 #
 # Attach it to the periodic job, not to the namespace:
 #
 #   nomad acl policy apply -namespace default -job reap-boxes \
-#     -description "box reap: delete the disk of a box that stopped 24 hours ago" \
+#     -description "box reap: delete the disk of a box whose term ran out" \
 #     box-reap deploy/acl/box-reap.policy.hcl
 #
 # or run `deploy/acl/apply.sh reap`, which does that.
@@ -27,8 +29,10 @@
 #   host-volume-delete  delete the disk of a box whose term ran out
 #   node read           whether the node that holds a disk is up: a node that is
 #                       down is never a reason to delete anything
-#   variables read      the clock of a stopped box (nomad/jobs/box-<id>/stopped)
-#   variables write     and claim it while the disk is deleted
+#   variables read      the clock of a stopped box (nomad/jobs/box-<id>/stopped),
+#                       and the cluster's stopped-box term
+#                       (nomad/jobs/box-reap, item stopped_term)
+#   variables write     and claim the clock while the disk is deleted
 #   variables destroy   delete the clock, and the description of the box
 #                       (nomad/jobs/box-<id>/spec) with the disk
 #
@@ -57,6 +61,12 @@ namespace "default" {
     }
     path "nomad/jobs/box-*/spec" {
       capabilities = ["destroy"]
+    }
+    # The cluster's stopped-box term: the pass reads it once, before it looks at
+    # any box, and never writes it. `box reap term set` is the operator's, with
+    # box-operator.policy.hcl.
+    path "nomad/jobs/box-reap" {
+      capabilities = ["read"]
     }
   }
 }

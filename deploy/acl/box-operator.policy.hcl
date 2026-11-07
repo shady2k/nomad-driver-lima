@@ -32,9 +32,10 @@
 #   node read          box capacity: node list, node info and a node's
 #                      allocations (the last one also needs read-job)
 #   variables write    box executors set/show/delete, on nomad/jobs/box-executors;
-#                      box store set/show on nomad/jobs/box-store; the description
-#                      of every box on nomad/jobs/box-*/spec (all three
-#                      read/write/destroy, and no other path)
+#                      box store set/show on nomad/jobs/box-store; box reap term
+#                      set/unset on nomad/jobs/box-reap; the description of every
+#                      box on nomad/jobs/box-*/spec (all three read/write/destroy,
+#                      and no other path)
 #
 # nomad/jobs/box-<id>/spec is a box's description: the rendered job as JSON,
 # written by create/start/resize/upgrade and read by ls/status/start. A box is
@@ -73,6 +74,12 @@ namespace "default" {
     # reads it. A publish job reads it with a workload policy of its own
     # (box-store.policy.hcl), never through this one.
     path "nomad/jobs/box-store" {
+      capabilities = ["read", "write", "destroy"]
+    }
+    # The cluster's stopped-box term: `box reap term` reads it, `set` writes it,
+    # `unset` deletes the variable (destroy). The reap pass reads it with its own
+    # policy (box-reap.policy.hcl), and never writes it.
+    path "nomad/jobs/box-reap" {
       capabilities = ["read", "write", "destroy"]
     }
   }

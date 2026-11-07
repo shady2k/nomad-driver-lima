@@ -2,7 +2,8 @@
 #
 # deploy/reap.sh - register the periodic reap job on a cluster.
 #
-# A box is for one task: its disk is deleted 24 hours after the box stopped, and
+# A box is for one task: its disk is deleted after its term (24 hours by default;
+# `box reap term set 48h` sets another value for the whole cluster), and
 # the pass that deletes it is the periodic Nomad job reap-boxes, a task of the box
 # driver (deploy/reap-boxes.nomad.hcl). Every 15 minutes it looks over the cluster
 # and deletes the disks whose term ran out; `box reap` runs the same pass by hand.

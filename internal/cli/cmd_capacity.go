@@ -55,7 +55,7 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 	// A box is its disk, and a box Nomad has no job for still holds one: count
 	// the boxes from the boxes, not from the allocations, so that a listed disk
 	// is never a node with no boxes.
-	boxes, boxErr := a.collectBoxes(ctx)
+	boxes, term, boxErr := a.collectBoxes(ctx)
 	if boxErr != nil {
 		a.note("note: the boxes could not be read, so BOXES counts only what Nomad's allocations say: %s", boxErr)
 	}
@@ -177,7 +177,7 @@ func (a *App) cmdCapacity(ctx context.Context, args []string) error {
 	for _, node := range nodes {
 		for _, disk := range node.Disks {
 			a.note("%s/%s: %s used of %s%s", node.Name, disk.BoxID, humanBytes(disk.UsedBytes),
-				humanBytes(disk.VirtualBytes), diskBoxNote(byBox, disk.BoxID, a.now()))
+				humanBytes(disk.VirtualBytes), diskBoxNote(byBox, disk.BoxID, a.now(), term))
 		}
 	}
 
@@ -293,7 +293,7 @@ func boxesCell(node *NodeCapacity) string {
 
 // diskBoxNote says what a box disk on a node belongs to, so the disk lines and
 // the BOXES column of the table agree.
-func diskBoxNote(boxes map[string]BoxRecord, boxID string, now time.Time) string {
+func diskBoxNote(boxes map[string]BoxRecord, boxID string, now time.Time, term boxTerm) string {
 	if boxes == nil {
 		// The boxes could not be read: the disks are what the driver reports,
 		// and nothing here knows what owns them.
@@ -309,23 +309,27 @@ func diskBoxNote(boxes map[string]BoxRecord, boxID string, now time.Time) string
 	}
 	switch box.State {
 	case "stopped":
-		return " (" + boxID + " is stopped" + project + ": its disk is deleted " + diskTermNote(box, now) +
+		return " (" + boxID + " is stopped" + project + ": its disk is deleted " + diskTermNote(box, now, term) +
 			"; `box start " + boxID + "` runs it again now)"
 	case "running":
 		return " (" + boxID + " is running" + project + ")"
 	case "orphan":
 		return " (" + boxID + " is an orphan" + project + ": nothing describes this disk, it is deleted " +
-			diskTermNote(box, now) + ", and `box rm " + boxID + " --yes` deletes it now)"
+			diskTermNote(box, now, term) + ", and `box rm " + boxID + " --yes` deletes it now)"
 	default:
-		return " (" + boxID + " is " + dash(box.State) + project + ": its disk is deleted " + diskTermNote(box, now) + ")"
+		return " (" + boxID + " is " + dash(box.State) + project + ": its disk is deleted " + diskTermNote(box, now, term) + ")"
 	}
 }
 
 // diskTermNote says when a disk that is not in use goes: how long is left, that
-// the time has passed, or that no pass has seen the box stopped yet.
-func diskTermNote(box BoxRecord, now time.Time) string {
+// the time has passed, that no pass has seen the box stopped yet, or that the
+// cluster's term cannot be read now.
+func diskTermNote(box BoxRecord, now time.Time, term boxTerm) string {
 	if box.RemovesAt == "" {
-		return "24 hours after the first reap pass sees it stopped, and no pass has seen it yet"
+		if !term.known() {
+			return "when the cluster's stopped-box term can be read again (" + term.why + ")"
+		}
+		return termWords(term.term) + " after the first reap pass sees it stopped, and no pass has seen it yet"
 	}
 	at, err := time.Parse(time.RFC3339, box.RemovesAt)
 	if err != nil {

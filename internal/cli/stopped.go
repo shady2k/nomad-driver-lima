@@ -5,15 +5,16 @@ package cli
 // A box is for one task: the agent hands its results over through git and deletes
 // the box itself with `box rm <id> --yes`. Stopping a box is a short pause that
 // frees memory, never a way to keep a disk for later. The backstop for an agent
-// that forgot is the pass `box reap` runs: 24 hours after the first pass that saw
-// a box not running, its disk is deleted.
+// that forgot is the pass `box reap` runs: a box that is not running has its disk
+// deleted after the cluster's stopped-box term, which is 24 hours unless the
+// operator set another (nomad/jobs/box-reap, see reapterm.go).
 //
 // The clock is a Nomad Variable, nomad/jobs/box-<id>/stopped, because Nomad's job
 // garbage collection deletes a dead job and its allocations: the time has to
 // outlive them, and it must be visible to every command without a daemon. Nomad
 // Variables have no TTL, so nothing here expires by itself; the term is the
-// comparison `now - stopped_at >= 24h`, and a pass that cannot read the clock
-// deletes nothing.
+// comparison `now - stopped_at >= the cluster's term`, and a pass that cannot
+// read the clock deletes nothing.
 //
 // Every way a box stops is covered because the clock is written by looking at
 // Nomad, not by `box stop`: `box stop`, `nomad job stop`, a crash and the stop a
@@ -34,11 +35,6 @@ import (
 )
 
 const (
-	// boxStoppedTerm is how long the disk of a box that is not running is kept.
-	// It is one number for everyone: there is no extension, no `box keep` and no
-	// per-box setting. A disk worth keeping is baked into an image with
-	// `box bake`.
-	boxStoppedTerm = 24 * time.Hour
 	// boxStoppedItem is the item of the clock variable that holds the time.
 	boxStoppedItem = "stopped_at"
 	// boxStoppedStateItem is the item that says whether a pass owns the box: a
@@ -233,8 +229,9 @@ func (a *App) claimBoxForStart(ctx context.Context, id string) error {
 			return nil
 		}
 		if clock.deleting {
-			return errorf("a reap pass is deleting the disk of box %s: it stopped more than 24 hours ago, so "+
-				"`box start %s` cannot bring it back. `box create %s ...` makes a new box", id, id, id)
+			return errorf("a reap pass is deleting the disk of box %s: it stopped longer ago than the cluster's "+
+				"stopped-box term, so `box start %s` cannot bring it back. `box create %s ...` makes a new box",
+				id, id, id)
 		}
 		err = a.Nomad.VariableDeleteChecked(ctx, path, clock.modifyIndex)
 		switch {

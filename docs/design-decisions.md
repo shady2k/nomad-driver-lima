@@ -373,9 +373,9 @@ from what the box looked like from outside.
   Rejected: keeping the description in a file on the coordinator (a second state,
   which the coordinator's loss would take with it) and in the volume directory on
   the node (a node-side API the CLI does not have).
-  This promise ends with the 24 hour term of a stopped box (next section): the
-  volume and the description are the box while it exists, and not a place to keep
-  data between tasks.
+  This promise ends with the term of a stopped box, 24 hours by default (next
+  section): the volume and the description are the box while it exists, and not a
+  place to keep data between tasks.
 - **A box with a description, a volume and no job is `stopped`; a volume with
   neither is an orphan.** A box made before descriptions existed cannot be started
   once its job is collected: there is no way back, so `box start` refuses it and
@@ -409,9 +409,9 @@ from what the box looked like from outside.
 
 - **A box is for one task, and its disk is not storage.** The agent hands the
   results over through git and deletes the box itself with `box rm <id> --yes`.
-  A box that is not running has its disk deleted 24 hours after it stopped; the
-  pass that does it (`box reap`, a periodic job of the box driver) is the
-  backstop for a box whose agent forgot, not the normal path. This supersedes "a
+  A box that is not running has its disk deleted after its term, 24 hours by
+  default; the pass that does it (`box reap`, a periodic job of the box driver) is
+  the backstop for a box whose agent forgot, not the normal path. This supersedes "a
   box is its volume" wherever that read as a promise to keep a disk forever: the
   volume is the box while the box exists.
   The decision was forced by a node of the owner's: eight stopped boxes held
@@ -419,13 +419,31 @@ from what the box looked like from outside.
   created -- the stopped boxes blocked the very work they were kept for. The
   owner decided against reopening it, so nothing here offers a way round the term.
   Rejected: an extension and a `box keep` (the same "keep it for later" with more
-  state to reason about); a per-box or per-cluster term (the rule is the product);
-  deleting at `box stop` (a stop must stay a short pause that frees memory); and
-  an idle limit on running boxes (a running box may be doing a task for days).
-  A disk worth keeping is baked into an image with `box bake`, which is where the
-  rule points. `broken` boxes and orphan disks that have a Nomad volume count as
-  not running and get the same 24 hours. A Lima instance with no Nomad volume is
-  out of reach of the pass: the driver reports it and the operator removes it.
+  state to reason about); a per-box term (a box's owner would set it, and the rule
+  is the product); deleting at `box stop` (a stop must stay a short pause that
+  frees memory); and an idle limit on running boxes (a running box may be doing a
+  task for days). A disk worth keeping is baked into an image with `box bake`,
+  which is where the rule points. `broken` boxes and orphan disks that have a
+  Nomad volume count as not running and get the same term. A Lima instance with no
+  Nomad volume is out of reach of the pass: the driver reports it and the operator
+  removes it.
+  The term is a cluster setting, not a constant: the owner asked for it because a
+  cluster may need another term (a long build, a slow review), and 24 hours is
+  now the default rather than the only value. It is still one value for the whole
+  cluster -- `nomad/jobs/box-reap`, item `stopped_term`, set with `box reap term
+  set 48h`, and `box status <id>` says when one box's disk goes -- and not a
+  per-box setting: a box's owner must not be able to keep a disk past what the
+  cluster agreed to. The variable, not an environment variable, because `box ls`,
+  `box status` and the pass run on different hosts and must agree. A change
+  applies at once, because the term is compared with the recorded time of the
+  clock: lowering it deletes the disks past it at the next pass.
+  A value that cannot be used is never the default. A variable that cannot be read
+  and an item that does not parse or is below one hour stop the pass before it
+  looks at a box: it deletes nothing, writes no clock, and exits `1`. Falling back
+  to 24 hours there is the bug this rule exists to avoid: a cluster set to 7 days
+  would lose its disks early. A missing variable (404) is the default; an
+  unreadable one is a different fact. The same distinction is what
+  `storedBoxJob` makes between a missing description and one that cannot be read.
 - **The clock is a Nomad variable written by looking at the cluster, not by
   `box stop`.** `nomad/jobs/box-<id>/stopped` holds the first time a pass saw the
   box not running. It covers `box stop`, `nomad job stop`, a crash and the stop a

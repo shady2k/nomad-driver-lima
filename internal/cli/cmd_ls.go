@@ -39,6 +39,9 @@ func untilCell(box BoxRecord, now time.Time) string {
 		return "-"
 	}
 	if box.RemovesAt == "" {
+		if box.TermUnknown != "" {
+			return "unknown"
+		}
 		return "not seen"
 	}
 	at, err := time.Parse(time.RFC3339, box.RemovesAt)
@@ -70,7 +73,7 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	boxes, err := a.collectBoxes(ctx)
+	boxes, term, err := a.collectBoxes(ctx)
 	if err != nil {
 		return err
 	}
@@ -176,10 +179,14 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 	// A box that is not running has a term, and the column says how much of it is
 	// left. A box no pass has seen not running has no term yet: say which they
 	// are, and do not give them a time.
-	var unseen []string
+	var unseen, unknownTerm []string
 	for _, box := range boxes {
 		switch box.State {
 		case "running", "starting", "unknown", "deleted", "gone":
+			continue
+		}
+		if box.TermUnknown != "" {
+			unknownTerm = append(unknownTerm, box.ID)
 			continue
 		}
 		if box.RemovesAt == "" {
@@ -187,8 +194,19 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 		}
 	}
 	if len(unseen) > 0 {
-		a.note("no reap pass has seen %s not running yet: a pass runs every 15 minutes (`box reap`), and a disk is "+
-			"deleted 24 hours after the first pass that sees its box stopped", strings.Join(unseen, ", "))
+		if term.known() {
+			a.note("no reap pass has seen %s not running yet: a pass runs every 15 minutes (`box reap`), and a disk "+
+				"is deleted %s after the first pass that sees its box stopped", strings.Join(unseen, ", "),
+				termWords(term.term))
+		} else {
+			a.note("no reap pass has seen %s not running yet: a pass runs every 15 minutes (`box reap`), and a disk "+
+				"is deleted after the cluster's stopped-box term, which cannot be read now: %s",
+				strings.Join(unseen, ", "), term.why)
+		}
+	}
+	if len(unknownTerm) > 0 {
+		a.note("the cluster's stopped-box term cannot be read, so DISK UNTIL is unknown for %s: %s",
+			strings.Join(unknownTerm, ", "), term.why)
 	}
 	for _, box := range boxes {
 		if box.Note != "" {

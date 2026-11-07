@@ -60,8 +60,10 @@ Each box's disk line also says which project the box belongs to
 
 A disk whose box is not running says when it is deleted: "its disk is deleted in
 22h", "on the next reap pass" when its term has run out, or that no pass has seen
-the box stopped yet. A stopped box is deleted 24 hours after it stopped, and so is
-an `orphan` disk with a Nomad volume.
+the box stopped yet. A stopped box is deleted after its term, 24 hours by default
+(`box reap term` shows it, `box reap term set 48h` sets another), and so is an
+`orphan` disk with a Nomad volume. A term that cannot be read says so: the time is
+unknown, not the default.
 
 A VM with no task is an orphan to the driver after ten minutes, and that is what
 every stopped box looks like to it. So this command answers as `box ls` does: a box
@@ -263,10 +265,10 @@ The steps, in this order:
    work.
 
 The box is not deleted and not emptied: it keeps its disk, its `/work` and its
-sessions, and `box rm <id> --yes` deletes it -- or `box reap`, 24 hours after the
-box stops. The bake job is purged when
-it ends, and the task reserves the box's own CPU and memory plus a core for the
-converter, because it boots a VM as big as the box.
+sessions, and `box rm <id> --yes` deletes it -- or `box reap`, after the box's term
+(24 hours by default). The bake job is purged when it ends, and the task reserves
+the box's own CPU and memory plus a core for the converter, because it boots a VM
+as big as the box.
 
 The version is `NAME-N`, with `N` one above the highest number among the versions
 of that name in the index and the drafts of every node, so a draft and a published
@@ -419,9 +421,9 @@ waiting for; do not sit in a retry loop.
 
 A created box ends with one more line on stderr: it is for this task, the results
 go to git, and `box rm <id> --yes` deletes the box and its disk when the task is
-done; a box that is not running has its disk deleted 24 hours after it stopped.
-It is advice for the end of the task, and the exit code is the same with it and
-without it.
+done; a box that is not running has its disk deleted after its term (24 hours by
+default). It is advice for the end of the task, and the exit code is the same with
+it and without it.
 
 An image built for bundles gets one mounted at `/opt/box` without asking: the
 newest bundle for the box's architecture. `--platform <version>` picks an older
@@ -462,18 +464,23 @@ description - a box made before boxes kept one - is shown as `orphan`: `box rm
 The `DISK UNTIL` column says when the disk of a box that is not running is
 deleted: how long is left, `due` when the term has run out and the next pass
 deletes it, `-` for a box that runs (a running box is never touched, however long
-it idles), and `not seen` for a box no pass has seen not running yet. The same two
-times are `stopped_at` and `removes_at` under `--json`, and a box with no pass yet
-has neither field: the command says so instead of inventing a time.
+it idles), `not seen` for a box no pass has seen not running yet, and `unknown`
+when the cluster's term cannot be read. The same two times are `stopped_at` and
+`removes_at` under `--json`, and a box with no pass yet has neither field: the
+command says so instead of inventing a time. `removes_at` is computed from the
+term the cluster has now, so a box already stopped follows a change to it.
 
 ### `box status <id> [--events N]`
 
 One box in detail: state, task events (default 10), the platform bundle it
 mounts, the guest and its executors, the sessions, the disk. A box that is not
 running also has a `disk` line: when its disk is deleted ("deleted at
-2026-11-03T11:00:00Z, 24 hours after it stopped (in 23h)"), or that no pass has
-seen it stopped yet. Under `--json` it is `disk_term` with `stopped_at`,
-`removes_at` and the sentence. A box that runs has none: it is never on a term.
+2026-11-03T11:00:00Z, 24 hours after it stopped (in 23h)" on a cluster at the
+default term; it names the real term otherwise), or that no pass has seen it
+stopped yet. A term that cannot be read says so and the command still prints the
+rest of the box: it does not fail and does not invent a time. Under `--json` it is
+`disk_term` with `stopped_at`, `removes_at` and the sentence. A box that runs has
+none: it is never on a term.
 
 A session whose turn ended in an error while the executor went on working shows
 as `idle (active outside a turn)`, with `executor_active` (the seconds since its
@@ -497,13 +504,14 @@ whole of what the status had to show.
 ### `box stop <id> [--timeout D]` / `box start <id> [--timeout D] [--wait]`
 
 **A box is for one task, and `box stop` is a pause, not storage.** Stop frees the
-RAM and keeps the disk for **24 hours**: a box that is not running has its disk
-deleted 24 hours after it stopped, whether you stopped it, Nomad did or it
-crashed. `box start` brings the same disk back in a minute or a day later, as long
-as the term has not run out; after that the disk is gone. There is no extension,
-no `box keep` and no per-box setting: a disk worth keeping is baked into an image
-with `box bake`. Get the results out (push a branch, or `box cp`) before the
-pause, and delete the box with `box rm <id> --yes` when the task is done.
+RAM and keeps the disk for its term, **24 hours by default**: a box that is not
+running has its disk deleted after its term, whether you stopped it, Nomad did or
+it crashed. `box start` brings the same disk back in a minute or a day later, as
+long as the term has not run out; after that the disk is gone. There is no
+extension and no per-box setting: the term is one value for the whole cluster
+(`box reap term`, below), and a disk worth keeping is baked into an image with
+`box bake`. Get the results out (push a branch, or `box cp`) before the pause, and
+delete the box with `box rm <id> --yes` when the task is done.
 
 While the box exists, `box start` registers the stored job again, with the
 executor credentials that are staged now and the CPU reservation of the box's
@@ -542,9 +550,9 @@ nomad/jobs/box-dev1/spec: Permission denied)
 ### `box reap [--dry-run]`
 
 One pass over the cluster that deletes the disks of the boxes whose term ran out:
-a box that is not running has its disk deleted 24 hours after it stopped. It is
-the backstop for an agent that forgot to delete its box, not the normal path: the
-normal path is `box rm <id> --yes`.
+a box that is not running has its disk deleted after the cluster's stopped-box
+term, 24 hours by default. It is the backstop for an agent that forgot to delete
+its box, not the normal path: the normal path is `box rm <id> --yes`.
 
 The pass is run every 15 minutes by the periodic Nomad job `reap-boxes`, which is a
 task of the box driver (deploy/reap-boxes.nomad.hcl, deploy/acl/box-reap.policy.hcl).
@@ -561,7 +569,7 @@ because the pass looks at Nomad, not at how the box was stopped: `box stop`,
 running. `box start` deletes that variable before it registers the job, and so
 does `box rm`, so a box that comes back is not on a term any more, and a disk can
 only ever be deleted late, never early. `broken` boxes and `orphan` disks with a
-Nomad volume count as not running and get the same 24 hours.
+Nomad volume count as not running and get the same term.
 
 One deletion prints one line, with the box, the size of its disk and how long it
 had been stopped; the task log of the periodic job is the record. The pass does
@@ -570,6 +578,30 @@ box, when the box has a live allocation, when a bake or publish on its disk is
 alive, or when its node is down or unreachable. A box that fails to delete does
 not stop the pass over the others, and the command exits `1` so the job's log says
 so.
+
+### `box reap term [show]` / `box reap term set <duration>` / `box reap term unset`
+
+The term is one value for the whole cluster: the Nomad variable
+`nomad/jobs/box-reap`, item `stopped_term`, a Go duration such as `48h`. It is not
+an environment variable, because `box ls`, `box status` and the periodic pass run
+on different hosts and must agree. No variable, or no item, means the default of
+24 hours; `box reap term` prints the value and says whether it is the default.
+
+`box reap term set 48h` writes it, and `box reap term unset` deletes the variable,
+which returns the cluster to 24 hours. Both refuse a value below one hour and one
+that does not parse, with a sentence: a typo such as `1m` would otherwise delete
+the disks of boxes stopped a moment ago. A change applies at once, because the
+term is compared with the recorded time in `nomad/jobs/box-<id>/stopped`: a box
+already stopped for longer than a lowered term loses its disk at the next pass
+(`box reap` runs every 15 minutes), and a raised term keeps a disk that the old
+one would have deleted.
+
+The pass reads the term once, at the start, and uses it for every box. A term it
+cannot use -- the variable cannot be read (permission denied, a Nomad error), or
+it holds something unparsable or below one hour -- stops the pass before it looks
+at a box: it deletes nothing, writes no clock, says why in its log and exits `1`.
+Falling back to 24 hours there would delete a cluster's disks early. A missing
+variable (404) is the default; an unreadable one is not.
 
 ### `box resize <id> [--cpus N] [--memory-mib N] [--disk-gib N] [--timeout D] [--wait]`
 
@@ -865,7 +897,7 @@ guest reports that no session of the box has a turn running, the wait ends with
 one line on stderr:
 
 ```
-box rm dev1 --yes when the task is done: the box and its disk go with it. `box stop dev1` is only a pause, and a box that is not running loses its disk 24 hours after it stopped
+box rm dev1 --yes when the task is done: the box and its disk go with it. `box stop dev1` is only a pause, and a box that is not running loses its disk after its term (24 hours unless the operator set another)
 ```
 
 It is advice for the moment the box is done, not a change of the result: the exit

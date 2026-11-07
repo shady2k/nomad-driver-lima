@@ -31,9 +31,9 @@ func (a *App) cmdStop(ctx context.Context, args []string) error {
 		return err
 	}
 	out := lifecycleOutput{Action: "stop", Box: box, Volume: BoxVolumeName(id)}
+	term := a.readBoxTerm(ctx)
 	if box.State == "stopped" {
-		out.Warn = "the box was already stopped; its disk is deleted 24 hours after it stopped, unless `box start " +
-			id + "` runs it again"
+		out.Warn = "the box was already stopped; " + stoppedDiskSentence(term, id)
 		return a.printLifecycle(&out)
 	}
 	if err := a.Nomad.StopJob(ctx, BoxJobName(id), false); err != nil {
@@ -45,9 +45,26 @@ func (a *App) cmdStop(ctx context.Context, args []string) error {
 		return err
 	}
 	out.Box = stopped
-	out.Warn = "the disk is kept until the box has been stopped for 24 hours: `box start " + id +
-		"` runs the box again now, and `box reap` deletes the disk after that"
+	if term.known() {
+		out.Warn = "the disk is kept until the box has been stopped for " + termWords(term.term) + ": `box start " + id +
+			"` runs the box again now, and `box reap` deletes the disk after that"
+	} else {
+		out.Warn = "the disk is kept until the box has been stopped for the cluster's term, which cannot be read now (" +
+			term.why + "): `box start " + id + "` runs the box again now, and `box reap` deletes the disk after that"
+	}
 	return a.printLifecycle(&out)
+}
+
+// stoppedDiskSentence says when the disk of a stopped box goes, in the words of
+// `box stop`. The term is one cluster setting: when it cannot be read, the
+// sentence says so instead of naming a number.
+func stoppedDiskSentence(term boxTerm, id string) string {
+	if !term.known() {
+		return "its disk is deleted after the cluster's stopped-box term, which cannot be read now (" + term.why +
+			"), unless `box start " + id + "` runs it again"
+	}
+	return "its disk is deleted " + termWords(term.term) + " after it stopped, unless `box start " + id +
+		"` runs it again"
 }
 
 // cmdStart starts a stopped box on its existing disk.
@@ -646,6 +663,7 @@ func orphanCannot(id, action string) error {
 // stoppedCannot refuses a command that changes a box whose job Nomad no longer
 // has. The box is its disk: a start brings it back, and the change can follow.
 func stoppedCannot(id, next string) error {
-	return errorf("the box %s is stopped: Nomad no longer has its job. Its disk is deleted 24 hours after it "+
-		"stopped, and `box start %s` runs it again until then; `%s` works on it after that", id, id, next)
+	return errorf("the box %s is stopped: Nomad no longer has its job. Its disk is deleted after its term "+
+		"(24 hours unless the operator set another; `box status %s` says when), and `box start %s` runs it again "+
+		"until then; `%s` works on it after that", id, id, id, next)
 }

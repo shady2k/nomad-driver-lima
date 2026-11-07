@@ -454,8 +454,8 @@ box session new dev1 --executor prime --model <provider>/<model> --title "first 
 box send dev1 s-7f3a2c "make the tests pass; the repository is in /root/repo"
 box wait dev1 s-7f3a2c --timeout 15m          # returns the moment the turn ends
 
-box stop dev1                                # a pause: free the RAM; the disk goes in 24 hours
-box start dev1                               # same disk, if its 24 hours have not run out
+box stop dev1                                # a pause: free the RAM; the disk goes after its term (24h by default)
+box start dev1                               # same disk, if its term has not run out (`box status dev1` says when)
 box rm dev1 --yes                            # the last step of the task: box and disk are deleted
 ```
 

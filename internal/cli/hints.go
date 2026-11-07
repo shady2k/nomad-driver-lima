@@ -106,7 +106,7 @@ func (a *App) noteIdleBoxes(ctx context.Context, project, arch string) {
 	if len(candidates) == 0 {
 		return
 	}
-	boxes, err := a.collectBoxes(ctx)
+	boxes, _, err := a.collectBoxes(ctx)
 	if err != nil {
 		return
 	}

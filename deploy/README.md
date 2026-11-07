@@ -45,7 +45,7 @@ ansible-playbook -i inventory site.yml
 ansible-playbook -i inventory acl.yml
 
 # 3b. the periodic reap job, once per cluster, from the repository root: it
-#     deletes the disk of a box that stopped 24 hours ago. The policy comes
+#     deletes the disk of a box whose term ran out (24 hours by default). The policy comes
 #     first (a management token), then the job (a token with submit-job in the
 #     default namespace: the coordinator's). See "The reap job" below.
 ./deploy/acl/apply.sh reap
@@ -536,7 +536,9 @@ Anything bigger is a Nomad installation of its own (three servers,
 ## The reap job
 
 A box is for one task. Its disk is deleted with the box (`box rm <id> --yes`),
-and a box that is not running loses its disk **24 hours after it stopped**. The
+and a box that is not running loses its disk after its term, **24 hours by
+default**; `box reap term` shows it, `box reap term set 48h` sets another value
+for the whole cluster, and `box status <id>` says when one box's disk goes. The
 periodic job `reap-boxes` is the backstop for an agent that forgot: every 15
 minutes, a task of the box driver runs one pass (`box reap`) over the cluster
 and deletes the disks whose term ran out. Running boxes are never touched,

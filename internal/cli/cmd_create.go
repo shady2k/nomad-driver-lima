@@ -656,9 +656,9 @@ func (a *App) printCreate(out *createOutput) error {
 		a.note("next: box session new %s --executor prime --model <provider>/<model>", box.ID)
 	}
 	// The rule of a box, at the moment it is made: it is for this task, and its
-	// disk goes with it. A stop is a pause whose disk is deleted 24 hours later.
+	// disk goes with it. A stop is a pause whose disk is deleted after its term.
 	a.note("this box is for this task: push the results to git, then `box rm %s --yes`; a box that is not "+
-		"running has its disk deleted 24 hours after it stopped", box.ID)
+		"running has its disk deleted after its term (24 hours unless the operator set another)", box.ID)
 	return nil
 }
 

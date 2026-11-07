@@ -94,7 +94,7 @@ func TestReapStartsTheClockOfAStoppedBox(t *testing.T) {
 
 	require.Equal(t, ExitOK, ta.run(t, "reap"), ta.errOut.String())
 	require.Contains(t, ta.errOut.String(), "starts its term")
-	require.Contains(t, ta.errOut.String(), reapNow.Add(boxStoppedTerm).Format(time.RFC3339))
+	require.Contains(t, ta.errOut.String(), reapNow.Add(boxStoppedTermDefault).Format(time.RFC3339))
 
 	clock, ok := ta.reapClock(t, "dev1")
 	require.True(t, ok, "the pass wrote the clock")
@@ -239,9 +239,13 @@ func TestReapNeverDeletesWhatItCannotRead(t *testing.T) {
 			want:   "is down",
 		},
 		{
-			name:   "the clock cannot be read",
-			break_: func(ta *testApp) { ta.cluster.variableReadErr = errors.New("Permission denied") },
-			want:   "cannot read",
+			name: "the clock cannot be read",
+			break_: func(ta *testApp) {
+				ta.cluster.variableReadErrPath = map[string]error{
+					BoxStoppedVariable("dev1"): errors.New("Permission denied"),
+				}
+			},
+			want: "cannot read",
 		},
 	}
 	for _, tc := range cases {
@@ -713,7 +717,7 @@ func TestReapHelpAndUsage(t *testing.T) {
 	ta.errOut.Reset()
 	require.Equal(t, ExitOK, ta.run(t, "help", "reap"), ta.errOut.String())
 	require.Contains(t, ta.errOut.String(), "--dry-run")
-	require.True(t, strings.Contains(ta.errOut.String(), "24 hours") || strings.Contains(ta.errOut.String(), "stopped"))
+	require.Contains(t, ta.errOut.String(), "box reap term", "the help says how the term is read and set")
 }
 
 // TestListDoesNotShowAJobThatIsNotABox: a job whose name starts with box- is not

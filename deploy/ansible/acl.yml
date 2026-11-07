@@ -228,7 +228,7 @@
         body_format: json
         body:
           Name: box-reap
-          Description: 'box reap: delete the disk of a box that stopped 24 hours ago'
+          Description: 'box reap: delete the disk of a box whose term ran out'
           Rules: '{{ box_acl_reap_rules }}'
           JobACL:
             Namespace: '{{ box_acl_namespace }}'

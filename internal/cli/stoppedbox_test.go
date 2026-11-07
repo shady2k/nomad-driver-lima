@@ -72,7 +72,7 @@ func TestCreateStoresTheDescription(t *testing.T) {
 // boxAfter reads a box record the way `box ls` does.
 func (ta *testApp) boxAfter(t *testing.T, id string) BoxRecord {
 	t.Helper()
-	boxes, err := ta.collectBoxes(t.Context())
+	boxes, _, err := ta.collectBoxes(t.Context())
 	require.NoError(t, err)
 	for _, box := range boxes {
 		if box.ID == id {

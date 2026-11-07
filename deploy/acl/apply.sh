@@ -187,7 +187,7 @@ cmd_reap() {
 
   log "applying the box-reap policy to the job reap-boxes in namespace $NS"
   "$NOMAD" acl policy apply -namespace "$NS" -job reap-boxes \
-    -description "box reap: delete the disk of a box that stopped 24 hours ago" \
+    -description "box reap: delete the disk of a box whose term ran out" \
     box-reap "$policy"
   log "register the job with deploy/reap.sh, and check the attachment with:"
   log "  nomad acl policy info box-reap"

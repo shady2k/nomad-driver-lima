@@ -97,6 +97,10 @@ type fakeCluster struct {
 	volumeListErr error
 	// variableReadErr makes every VariableRead fail.
 	variableReadErr error
+	// variableReadErrPath makes the read of one variable path fail, which is how
+	// a token that cannot read the cluster's stopped-box term looks while the
+	// clocks of the boxes are still readable.
+	variableReadErrPath map[string]error
 	// variableCreateErr makes every VariableCreateChecked fail.
 	variableCreateErr error
 	// onVariableDeleteChecked runs before a checked delete is decided; a test
@@ -483,6 +487,9 @@ func (c *fakeCluster) VariableRead(ctx context.Context, path string) (*api.Varia
 	c.record("VariableRead " + path)
 	if c.variableReadErr != nil {
 		return nil, c.variableReadErr
+	}
+	if err := c.variableReadErrPath[path]; err != nil {
+		return nil, err
 	}
 	v, ok := c.variables[path]
 	if !ok {

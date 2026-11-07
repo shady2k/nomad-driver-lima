@@ -127,7 +127,7 @@ func (a *App) cmdImages(ctx context.Context, args []string) error {
 		a.note("when in doubt take more: a guest out of memory just stops answering (`box top` and `box status` " +
 			"go silent); `box resize --memory-mib` grows it between turns, and it restarts with the disk kept")
 		a.note("the node is shared, so give back what you do not use: `box rm <id> --yes` a finished box; " +
-			"`box stop` is only a pause, and the disk goes 24 hours later")
+			"`box stop` is only a pause, and the disk goes when its term ends (24 hours unless the operator set another)")
 	}
 	if len(drafts) > 0 {
 		a.note("a draft is created from on its own node: box create <id> --image %s", drafts[0].Version)

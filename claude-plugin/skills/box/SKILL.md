@@ -36,21 +36,24 @@ box cp ./results dev1:/root/in            # files in
 box cp dev1:/root/repo/out ./out          # files out
 box status dev1                           # state, task events, guest, sessions, disk used
 box top dev1 -f                           # CPU, iowait, load, memory, disk, the biggest processes
-box stop dev1                             # a pause: free the RAM, and the disk goes in 24 hours
-box start dev1                            # same disk, if its 24 hours have not run out
+box stop dev1                             # a pause: free the RAM, and the disk goes after its term (24h by default)
+box start dev1                            # same disk, if its term has not run out
 box rm dev1 --yes                         # the last step of the task: the box and its disk are deleted
 ```
 
 **A box is for one task.** Its disk is not storage: it is deleted with the box,
-and a box that is not running loses its disk 24 hours after it stopped. Push the
-work to git (or copy it out with `box cp`) before the task ends, then delete the
-box with `box rm <id> --yes`: that is the last step of the task, and it is yours
-to run. A disk worth keeping is baked into an image with `box bake`.
+and a box that is not running loses its disk 24 hours by default after it
+stopped (`box status <id>` says when, and the term is one value for the whole
+cluster: `box reap term`). Push the work to git (or copy it out with `box cp`)
+before the task ends, then delete the box with `box rm <id> --yes`: that is the
+last step of the task, and it is yours to run. A disk worth keeping is baked into
+an image with `box bake`.
 
 `box stop` keeps a description of the box in a Nomad variable, so `box start`
 brings it back on the same disk after Nomad has collected the dead job (its GC
-runs every few hours) - but only while the 24 hours have not run out. A disk
-nothing describes shows as `orphan`, and it is deleted on the same term.
+runs every few hours) - but only while its term has not run out (24 hours by
+default). A disk nothing describes shows as `orphan`, and it is deleted on the
+same term.
 
 `--json` on any command gives one JSON document to parse.
 
@@ -193,8 +196,9 @@ current base image, not an old one.
   --yes` one that is finished: an idle box holds its node's memory, and the node
   is shared with every other agent's boxes.
 - **`box stop` is a pause, never storage.** It frees the RAM and keeps the disk
-  for 24 hours. After that the disk is deleted, whether you stopped the box,
-  Nomad did or it crashed; `box start <id>` before then brings the box back on
+  for its term, 24 hours by default (`box status <id>` says when). After that the
+  disk is deleted, whether you stopped the box, Nomad did or it crashed; `box
+  start <id>` before then brings the box back on
   the same disk, and after it there is nothing left to start. Get the work out
   (git, or `box cp`) before the pause. There is no extension, no `box keep` and
   no per-box setting: a disk worth keeping is baked into an image with `box
@@ -247,8 +251,8 @@ current base image, not an old one.
   the box, but `--timeout` says so with exit 4.
 - **Results travel by git or `box cp`, before the task ends.** A box is for one
   task and is disposable: its disk is not backed up, and a box that is not
-  running loses it 24 hours after it stopped. Push a branch, or copy the files
-  out with `box cp`, before you stop or delete the box. `box cp` streams a tar
+  running loses it 24 hours by default after it stopped. Push a branch, or copy
+  the files out with `box cp`, before you stop or delete the box. `box cp` streams a tar
   over `alloc exec`, so it works for whole directories.
 - **Check a result yourself.** The agent's answer is a claim: `box run` the
   test, or `box cp` the file out, before you report the task done.
@@ -257,22 +261,23 @@ current base image, not an old one.
 
 A box is for one task. It holds its node's memory while it runs, and its disk
 until it is deleted. `box rm <id> --yes` is the last step of the task, and it is
-yours to run. A box that is not running loses its disk 24 hours after it stopped:
-stopping one is a pause, not a way to keep it.
+yours to run. A box that is not running loses its disk 24 hours by default after
+it stopped: stopping one is a pause, not a way to keep it.
 
 - **Your own box, task done:** move the results out (push, `box cp`), then
   `box rm <id> --yes`. No need to ask: you created it for this task, and this is
   the step that gives the disk back.
-- **Your own box, short pause:** `box stop <id>` frees the memory and starts a
-  24 hour clock. `box start <id>` before it ends brings the box back; a box
-  forgotten for a day has no disk to come back to. Only `box bake` keeps a disk.
+- **Your own box, short pause:** `box stop <id>` frees the memory and starts the
+  clock of its term (24 hours by default; `box status <id>` says when). `box
+  start <id>` before it ends brings the box back; a box forgotten past its term
+  has no disk to come back to. Only `box bake` keeps a disk.
 - **A box you did not create:** leave it alone, even when it looks abandoned;
   tell the owner its id and what `box status` says.
 - **An orphan** in `box capacity` (a VM with no box task and no description, or
   without its disk) is the operator's: the driver only reports it. Say so; do not
   try to remove it. A disk with a Nomad volume that nothing describes is deleted
-  like a stopped box's disk, 24 hours after a pass first saw it. A box you
-  stopped is `stopped` there, not an orphan.
+  like a stopped box's disk, 24 hours by default after a pass first saw it. A
+  box you stopped is `stopped` there, not an orphan.
 
 ## Executors
 
@@ -331,12 +336,12 @@ starts, so no key lands on a disk.
   the work, and a new box on a full node freezes the same way.
 - `Nomad could not place the box: 3 node(s) ran out of memory` - the scheduler
   refused it. Ask for less, or `box rm <id> --yes` a finished box of yours (a
-  `box stop` frees the memory too, but starts the 24 hour clock on its disk).
+  `box stop` frees the memory too, but starts its term's clock, 24 hours by default).
 - `Nomad rejected the box job ... the Nomad token needs ...` - the token lacks
   a rule, and the message names it. Tell the operator; do not retry.
 - `the box <id> is stopped` - `box start <id>` brings it back on its disk, also
-  when Nomad no longer has its job, as long as it stopped less than 24 hours
-  ago: after that its disk is deleted. `box status <id>` says when.
+  when Nomad no longer has its job, as long as its term (24 hours by default)
+  has not run out: after that its disk is deleted. `box status <id>` says when.
 - `box <id> is busy: ... nothing was stopped and nothing was baked` - a turn runs
   or a preparation is in progress, and `box bake` refuses it before it stops
   anything. `box wait` for the turn, then bake again.
@@ -391,5 +396,6 @@ starts, so no key lands on a disk.
    and copy results out with `box cp` or push a branch.
 5. `box rm --yes` when the task is done, after its results are in git: that is
    the last step, and it gives the disk back. `box stop` only for a pause of
-   hours, because a box that is not running loses its disk in 24 hours. A
-   finished box left running keeps someone else's work from starting.
+   hours, because a box that is not running loses its disk after its term (24
+   hours by default). A finished box left running keeps someone else's work from
+   starting.

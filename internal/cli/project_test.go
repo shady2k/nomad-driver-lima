@@ -313,14 +313,14 @@ func TestCreateSaysABoxIsForOneTask(t *testing.T) {
 	out := ta.errOut.String()
 	require.Contains(t, out, "this box is for this task")
 	require.Contains(t, out, "`box rm dev1 --yes`")
-	require.Contains(t, out, "has its disk deleted 24 hours after it stopped")
+	require.Contains(t, out, "has its disk deleted after its term (24 hours unless the operator set another)")
 }
 
 // TestWaitSaysWhenTheBoxIsDone: after a turn that finished, with no other turn
 // running in the box, the wait says what to do with the box now that it is idle.
 func TestWaitSaysWhenTheBoxIsDone(t *testing.T) {
 	line := "box rm dev1 --yes when the task is done: the box and its disk go with it. `box stop dev1` is only a " +
-		"pause, and a box that is not running loses its disk 24 hours after it stopped"
+		"pause, and a box that is not running loses its disk after its term (24 hours unless the operator set another)"
 
 	ta := newTestApp(t, indexJSON)
 	ta.addBox(t, "dev1")

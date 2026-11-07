@@ -138,11 +138,13 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   is already running writes until the filesystem is full, and nothing stops it
   before qemu does. There is no per-box disk quota and no way to reserve space
   for a box that is not running.
-  A disk that is not in use still holds its space until it is deleted: at most 24
-  hours after its box stopped, or at once with `box rm <id> --yes`. So the way to
+  A disk that is not in use still holds its space until it is deleted: at most the
+  cluster's stopped-box term (24 hours by default) after its box stopped, or at
+  once with `box rm <id> --yes`. So the way to
   make room on a node is to delete the boxes whose tasks are done, and the answer
   to a node that filled with stopped boxes is the same command -- the pass that
-  deletes a stopped box's disk 24 hours later needs no operator.
+  deletes a stopped box's disk after its term (24 hours by default) needs no
+  operator.
 - **The free space the driver reports is the Lima home's, not the volume's.** A
   node whose box disks live on a filesystem of their own (a separate
   `host_volumes_dir`) is measured by its Lima home: the reserve and the free
@@ -414,8 +416,9 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   job is the only record of how it was made, so once Nomad collects it the box is
   an `orphan`: `box ls` and `box status` say so, `box start` refuses it, and `box
   rm <id> --yes` deletes the disk. There is no way back for such a box, by design.
-  Its disk is deleted 24 hours after a pass first sees it not running, like a
-  stopped box's.
+  Its disk is deleted 24 hours by default after a pass first sees it not running,
+  like a stopped box's (`box status <id>` says when, and `box reap term` shows the
+  cluster's term).
 - **A box deleted by `box reap` leaves nothing to find.** The job is purged, and
   the disk, the description and the stopped clock are deleted with it, so `box
   start` of that id answers "no such box", exactly as for an id that was never
@@ -441,7 +444,8 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   fingerprint; the operator removes it on the node with `limactl delete`. No
   command of this project does it, and `box reap` does not look at these: it starts
   from the Nomad volumes. A disk that does have a volume is a different case, and
-  is deleted like a stopped box's disk 24 hours after a pass first saw it.
+  is deleted like a stopped box's disk 24 hours by default after a pass first saw
+  it.
   A stopped box looks exactly like that to the driver, so `box capacity` answers as
   `box ls` does: a box with a job or a stored description is named with its state
   there ("no box task, and the cluster knows this box as stopped"), and only a VM

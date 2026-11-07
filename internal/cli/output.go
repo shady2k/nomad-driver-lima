@@ -58,10 +58,15 @@ type BoxRecord struct {
 	// Note explains a state that needs a sentence.
 	Note string `json:"note,omitempty"`
 	// StoppedAt is when a reap pass first saw the box not running, and RemovesAt
-	// when its disk is deleted: StoppedAt plus the term (24 hours). Both are
-	// empty for a box that runs, and for one no pass has seen not running yet.
+	// when its disk is deleted: StoppedAt plus the cluster's stopped-box term
+	// (24 hours unless the operator set another). Both are empty for a box that
+	// runs, and for one no pass has seen not running yet.
 	StoppedAt string `json:"stopped_at,omitempty"`
 	RemovesAt string `json:"removes_at,omitempty"`
+	// TermUnknown is why the cluster's stopped-box term could not be read, when
+	// it could not. A display command then says the time is unknown for that
+	// reason, instead of inventing the default.
+	TermUnknown string `json:"term_unknown,omitempty"`
 	// VMState is what qemu says about the box's VM when it is not running
 	// normally: "io-error" for a VM qemu stopped because it could not write its
 	// disk, "paused" for one an operator paused. State stays what Nomad reports --
@@ -445,15 +450,17 @@ func (a *App) boxVolumes(ctx context.Context) (map[string]*api.HostVolumeStub, e
 
 // fillStoppedClocks reads the clock of every box that is not running, so a
 // listing says when the pass deletes its disk. A box no pass has seen not running
-// has no clock, and says so instead of being given a time.
-func (a *App) fillStoppedClocks(ctx context.Context, boxes []BoxRecord) {
+// has no clock, and says so instead of being given a time. The term is read once
+// for the whole listing; when it cannot be read, a box with a clock says the time
+// is unknown and why, and the command still prints.
+func (a *App) fillStoppedClocks(ctx context.Context, boxes []BoxRecord, term boxTerm) {
 	for i := range boxes {
-		a.fillStoppedClock(ctx, &boxes[i])
+		a.fillStoppedClock(ctx, &boxes[i], term)
 	}
 }
 
 // fillStoppedClock reads the clock of one box.
-func (a *App) fillStoppedClock(ctx context.Context, box *BoxRecord) {
+func (a *App) fillStoppedClock(ctx context.Context, box *BoxRecord, term boxTerm) {
 	switch box.State {
 	case "running", "starting", "unknown", "deleted", "gone":
 		return
@@ -463,18 +470,22 @@ func (a *App) fillStoppedClock(ctx context.Context, box *BoxRecord) {
 		return
 	}
 	box.StoppedAt = clock.at.UTC().Format(time.RFC3339)
-	box.RemovesAt = clock.at.Add(boxStoppedTerm).UTC().Format(time.RFC3339)
+	if !term.known() {
+		box.TermUnknown = term.why
+		return
+	}
+	box.RemovesAt = clock.at.Add(term.term).UTC().Format(time.RFC3339)
 }
 
 // collectBoxes returns every box on the cluster.
-func (a *App) collectBoxes(ctx context.Context) ([]BoxRecord, error) {
+func (a *App) collectBoxes(ctx context.Context) ([]BoxRecord, boxTerm, error) {
 	stubs, err := a.Nomad.JobList(ctx)
 	if err != nil {
-		return nil, wrapf(err, "cannot list the Nomad jobs")
+		return nil, boxTerm{}, wrapf(err, "cannot list the Nomad jobs")
 	}
 	byJob, err := a.jobAllocations(ctx)
 	if err != nil {
-		return nil, err
+		return nil, boxTerm{}, err
 	}
 	now := a.now()
 	out := make([]BoxRecord, 0, len(stubs))
@@ -493,7 +504,7 @@ func (a *App) collectBoxes(ctx context.Context) ([]BoxRecord, error) {
 			if isNotFoundErr(err) {
 				continue
 			}
-			return nil, wrapf(err, "cannot read job %s", stub.ID)
+			return nil, boxTerm{}, wrapf(err, "cannot read job %s", stub.ID)
 		}
 		// A name that starts with box- is not proof: a job of this project that
 		// is not a box may carry it, and the meta marker is what decides.
@@ -511,7 +522,7 @@ func (a *App) collectBoxes(ctx context.Context) ([]BoxRecord, error) {
 	// a volume nothing describes.
 	volumes, err := a.boxVolumes(ctx)
 	if err != nil {
-		return nil, err
+		return nil, boxTerm{}, err
 	}
 	ids := make([]string, 0, len(volumes))
 	for id := range volumes {
@@ -523,7 +534,7 @@ func (a *App) collectBoxes(ctx context.Context) ([]BoxRecord, error) {
 	for _, id := range ids {
 		job, doc, err := a.storedBoxJob(ctx, id)
 		if err != nil {
-			return nil, err
+			return nil, boxTerm{}, err
 		}
 		if job == nil {
 			out = append(out, boxRecordVolumeOnly(id, volumes[id]))
@@ -532,8 +543,9 @@ func (a *App) collectBoxes(ctx context.Context) ([]BoxRecord, error) {
 		out = append(out, boxRecordStored(job, doc, volumes[id], now))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	a.fillStoppedClocks(ctx, out)
-	return out, nil
+	term := a.readBoxTermIfStopped(ctx, out)
+	a.fillStoppedClocks(ctx, out, term)
+	return out, term, nil
 }
 
 // findBox returns one box, or a not-found error that says what to do.
@@ -557,7 +569,7 @@ func (a *App) findBox(ctx context.Context, id string) (BoxRecord, *api.Job, erro
 			return BoxRecord{}, nil, err
 		}
 		rec := boxRecord(job, byJob[BoxJobName(id)], a.now())
-		a.fillStoppedClock(ctx, &rec)
+		a.fillStoppedClock(ctx, &rec, a.readBoxTerm(ctx))
 		return rec, job, nil
 	case !isNotFoundErr(err):
 		return BoxRecord{}, nil, wrapf(err, "cannot read the job %s", BoxJobName(id))
@@ -578,22 +590,22 @@ func (a *App) findBox(ctx context.Context, id string) (BoxRecord, *api.Job, erro
 	}
 	if stored == nil {
 		rec := boxRecordVolumeOnly(id, volume)
-		a.fillStoppedClock(ctx, &rec)
+		a.fillStoppedClock(ctx, &rec, a.readBoxTerm(ctx))
 		return rec, nil, nil
 	}
 	if !hasVolume {
 		rec := boxRecordStored(stored, doc, nil, a.now())
-		a.fillStoppedClock(ctx, &rec)
+		a.fillStoppedClock(ctx, &rec, a.readBoxTerm(ctx))
 		return rec, stored, nil
 	}
 	rec := boxRecordStored(stored, doc, volume, a.now())
-	a.fillStoppedClock(ctx, &rec)
+	a.fillStoppedClock(ctx, &rec, a.readBoxTerm(ctx))
 	return rec, stored, nil
 }
 
 // noSuchBox builds the not-found error, listing the boxes that do exist.
 func (a *App) noSuchBox(ctx context.Context, id string) error {
-	boxes, err := a.collectBoxes(ctx)
+	boxes, _, err := a.collectBoxes(ctx)
 	if err != nil {
 		return notFoundf("there is no box %q", id)
 	}
@@ -730,12 +742,12 @@ func boxNotRunning(box BoxRecord) error {
 		return boxStatef("the box %s is gone: its disk no longer exists, so there is nothing to start. `box rm %s --yes` "+
 			"removes what is left of it", box.ID, box.ID)
 	case box.JobMissing:
-		return boxStatef("the box %s is stopped: Nomad no longer has its job. Its disk is deleted 24 hours after it "+
-			"stopped -- `box status %s` says when -- and `box start %s` runs it again until then",
-			box.ID, box.ID, box.ID)
+		return boxStatef("the box %s is stopped: Nomad no longer has its job. Its disk is deleted after its term "+
+			"(24 hours unless the operator set another) -- `box status %s` says when -- and `box start %s` runs it "+
+			"again until then", box.ID, box.ID, box.ID)
 	case box.State == "stopped":
-		return boxStatef("the box %s is stopped: its disk is deleted 24 hours after it stopped, and `box start %s` "+
-			"runs it again until then", box.ID, box.ID)
+		return boxStatef("the box %s is stopped: its disk is deleted after its term (24 hours unless the operator "+
+			"set another), and `box start %s` runs it again until then", box.ID, box.ID)
 	case box.State == "starting":
 		return boxStatef("the box %s is starting; `box status %s` shows when the guest answers", box.ID, box.ID)
 	default:

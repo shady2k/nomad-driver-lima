@@ -407,7 +407,7 @@ func (a *App) noteBoxIsIdle(ctx context.Context, client *Boxctl, id string) {
 		return
 	}
 	a.note("box rm %s --yes when the task is done: the box and its disk go with it. `box stop %s` is only a "+
-		"pause, and a box that is not running loses its disk 24 hours after it stopped", id, id)
+		"pause, and a box that is not running loses its disk after its term (24 hours unless the operator set another)", id, id)
 }
 
 // lastTurn returns the number of the last turn of a session, so a wait that lost

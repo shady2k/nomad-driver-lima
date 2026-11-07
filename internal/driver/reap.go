@@ -54,8 +54,12 @@ func (d *Driver) reapOnce(ctx context.Context, h *taskHandle) *drivers.ExitResul
 	app.ErrOut = log
 	if err := app.RunReap(ctx, false); err != nil {
 		if ctx.Err() != nil {
+			log.line("the reap pass was stopped")
 			return imageWorkFailure(h, d, "the reap pass was stopped")
 		}
+		// The task log is the record of the pass, so the sentence that says why
+		// it stopped goes there too, not only into the allocation's event.
+		log.line("the reap pass failed: " + err.Error())
 		return imageWorkFailure(h, d, "the reap pass ran, and "+err.Error())
 	}
 	return &drivers.ExitResult{}

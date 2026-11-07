@@ -398,13 +398,25 @@ func (a *App) diskTerm(ctx context.Context, box BoxRecord, now time.Time) *statu
 		return &statusDiskTerm{Note: "the clock of this box cannot be read, so no pass will delete its disk: " +
 			oneLine(err.Error(), 200)}
 	}
+	// The term is a cluster setting: when it cannot be read, this command says the
+	// time is unknown and why, and still shows everything else about the box.
+	term := a.readBoxTerm(ctx)
 	if !seen {
-		return &statusDiskTerm{Note: "no reap pass has seen this box stopped yet; its disk is deleted 24 hours after " +
-			"the first pass that sees it (`box reap` runs every 15 minutes)"}
+		if !term.known() {
+			return &statusDiskTerm{Note: "no reap pass has seen this box stopped yet; its disk is deleted after the " +
+				"cluster's stopped-box term, which cannot be read now: " + term.why}
+		}
+		return &statusDiskTerm{Note: "no reap pass has seen this box stopped yet; its disk is deleted " +
+			termWords(term.term) + " after the first pass that sees it (`box reap` runs every 15 minutes)"}
 	}
-	removesAt := clock.at.Add(boxStoppedTerm)
+	if !term.known() {
+		return &statusDiskTerm{StoppedAt: clock.at.UTC().Format(time.RFC3339),
+			Note: "its disk is deleted after the cluster's stopped-box term, which cannot be read now, so this " +
+				"command cannot say when: " + term.why}
+	}
+	removesAt := clock.at.Add(term.term)
 	left := removesAt.Sub(now)
-	note := fmt.Sprintf("deleted at %s, 24 hours after it stopped", removesAt.UTC().Format(time.RFC3339))
+	note := fmt.Sprintf("deleted at %s, %s after it stopped", removesAt.UTC().Format(time.RFC3339), termWords(term.term))
 	switch {
 	case left <= 0:
 		note += "; that time has passed, and the next `box reap` deletes it (`box start " + box.ID + "` runs it again first)"

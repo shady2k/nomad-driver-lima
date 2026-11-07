@@ -218,6 +218,14 @@ sys.exit(0 if acl.get("JobID") == "box-test" and acl.get("Namespace") == "defaul
     fail "the operator cannot deregister a job"
   fi
 
+  # The cluster's stopped-box term is a variable the operator sets and the pass
+  # reads: write it with the operator token, so the reap probe below has one to
+  # read and a write of it to be refused.
+  log "writing the stopped-box term with the operator token"
+  expect "operator: write the stopped-box term" PUT "/v1/var/nomad/jobs/box-reap?namespace=$NS" 200 \
+    '{"Items":{"stopped_term":"48h"}}'
+  expect "operator: read the stopped-box term" GET "/v1/var/nomad/jobs/box-reap?namespace=$NS" 200
+
   log "applying the box-reap policy to the job reap-boxes"
   if "$ROOT/deploy/acl/apply.sh" reap >"$WORK/reap.log" 2>&1; then
     pass "apply.sh reap applied the policy"
@@ -256,6 +264,9 @@ sys.exit(0 if acl.get("JobID") == "reap-boxes" and not acl.get("Group") and not 
   expect "reap: read the clock of a box" GET "/v1/var/nomad/jobs/box-reap-probe/stopped?namespace=$NS" 200
   expect "reap: delete the clock of a box" DELETE "/v1/var/nomad/jobs/box-reap-probe/stopped?namespace=$NS" "200 204"
   expect "reap: delete the description of a box" DELETE "/v1/var/nomad/jobs/box-reap-probe/spec?namespace=$NS" "200 204 404"
+  expect "reap: read the stopped-box term" GET "/v1/var/nomad/jobs/box-reap?namespace=$NS" 200
+  expect "denied: reap writes the stopped-box term" PUT "/v1/var/nomad/jobs/box-reap?namespace=$NS" 403 \
+    '{"Items":{"stopped_term":"1m"}}'
   expect "reap: purge a job that is already over" DELETE "/v1/job/box-reap-probe?purge=true&namespace=$NS" "200 404"
   expect "denied: write the executor credentials" PUT "/v1/var/nomad/jobs/box-executors?namespace=$NS" 403 \
     '{"Items":{"k":"v"}}'
@@ -264,6 +275,7 @@ sys.exit(0 if acl.get("JobID") == "reap-boxes" and not acl.get("Group") and not 
     '{"Items":{"stopped_at":"2026-01-01T00:00:00Z"}}'
   token=$operator_token
   "$NOMAD" acl token delete -accessor "$reap_accessor" >/dev/null 2>&1 || true
+  expect "operator: delete the stopped-box term" DELETE "/v1/var/nomad/jobs/box-reap?namespace=$NS" "200 204"
 
   if ((fails > 0)); then
     printf '\n%d check(s) failed\n' "$fails"

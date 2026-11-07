@@ -72,6 +72,12 @@ func TestBoxOperatorPolicyGrantsWhatTheCommandNeeds(t *testing.T) {
 		require.True(t, operator.AllowVariableOperation("default", boxStoreVariable, op, nil),
 			"the operator must be able to %s %s", op, boxStoreVariable)
 	}
+	// The cluster's stopped-box term: `box reap term` reads it, `set` writes it,
+	// `unset` deletes the variable.
+	for _, op := range []string{acl.VariablesCapabilityRead, acl.VariablesCapabilityWrite, acl.VariablesCapabilityDestroy} {
+		require.True(t, operator.AllowVariableOperation("default", boxReapVariable, op, nil),
+			"the operator must be able to %s %s", op, boxReapVariable)
+	}
 	// The description of a box, where its job cannot be: create/start/resize/
 	// upgrade write it, ls/status/start read it, rm deletes it.
 	for _, op := range []string{acl.VariablesCapabilityRead, acl.VariablesCapabilityWrite, acl.VariablesCapabilityDestroy} {
@@ -145,6 +151,13 @@ func TestBoxReapPolicyGrantsWhatThePassNeeds(t *testing.T) {
 	}
 	require.True(t, reap.AllowVariableOperation("default", BoxSpecVariable("dev1"), acl.VariablesCapabilityDestroy, nil),
 		"the description goes with the disk")
+	// The cluster's stopped-box term: the pass reads it once and never writes it.
+	require.True(t, reap.AllowVariableOperation("default", boxReapVariable, acl.VariablesCapabilityRead, nil),
+		"the pass reads the term before it looks at a box")
+	for _, op := range []string{acl.VariablesCapabilityWrite, acl.VariablesCapabilityDestroy} {
+		require.False(t, reap.AllowVariableOperation("default", boxReapVariable, op, nil),
+			"the pass must not %s the cluster's term: only `box reap term set` writes it", op)
+	}
 	require.False(t, reap.AllowVariableOperation("default", boxExecutorsVariable, acl.VariablesCapabilityWrite, nil),
 		"the executor credentials are not the pass's business")
 	require.False(t, reap.AllowVariableOperation("default", boxStoreVariable, acl.VariablesCapabilityRead, nil))
@@ -228,5 +241,13 @@ func TestACLPoliciesUseTheNamesTheCommandUses(t *testing.T) {
 			"%s must name the variable the command reads and writes", name)
 		require.Contains(t, string(data), `namespace "default"`,
 			"%s must be for the namespace a box is created in", name)
+	}
+	// The term lives on a named path of its own, and both policies name it
+	// exactly: a glob would also match nomad/jobs/box-executors.
+	for _, name := range []string{"box-operator.policy.hcl", "box-reap.policy.hcl"} {
+		data, err := os.ReadFile(filepath.Join(aclPolicyDir(t), name))
+		require.NoError(t, err)
+		require.Contains(t, string(data), `"`+boxReapVariable+`"`,
+			"%s must name the variable that holds the stopped-box term", name)
 	}
 }

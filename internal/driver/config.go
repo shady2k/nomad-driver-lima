@@ -293,12 +293,12 @@ type TaskConfig struct {
 
 // ReapConfig is the task's optional reap block.
 //
-// It carries nothing, and that is the point: the term is one number for everyone
-// (24 hours, internal/cli), and there is no extension, no `box keep` and no
-// per-box setting. A task that could set the term would be a cluster-wide
-// setting of a rule of the product. A test does not need one either: it writes an
-// older clock into the variable nomad/jobs/box-<id>/stopped, and the pass reads
-// that.
+// It carries nothing, and that is the point: the term is one value for the whole
+// cluster, in the Nomad variable nomad/jobs/box-reap (24 hours by default), and
+// there is no extension, no `box keep` and no per-box setting. A task that could
+// set the term would be a second place for a cluster-wide setting; `box reap term
+// set` writes the variable. A test does not need one either: it writes an older
+// clock into the variable nomad/jobs/box-<id>/stopped, and the pass reads that.
 type ReapConfig struct{}
 
 // taskConfigSpec is the HCL schema of the task's driver block.

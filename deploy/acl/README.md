@@ -123,12 +123,14 @@ a box job (one group, one task).
 
 ## The reap pass
 
-`box reap` deletes the disk of a box that has not run for 24 hours. The periodic
-job `reap-boxes` (deploy/reap-boxes.nomad.hcl, registered with `deploy/reap.sh`) runs
-that pass as a task of the box driver, and the task authenticates with its **own
-workload identity**: the client sets `NOMAD_UNIX_ADDR` (the task API's unix
-socket) and `NOMAD_TOKEN` (the identity's token) for a task whose job has
-`identity { env = true }`. No secret and no address of the cluster is in the job.
+`box reap` deletes the disk of a box that has not run for the cluster's
+stopped-box term, 24 hours unless the operator set another with `box reap term
+set`. The periodic job `reap-boxes` (deploy/reap-boxes.nomad.hcl, registered with
+`deploy/reap.sh`) runs that pass as a task of the box driver, and the task
+authenticates with its **own workload identity**: the client sets
+`NOMAD_UNIX_ADDR` (the task API's unix socket) and `NOMAD_TOKEN` (the identity's
+token) for a task whose job has `identity { env = true }`. No secret and no
+address of the cluster is in the job.
 
 Nomad resolves the policies of a dispatched allocation by the **parent** job id
 (`structs.Job.GetIDforWorkloadIdentity`), so one attachment to the periodic job
@@ -142,12 +144,13 @@ The policy grants exactly what a pass needs: `list-jobs` and `read-job` (the
 boxes, their allocations, and the bakes and publishes that may be using a disk),
 `submit-job` (purge the job of a box whose disk goes), `host-volume-read` and
 `host-volume-delete` (find and delete the box disks), `node read` (a node that is
-down is never a reason to delete anything), and `read`/`write`/`destroy` on
-`nomad/jobs/box-<id>/stopped` plus `destroy` on `nomad/jobs/box-<id>/spec`.
+down is never a reason to delete anything), `read`/`write`/`destroy` on
+`nomad/jobs/box-<id>/stopped`, `destroy` on `nomad/jobs/box-<id>/spec`, and
+`read` on `nomad/jobs/box-reap` (the cluster's stopped-box term).
 
-The two variable paths are named one by one, not as `nomad/jobs/box-*`: a glob
-there also matches `nomad/jobs/box-executors`, which holds the executor
-credentials and is none of the pass's business.
+The variable paths are named one by one, not as `nomad/jobs/box-*`: a glob there
+also matches `nomad/jobs/box-executors`, which holds the executor credentials and
+is none of the pass's business.
 
 A token that should only run the pass is a token with this policy, but the
 product needs no such token: the pass runs as the job's workload identity.
@@ -169,7 +172,8 @@ and deregister it — while writing an ACL policy, writing another variable, lis
 another namespace and writing a node are all denied. It also checks that each
 job-attached policy lands on its job (`JobACL` of `box-workload-test` and of
 `reap-boxes`) and that a token with the reap policy can read the clock of a box
-and cannot write the executors variable.
+and the cluster's stopped-box term, and cannot write either the executors
+variable or the term.
 
 ## When ACLs are off
 

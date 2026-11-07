@@ -5,8 +5,9 @@ package cli
 // A box is for one task. The agent hands its results over through git and deletes
 // the box itself with `box rm <id> --yes`; the pass is the backstop for one that
 // forgot. It looks at every box disk on the cluster and deletes the disk of a box
-// that has not run for boxStoppedTerm, so a stopped box's disk is gone 24 hours
-// after it stopped.
+// that has not run for the cluster's stopped-box term, 24 hours unless the
+// operator set another (nomad/jobs/box-reap, see reapterm.go). The term is read
+// once, before any box is looked at, and used for every box in the pass.
 //
 // The pass is one function, run from two places: `box reap` on the coordinator,
 // and the periodic Nomad job `reap-boxes` (deploy/reap-boxes.nomad.hcl), which is a
@@ -93,6 +94,14 @@ type reapResult struct {
 // ReapOnce runs one pass over the cluster and returns what it did. With dryRun
 // set it deletes nothing and reports what it would delete and when.
 func (a *App) ReapOnce(ctx context.Context, dryRun bool) (reapResult, error) {
+	// The term comes first, and a term that cannot be used stops the pass before
+	// it looks at a box: the pass then deletes nothing and writes no clock. A
+	// fallback to the default here would delete the disks of a cluster set to 7
+	// days after 24 hours.
+	term, err := a.readBoxStoppedTerm(ctx)
+	if err != nil {
+		return reapResult{}, wrapf(err, "the pass deleted nothing and wrote no clock")
+	}
 	volumes, err := a.Nomad.HostVolumes(ctx)
 	if err != nil {
 		return reapResult{}, wrapf(err, "cannot list the host volumes, so a pass cannot find a box disk")
@@ -132,7 +141,7 @@ func (a *App) ReapOnce(ctx context.Context, dryRun bool) (reapResult, error) {
 		if ctx.Err() != nil {
 			break
 		}
-		box := a.reapBox(ctx, id, byID[id], jobs, allocs, nodes, dryRun)
+		box := a.reapBox(ctx, id, byID[id], jobs, allocs, nodes, dryRun, term)
 		res.Boxes = append(res.Boxes, box)
 		switch box.Outcome {
 		case reapDeleted:
@@ -147,7 +156,7 @@ func (a *App) ReapOnce(ctx context.Context, dryRun bool) (reapResult, error) {
 // reapBox decides one box: it reads the state of the box, its clock, and deletes
 // the disk when the term ran out and nothing says the box came back.
 func (a *App) reapBox(ctx context.Context, id string, volume *api.HostVolumeStub, jobs []*api.JobListStub,
-	allocs []*api.AllocationListStub, nodes map[string]*api.Node, dryRun bool) reapedBox {
+	allocs []*api.AllocationListStub, nodes map[string]*api.Node, dryRun bool, term time.Duration) reapedBox {
 	out := reapedBox{ID: id}
 	if volume.CapacityBytes > 0 {
 		out.DiskBytes = volume.CapacityBytes
@@ -222,7 +231,7 @@ func (a *App) reapBox(ctx context.Context, id string, volume *api.HostVolumeStub
 		// A dry run writes nothing, not even the clock of a box it has not seen
 		// before: the term shown is the one this pass would start.
 		if dryRun {
-			setReapClock(&out, now, now)
+			setReapClock(&out, now, now, term)
 			out.Outcome = reapStarted
 			return out
 		}
@@ -232,12 +241,12 @@ func (a *App) reapBox(ctx context.Context, id string, volume *api.HostVolumeStub
 			out.Note = oneLine(err.Error(), 240)
 			return out
 		}
-		setReapClock(&out, clock.at, now)
+		setReapClock(&out, clock.at, now, term)
 		out.Outcome = reapStarted
 		return out
 	}
-	setReapClock(&out, clock.at, now)
-	if now.Sub(clock.at) < boxStoppedTerm {
+	setReapClock(&out, clock.at, now, term)
+	if now.Sub(clock.at) < term {
 		out.Outcome = reapWaiting
 		return out
 	}
@@ -292,7 +301,7 @@ func (a *App) reapBox(ctx context.Context, id string, volume *api.HostVolumeStub
 		out.Note = oneLine(err.Error(), 300)
 		// The claim marked the clock before the disk went. A disk that is still
 		// there gets its time back, so the next pass tries again instead of
-		// waiting another 24 hours for a box that has already served its term.
+		// waiting another full term for a box that has already served its term.
 		if a.volumeExists(ctx, id) {
 			if clockErr := a.releaseBoxClock(ctx, id, claimedClock); clockErr != nil {
 				out.Note = joinNotes(out.Note, "and its clock could not be restored: "+oneLine(clockErr.Error(), 200))
@@ -305,10 +314,10 @@ func (a *App) reapBox(ctx context.Context, id string, volume *api.HostVolumeStub
 }
 
 // setReapClock fills in when the box was first seen stopped and when its disk is
-// due.
-func setReapClock(out *reapedBox, at, now time.Time) {
+// due, from the term this pass read.
+func setReapClock(out *reapedBox, at, now time.Time, term time.Duration) {
 	out.StoppedAt = at.UTC().Format(time.RFC3339)
-	out.RemovesAt = at.Add(boxStoppedTerm).UTC().Format(time.RFC3339)
+	out.RemovesAt = at.Add(term).UTC().Format(time.RFC3339)
 	if d := now.Sub(at); d > 0 {
 		out.StoppedForSeconds = int64(d.Seconds())
 	}
