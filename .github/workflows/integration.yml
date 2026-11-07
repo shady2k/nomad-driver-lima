@@ -91,6 +91,12 @@ jobs:
       - name: The driver can make its memory scope
         run: systemd-run --user --scope --collect -q true
 
+      # A box's task files live under /run/box-files, the driver's default, and
+      # the client of these suites runs as the runner user, who cannot create a
+      # directory in /run.
+      - name: The driver can keep task files in /run
+        run: sudo install -d -o "$(id -un)" /run/box-files
+
       - name: Install Nomad ${{ env.NOMAD_VERSION }}
         run: |
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/nomad.zip" \
