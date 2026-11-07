@@ -164,7 +164,7 @@ func TestShareNoteNamesWhatIsOverAQuarter(t *testing.T) {
 	require.Contains(t, note, "16 of 32 GiB of disk")
 	require.Contains(t, note, "on node node-1")
 	require.Contains(t, note, "the node is shared")
-	require.Contains(t, note, "`box stop dev1` or `box rm dev1 --yes`")
+	require.Contains(t, note, "`box rm dev1 --yes` when the task is done")
 
 	// Exactly a quarter is inside the quarter: the note is about taking more.
 	require.Empty(t, node.ShareNote("dev1", 3, 4096, 8))

@@ -103,6 +103,54 @@ func TestBoxOperatorPolicyGrantsWhatTheCommandNeeds(t *testing.T) {
 
 // TestBoxStorePolicyIsForAPublishOnly: the store's url and token reach a publish
 // job through its own policy, and a box never reads them.
+// TestBoxReapPolicyGrantsWhatThePassNeeds: the periodic reap task authenticates
+// with its own workload identity, so this policy is what lets it look at every
+// box on the cluster and delete the disk of one that served its term -- and it
+// grants nothing of the operator's.
+func TestBoxReapPolicyGrantsWhatThePassNeeds(t *testing.T) {
+	reap := aclOf(t, readACLPolicy(t, "box-reap.policy.hcl"))
+
+	for _, capability := range []string{
+		acl.NamespaceCapabilityListJobs,       // the boxes, and the bakes and publishes
+		acl.NamespaceCapabilityReadJob,        // one box's job, its allocations, the alloc list
+		acl.NamespaceCapabilitySubmitJob,      // purge the job of a box whose disk goes
+		acl.NamespaceCapabilityHostVolumeRead, // list the box disks
+		acl.NamespaceCapabilityHostVolumeDelete,
+	} {
+		require.True(t, reap.AllowNsOp("default", capability), "the reap pass must be able to %s", capability)
+	}
+	for _, capability := range []string{
+		acl.NamespaceCapabilityAllocExec,
+		acl.NamespaceCapabilityReadLogs,
+		acl.NamespaceCapabilityHostVolumeCreate,
+		acl.NamespaceCapabilityHostVolumeRegister,
+		acl.NamespaceCapabilityHostVolumeWrite,
+		acl.NamespaceCapabilityCSIWriteVolume,
+	} {
+		require.False(t, reap.AllowNsOp("default", capability),
+			"the reap pass has no business with %s: it deletes a disk that is already over", capability)
+	}
+	require.True(t, reap.AllowNodeRead(), "a node that is down is never a reason to delete a disk")
+	require.False(t, reap.AllowNodeWrite())
+	require.False(t, reap.AllowAgentRead())
+	require.False(t, reap.AllowOperatorRead())
+
+	// The clock and the description of a box. The two paths are named one by one
+	// so that the pass cannot write the variable that holds the executor
+	// credentials, which a nomad/jobs/box-* glob would also match.
+	for _, path := range []string{BoxStoppedVariable("dev1")} {
+		for _, op := range []string{acl.VariablesCapabilityRead, acl.VariablesCapabilityWrite, acl.VariablesCapabilityDestroy} {
+			require.True(t, reap.AllowVariableOperation("default", path, op, nil), "the reap pass must %s %s", op, path)
+		}
+	}
+	require.True(t, reap.AllowVariableOperation("default", BoxSpecVariable("dev1"), acl.VariablesCapabilityDestroy, nil),
+		"the description goes with the disk")
+	require.False(t, reap.AllowVariableOperation("default", boxExecutorsVariable, acl.VariablesCapabilityWrite, nil),
+		"the executor credentials are not the pass's business")
+	require.False(t, reap.AllowVariableOperation("default", boxStoreVariable, acl.VariablesCapabilityRead, nil))
+	require.False(t, reap.AllowVariableOperation("default", "somestore/secret", acl.VariablesCapabilityRead, nil))
+}
+
 func TestBoxStorePolicyIsForAPublishOnly(t *testing.T) {
 	store := aclOf(t, readACLPolicy(t, "box-store.policy.hcl"))
 	job := BoxPublishJobName("project-1")

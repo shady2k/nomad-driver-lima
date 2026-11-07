@@ -57,6 +57,11 @@ type BoxRecord struct {
 	GuestError string `json:"guest_error,omitempty"`
 	// Note explains a state that needs a sentence.
 	Note string `json:"note,omitempty"`
+	// StoppedAt is when a reap pass first saw the box not running, and RemovesAt
+	// when its disk is deleted: StoppedAt plus the term (24 hours). Both are
+	// empty for a box that runs, and for one no pass has seen not running yet.
+	StoppedAt string `json:"stopped_at,omitempty"`
+	RemovesAt string `json:"removes_at,omitempty"`
 	// VMState is what qemu says about the box's VM when it is not running
 	// normally: "io-error" for a VM qemu stopped because it could not write its
 	// disk, "paused" for one an operator paused. State stays what Nomad reports --
@@ -438,6 +443,29 @@ func (a *App) boxVolumes(ctx context.Context) (map[string]*api.HostVolumeStub, e
 	return out, nil
 }
 
+// fillStoppedClocks reads the clock of every box that is not running, so a
+// listing says when the pass deletes its disk. A box no pass has seen not running
+// has no clock, and says so instead of being given a time.
+func (a *App) fillStoppedClocks(ctx context.Context, boxes []BoxRecord) {
+	for i := range boxes {
+		a.fillStoppedClock(ctx, &boxes[i])
+	}
+}
+
+// fillStoppedClock reads the clock of one box.
+func (a *App) fillStoppedClock(ctx context.Context, box *BoxRecord) {
+	switch box.State {
+	case "running", "starting", "unknown", "deleted", "gone":
+		return
+	}
+	clock, seen, err := a.readBoxClock(ctx, box.ID)
+	if err != nil || !seen {
+		return
+	}
+	box.StoppedAt = clock.at.UTC().Format(time.RFC3339)
+	box.RemovesAt = clock.at.Add(boxStoppedTerm).UTC().Format(time.RFC3339)
+}
+
 // collectBoxes returns every box on the cluster.
 func (a *App) collectBoxes(ctx context.Context) ([]BoxRecord, error) {
 	stubs, err := a.Nomad.JobList(ctx)
@@ -466,6 +494,11 @@ func (a *App) collectBoxes(ctx context.Context) ([]BoxRecord, error) {
 				continue
 			}
 			return nil, wrapf(err, "cannot read job %s", stub.ID)
+		}
+		// A name that starts with box- is not proof: a job of this project that
+		// is not a box may carry it, and the meta marker is what decides.
+		if !IsBoxJob(job) {
+			continue
 		}
 		rec := boxRecord(job, byJob[stub.ID], now)
 		withJob[rec.ID] = true
@@ -499,6 +532,7 @@ func (a *App) collectBoxes(ctx context.Context) ([]BoxRecord, error) {
 		out = append(out, boxRecordStored(job, doc, volumes[id], now))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	a.fillStoppedClocks(ctx, out)
 	return out, nil
 }
 
@@ -522,7 +556,9 @@ func (a *App) findBox(ctx context.Context, id string) (BoxRecord, *api.Job, erro
 		if err != nil {
 			return BoxRecord{}, nil, err
 		}
-		return boxRecord(job, byJob[BoxJobName(id)], a.now()), job, nil
+		rec := boxRecord(job, byJob[BoxJobName(id)], a.now())
+		a.fillStoppedClock(ctx, &rec)
+		return rec, job, nil
 	case !isNotFoundErr(err):
 		return BoxRecord{}, nil, wrapf(err, "cannot read the job %s", BoxJobName(id))
 	}
@@ -541,12 +577,18 @@ func (a *App) findBox(ctx context.Context, id string) (BoxRecord, *api.Job, erro
 		return BoxRecord{}, nil, a.noSuchBox(ctx, id)
 	}
 	if stored == nil {
-		return boxRecordVolumeOnly(id, volume), nil, nil
+		rec := boxRecordVolumeOnly(id, volume)
+		a.fillStoppedClock(ctx, &rec)
+		return rec, nil, nil
 	}
 	if !hasVolume {
-		return boxRecordStored(stored, doc, nil, a.now()), stored, nil
+		rec := boxRecordStored(stored, doc, nil, a.now())
+		a.fillStoppedClock(ctx, &rec)
+		return rec, stored, nil
 	}
-	return boxRecordStored(stored, doc, volume, a.now()), stored, nil
+	rec := boxRecordStored(stored, doc, volume, a.now())
+	a.fillStoppedClock(ctx, &rec)
+	return rec, stored, nil
 }
 
 // noSuchBox builds the not-found error, listing the boxes that do exist.
@@ -688,10 +730,12 @@ func boxNotRunning(box BoxRecord) error {
 		return boxStatef("the box %s is gone: its disk no longer exists, so there is nothing to start. `box rm %s --yes` "+
 			"removes what is left of it", box.ID, box.ID)
 	case box.JobMissing:
-		return boxStatef("the box %s is stopped: Nomad no longer has its job, and its disk is kept. `box start %s` runs "+
-			"it again", box.ID, box.ID)
+		return boxStatef("the box %s is stopped: Nomad no longer has its job. Its disk is deleted 24 hours after it "+
+			"stopped -- `box status %s` says when -- and `box start %s` runs it again until then",
+			box.ID, box.ID, box.ID)
 	case box.State == "stopped":
-		return boxStatef("the box %s is stopped: its disk is kept. `box start %s` runs it again", box.ID, box.ID)
+		return boxStatef("the box %s is stopped: its disk is deleted 24 hours after it stopped, and `box start %s` "+
+			"runs it again until then", box.ID, box.ID)
 	case box.State == "starting":
 		return boxStatef("the box %s is starting; `box status %s` shows when the guest answers", box.ID, box.ID)
 	default:

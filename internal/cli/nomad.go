@@ -26,6 +26,8 @@ type Nomad interface {
 	JobList(ctx context.Context) ([]*api.JobListStub, error)
 	// Job returns one job.
 	Job(ctx context.Context, id string) (*api.Job, error)
+	// JobAllocations returns the allocations of one job.
+	JobAllocations(ctx context.Context, jobID string) ([]*api.AllocationListStub, error)
 	// RegisterJob submits a job and returns the evaluation it created.
 	RegisterJob(ctx context.Context, job *api.Job) (*api.JobRegisterResponse, error)
 	// StopJob stops a job; purge also removes it and its history.
@@ -55,8 +57,19 @@ type Nomad interface {
 	VariableRead(ctx context.Context, path string) (*api.Variable, error)
 	// VariableWrite creates or replaces a Nomad Variable.
 	VariableWrite(ctx context.Context, v *api.Variable) (*api.Variable, error)
+	// VariableCreateChecked creates a Nomad Variable only when its path holds
+	// none: a path somebody else created answers a conflict.
+	VariableCreateChecked(ctx context.Context, v *api.Variable) (*api.Variable, error)
+	// VariableUpdateChecked replaces a Nomad Variable only when its ModifyIndex
+	// is the one that was read: a variable somebody else wrote answers a
+	// conflict.
+	VariableUpdateChecked(ctx context.Context, v *api.Variable) (*api.Variable, error)
 	// VariableDelete removes a Nomad Variable.
 	VariableDelete(ctx context.Context, path string) error
+	// VariableDeleteChecked removes a Nomad Variable only when its ModifyIndex
+	// is the one that was read: a variable somebody else wrote or deleted
+	// answers a conflict.
+	VariableDeleteChecked(ctx context.Context, path string, modifyIndex uint64) error
 
 	// Exec runs a command inside a task and returns its exit code.
 	Exec(ctx context.Context, alloc *api.Allocation, task string, cmd []string,
@@ -68,10 +81,20 @@ type Nomad interface {
 
 // NewNomadClient builds the Nomad API client the nomad CLI would build.
 func NewNomadClient() (Nomad, error) {
-	cfg := api.DefaultConfig()
+	return NewNomadClientWithConfig(api.DefaultConfig())
+}
+
+// NewNomadClientWithConfig builds a Nomad API client for an explicit
+// configuration. It is what a task of the driver uses: the address is the task
+// API's unix socket and the token is the task's own workload identity, so the
+// task needs no secret of the cluster.
+func NewNomadClientWithConfig(cfg *api.Config) (Nomad, error) {
+	if cfg == nil {
+		cfg = api.DefaultConfig()
+	}
 	client, err := api.NewClient(cfg)
 	if err != nil {
-		return nil, wrapf(err, "cannot build a Nomad client (check NOMAD_ADDR)")
+		return nil, wrapf(err, "cannot build a Nomad client for %q", cfg.Address)
 	}
 	return &nomadAPI{c: client}, nil
 }
@@ -104,6 +127,11 @@ func (n *nomadAPI) JobList(ctx context.Context) ([]*api.JobListStub, error) {
 func (n *nomadAPI) Job(ctx context.Context, id string) (*api.Job, error) {
 	job, _, err := n.c.Jobs().Info(id, nil)
 	return job, err
+}
+
+func (n *nomadAPI) JobAllocations(ctx context.Context, jobID string) ([]*api.AllocationListStub, error) {
+	allocs, _, err := n.c.Jobs().Allocations(jobID, false, nil)
+	return allocs, err
 }
 
 func (n *nomadAPI) RegisterJob(ctx context.Context, job *api.Job) (*api.JobRegisterResponse, error) {
@@ -184,8 +212,23 @@ func (n *nomadAPI) VariableWrite(ctx context.Context, v *api.Variable) (*api.Var
 	return written, nil
 }
 
+func (n *nomadAPI) VariableCreateChecked(ctx context.Context, v *api.Variable) (*api.Variable, error) {
+	written, _, err := n.c.Variables().CheckedCreate(v, nil)
+	return written, err
+}
+
+func (n *nomadAPI) VariableUpdateChecked(ctx context.Context, v *api.Variable) (*api.Variable, error) {
+	written, _, err := n.c.Variables().CheckedUpdate(v, nil)
+	return written, err
+}
+
 func (n *nomadAPI) VariableDelete(ctx context.Context, path string) error {
 	_, err := n.c.Variables().Delete(path, nil)
+	return err
+}
+
+func (n *nomadAPI) VariableDeleteChecked(ctx context.Context, path string, modifyIndex uint64) error {
+	_, err := n.c.Variables().CheckedDelete(path, modifyIndex, nil)
 	return err
 }
 

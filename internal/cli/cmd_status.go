@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/nomad/api"
 )
@@ -24,6 +25,9 @@ type statusOutput struct {
 	// this box is healthy.
 	VMNote   string `json:"vm_note,omitempty"`
 	NodeNote string `json:"node_note,omitempty"`
+	// DiskTerm says when the disk of a box that is not running is deleted. It is
+	// absent for a box that runs, which is never on a term.
+	DiskTerm *statusDiskTerm `json:"disk_term,omitempty"`
 }
 
 type statusSpec struct {
@@ -55,6 +59,16 @@ type statusAlloc struct {
 	StartedAt     string `json:"started_at,omitempty"`
 	Restarts      uint64 `json:"restarts"`
 	Description   string `json:"description,omitempty"`
+}
+
+// statusDiskTerm is the JSON field of `box status` that says when the disk of a
+// box that is not running is deleted.
+type statusDiskTerm struct {
+	StoppedAt string `json:"stopped_at,omitempty"`
+	RemovesAt string `json:"removes_at,omitempty"`
+	// Note is the sentence a person reads: how long is left, or that no pass has
+	// seen the box not running yet.
+	Note string `json:"note,omitempty"`
 }
 
 type statusVolume struct {
@@ -113,6 +127,7 @@ func (a *App) cmdStatus(ctx context.Context, args []string) error {
 	if volume := a.volumeFor(ctx, id); volume != nil {
 		out.Volume = volume
 	}
+	out.DiskTerm = a.diskTerm(ctx, box, a.now())
 	// What the disk really occupies, as the box driver reports it on the node
 	// that holds it: the volume's node is the one that counts, also when the box
 	// is stopped and has no allocation.
@@ -271,6 +286,9 @@ func (a *App) printStatus(out *statusOutput) {
 	if out.Box.Note != "" {
 		a.note("  note    %s", out.Box.Note)
 	}
+	if out.DiskTerm != nil {
+		a.note("  disk    %s", out.DiskTerm.Note)
+	}
 	if out.Spec != nil {
 		a.note("  spec    %s, task reserves %d MiB / %d MHz",
 			describeSpec(BoxSpec{CPUs: out.Spec.CPUs, MemoryMiB: out.Spec.MemoryMiB, DiskGiB: out.Spec.DiskGiB,
@@ -364,6 +382,39 @@ func (a *App) printStatus(out *statusOutput) {
 			a.note("    %s  %-8s %-24s %-8s turn %d  %s", session.ID, session.Executor, session.Model, session.stateLabel(),
 				session.LastTurn, oneLine(session.Title, 60))
 		}
+	}
+}
+
+// diskTerm says when the disk of a box that is not running is deleted, and for a
+// box that runs says nothing: a running box is never touched, however long it
+// idles.
+func (a *App) diskTerm(ctx context.Context, box BoxRecord, now time.Time) *statusDiskTerm {
+	switch box.State {
+	case "running", "starting", "unknown", "deleted", "gone":
+		return nil
+	}
+	clock, seen, err := a.readBoxClock(ctx, box.ID)
+	if err != nil {
+		return &statusDiskTerm{Note: "the clock of this box cannot be read, so no pass will delete its disk: " +
+			oneLine(err.Error(), 200)}
+	}
+	if !seen {
+		return &statusDiskTerm{Note: "no reap pass has seen this box stopped yet; its disk is deleted 24 hours after " +
+			"the first pass that sees it (`box reap` runs every 15 minutes)"}
+	}
+	removesAt := clock.at.Add(boxStoppedTerm)
+	left := removesAt.Sub(now)
+	note := fmt.Sprintf("deleted at %s, 24 hours after it stopped", removesAt.UTC().Format(time.RFC3339))
+	switch {
+	case left <= 0:
+		note += "; that time has passed, and the next `box reap` deletes it (`box start " + box.ID + "` runs it again first)"
+	default:
+		note += fmt.Sprintf(" (in %s); `box start %s` runs it again", humanDuration(left), box.ID)
+	}
+	return &statusDiskTerm{
+		StoppedAt: clock.at.UTC().Format(time.RFC3339),
+		RemovesAt: removesAt.UTC().Format(time.RFC3339),
+		Note:      note,
 	}
 }
 

@@ -304,22 +304,23 @@ func TestCapacityShowsTheProjectOfEachBox(t *testing.T) {
 	require.Equal(t, "my-project", doc.Nodes[0].Disks[0].Project)
 }
 
-// TestCreateSaysABoxCanBeStopped: the line after a box is created, in the moment
-// its owner decides how long to keep it awake.
-func TestCreateSaysABoxCanBeStopped(t *testing.T) {
+// TestCreateSaysABoxIsForOneTask: the line after a box is created, in the moment
+// its owner decides how long to keep it.
+func TestCreateSaysABoxIsForOneTask(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
 	require.Equal(t, ExitOK, ta.run(t, "create", "dev1", "--image", "1.0.0"), ta.errOut.String())
 	out := ta.errOut.String()
-	require.Contains(t, out, "a stopped box holds no CPU and no memory")
-	require.Contains(t, out, "`box stop dev1` gives them back")
-	require.Contains(t, out, "`box start dev1` brings it back with its disk and its sessions")
+	require.Contains(t, out, "this box is for this task")
+	require.Contains(t, out, "`box rm dev1 --yes`")
+	require.Contains(t, out, "has its disk deleted 24 hours after it stopped")
 }
 
-// TestWaitSaysTheBoxCanBeStopped: after a turn that finished, with no other turn
-// running in the box, the wait says what stopping the box costs -- nothing.
-func TestWaitSaysTheBoxCanBeStopped(t *testing.T) {
-	line := "box stop dev1 if you do not need this box for a while: its disk and sessions are kept"
+// TestWaitSaysWhenTheBoxIsDone: after a turn that finished, with no other turn
+// running in the box, the wait says what to do with the box now that it is idle.
+func TestWaitSaysWhenTheBoxIsDone(t *testing.T) {
+	line := "box rm dev1 --yes when the task is done: the box and its disk go with it. `box stop dev1` is only a " +
+		"pause, and a box that is not running loses its disk 24 hours after it stopped"
 
 	ta := newTestApp(t, indexJSON)
 	ta.addBox(t, "dev1")
@@ -370,7 +371,7 @@ func TestCreateRefusalNamesTheIdleBoxes(t *testing.T) {
 	rc := ta.run(t, "create", "dev1", "--image", "1.0.0", "--memory-mib", "16384", "--project", "my-project")
 	require.Equal(t, ExitError, rc, ta.errOut.String())
 	require.Contains(t, ta.errOut.String(), "box: no node can take this box")
-	require.Contains(t, ta.errOut.String(), "your idle boxes: mine 2h (box stop <id>)")
+	require.Contains(t, ta.errOut.String(), "your idle boxes: mine 2h (box rm <id> --yes when their task is done)")
 	require.Contains(t, ta.errOut.String(), "other idle boxes: theirs 2h (not yours to stop)")
 	_, created := ta.cluster.jobs["box-dev1"]
 	require.False(t, created, "nothing was created")
@@ -400,7 +401,7 @@ func TestCreateRefusalNamesTheIdleBoxes(t *testing.T) {
 		"--wait", "1m")
 	require.Equal(t, ExitError, rc, ta.errOut.String())
 	require.Contains(t, ta.errOut.String(), "no room for box dev1 yet")
-	require.Contains(t, ta.errOut.String(), "your idle boxes: mine 2h (box stop <id>)")
+	require.Contains(t, ta.errOut.String(), "your idle boxes: mine 2h (box rm <id> --yes when their task is done)")
 }
 
 // TestRebuildBoxCarriesTheProject: the temporary box of a rebuild is a box

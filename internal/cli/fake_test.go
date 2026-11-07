@@ -17,6 +17,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// maxTestWaits is how many times one command of a test may ask to sleep before
+// the test fails. No command of this repo comes near it; a wait that asks more
+// often is a wait that cannot end (see the sleep in newTestApp).
+const maxTestWaits = 100000
+
+// testWaitSpinPanic is what such a wait panics with.
+const testWaitSpinPanic = "a wait loop does not end: the test clock does not move (fakeClock.step = 0) and the test sleep is immediate. " +
+	"Give the command a clock that moves (newTestApp), or make it not wait (--wait=false); " +
+	"every poll of the fake cluster is kept, and this test once took a test binary to 11 GB"
+
 // fakeClock is a clock that moves one step per read, so a wait loop finishes
 // deterministically instead of sleeping.
 //
@@ -61,6 +71,7 @@ type fakeCluster struct {
 	evals          map[string]*api.Evaluation
 	allocSeq       int
 	volumeSeq      int
+	variableSeq    uint64
 	registerNo     int
 
 	// registerErr makes RegisterJob fail.
@@ -74,6 +85,36 @@ type fakeCluster struct {
 	// jobErr makes every Job read fail, which is how "Nomad cannot be asked"
 	// looks to the command.
 	jobErr error
+	// jobAllocsErr makes every JobAllocations call fail, so a pass that has to
+	// re-read the allocations of one box cannot.
+	jobAllocsErr error
+	// allocsErr makes the cluster-wide Allocations call fail.
+	allocsErr error
+	// nodeErr makes the read of one node fail, by node id: a node that is away.
+	nodeErr map[string]error
+	// volumeListErr makes HostVolumes fail, which is a cluster whose disks cannot
+	// be listed.
+	volumeListErr error
+	// variableReadErr makes every VariableRead fail.
+	variableReadErr error
+	// variableCreateErr makes every VariableCreateChecked fail.
+	variableCreateErr error
+	// onVariableDeleteChecked runs before a checked delete is decided; a test
+	// uses it to be the `box start` that cleared a box's clock first. It runs
+	// with the cluster's lock held, so it must not take it.
+	onVariableDeleteChecked func(c *fakeCluster, path string)
+	// onVariableUpdateChecked runs before a checked update is decided; a test
+	// uses it to be the `box start` that cleared a box's clock first. It runs
+	// with the cluster's lock held, so it must not take it.
+	onVariableUpdateChecked func(c *fakeCluster, path string)
+	// onJobRead runs at the start of every Job read, with the number of the read
+	// of that job; a test uses it to be a `box start` that registers the job
+	// again between two reads. It runs with the cluster's lock held.
+	onJobRead func(c *fakeCluster, id string, call int)
+	// onDeleteHostVolume runs at the start of every DeleteHostVolume call and, when
+	// it returns an error, that is what the call answers. It runs with the
+	// cluster's lock held.
+	onDeleteHostVolume func(c *fakeCluster, id string) error
 	// stopErr makes StopJob fail.
 	stopErr error
 	// stopLeavesAllocFailed makes StopJob leave the allocation's client status
@@ -100,6 +141,9 @@ type fakeCluster struct {
 	logCalls map[string]int
 	// calls records what the command asked Nomad for.
 	calls []string
+	// jobReads counts the reads of each job, so a test can act between two of
+	// them.
+	jobReads map[string]int
 	// volumeRegisterErr fails the update of an existing volume.
 	volumeRegisterErr error
 	// variableWriteErr makes every VariableWrite fail, as a token without the
@@ -147,6 +191,9 @@ func (c *fakeCluster) NodeInfo(ctx context.Context, id string) (*api.Node, error
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.record("NodeInfo " + id)
+	if err := c.nodeErr[id]; err != nil {
+		return nil, err
+	}
 	node, ok := c.nodes[id]
 	if !ok {
 		return nil, notFoundError()
@@ -187,6 +234,13 @@ func (c *fakeCluster) Job(ctx context.Context, id string) (*api.Job, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.record("Job " + id)
+	if c.jobReads == nil {
+		c.jobReads = map[string]int{}
+	}
+	c.jobReads[id]++
+	if c.onJobRead != nil {
+		c.onJobRead(c, id, c.jobReads[id])
+	}
 	if c.jobErr != nil {
 		return nil, c.jobErr
 	}
@@ -195,6 +249,22 @@ func (c *fakeCluster) Job(ctx context.Context, id string) (*api.Job, error) {
 		return nil, notFoundError()
 	}
 	return job, nil
+}
+
+func (c *fakeCluster) JobAllocations(ctx context.Context, jobID string) ([]*api.AllocationListStub, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.record("JobAllocations " + jobID)
+	if c.jobAllocsErr != nil {
+		return nil, c.jobAllocsErr
+	}
+	out := make([]*api.AllocationListStub, 0, len(c.allocs))
+	for _, alloc := range c.allocs {
+		if alloc.JobID == jobID {
+			out = append(out, allocStub(alloc))
+		}
+	}
+	return out, nil
 }
 
 func (c *fakeCluster) RegisterJob(ctx context.Context, job *api.Job) (*api.JobRegisterResponse, error) {
@@ -266,6 +336,9 @@ func (c *fakeCluster) Allocations(ctx context.Context) ([]*api.AllocationListStu
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.record("Allocations")
+	if c.allocsErr != nil {
+		return nil, c.allocsErr
+	}
 	out := make([]*api.AllocationListStub, 0, len(c.allocs))
 	for _, alloc := range c.allocs {
 		out = append(out, allocStub(alloc))
@@ -299,6 +372,9 @@ func (c *fakeCluster) HostVolumes(ctx context.Context) ([]*api.HostVolumeStub, e
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.record("HostVolumes")
+	if c.volumeListErr != nil {
+		return nil, c.volumeListErr
+	}
 	out := make([]*api.HostVolumeStub, 0, len(c.volumes)+len(c.pendingVolumes))
 	for id, left := range c.pendingVolumes {
 		if left <= 1 {
@@ -374,6 +450,11 @@ func (c *fakeCluster) DeleteHostVolume(ctx context.Context, id string, force boo
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.record(fmt.Sprintf("DeleteHostVolume %s force=%v", id, force))
+	if c.onDeleteHostVolume != nil {
+		if err := c.onDeleteHostVolume(c, id); err != nil {
+			return err
+		}
+	}
 	volume, ok := c.volumes[id]
 	if !ok {
 		return notFoundError()
@@ -400,6 +481,9 @@ func (c *fakeCluster) VariableRead(ctx context.Context, path string) (*api.Varia
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.record("VariableRead " + path)
+	if c.variableReadErr != nil {
+		return nil, c.variableReadErr
+	}
 	v, ok := c.variables[path]
 	if !ok {
 		return nil, notFoundError()
@@ -418,6 +502,47 @@ func (c *fakeCluster) VariableWrite(ctx context.Context, v *api.Variable) (*api.
 	return v, nil
 }
 
+func (c *fakeCluster) VariableCreateChecked(ctx context.Context, v *api.Variable) (*api.Variable, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.record("VariableCreateChecked " + v.Path)
+	if c.variableCreateErr != nil {
+		return nil, c.variableCreateErr
+	}
+	if existing, ok := c.variables[v.Path]; ok {
+		return nil, api.ErrCASConflict{Conflict: existing, CheckIndex: 0}
+	}
+	c.variableSeq++
+	v.CreateIndex = c.variableSeq
+	v.ModifyIndex = c.variableSeq
+	c.variables[v.Path] = v
+	return v, nil
+}
+
+func (c *fakeCluster) VariableUpdateChecked(ctx context.Context, v *api.Variable) (*api.Variable, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.record("VariableUpdateChecked " + v.Path)
+	if c.onVariableUpdateChecked != nil {
+		c.onVariableUpdateChecked(c, v.Path)
+	}
+	if c.variableWriteErr != nil {
+		return nil, c.variableWriteErr
+	}
+	existing, ok := c.variables[v.Path]
+	if !ok {
+		return nil, notFoundError()
+	}
+	if existing.ModifyIndex != v.ModifyIndex {
+		return nil, api.ErrCASConflict{Conflict: existing, CheckIndex: v.ModifyIndex}
+	}
+	c.variableSeq++
+	v.CreateIndex = existing.CreateIndex
+	v.ModifyIndex = c.variableSeq
+	c.variables[v.Path] = v
+	return v, nil
+}
+
 func (c *fakeCluster) VariableDelete(ctx context.Context, path string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -427,6 +552,27 @@ func (c *fakeCluster) VariableDelete(ctx context.Context, path string) error {
 	}
 	if _, ok := c.variables[path]; !ok {
 		return notFoundError()
+	}
+	delete(c.variables, path)
+	return nil
+}
+
+func (c *fakeCluster) VariableDeleteChecked(ctx context.Context, path string, modifyIndex uint64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.record("VariableDeleteChecked " + path)
+	if c.onVariableDeleteChecked != nil {
+		c.onVariableDeleteChecked(c, path)
+	}
+	if c.variableDeleteErr != nil {
+		return c.variableDeleteErr
+	}
+	existing, ok := c.variables[path]
+	if !ok {
+		return notFoundError()
+	}
+	if existing.ModifyIndex != modifyIndex {
+		return api.ErrCASConflict{Conflict: existing, CheckIndex: modifyIndex}
 	}
 	delete(c.variables, path)
 	return nil
@@ -544,6 +690,34 @@ func (c *fakeCluster) addNode(id, name, arch string, cpuShares, memoryMB, diskMB
 	}
 	c.nodes[id] = node
 	return node
+}
+
+// addVolume registers the disk of a box, as `box create` leaves it: the volume
+// exists on a node, and nothing else of the box has to.
+func (c *fakeCluster) addVolume(boxID, nodeID string, capacityBytes int64) *api.HostVolume {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.volumeSeq++
+	volume := &api.HostVolume{
+		ID:            fmt.Sprintf("vol-%d", c.volumeSeq),
+		Name:          BoxVolumeName(boxID),
+		PluginID:      boxVolumePluginID,
+		NodeID:        nodeID,
+		CapacityBytes: capacityBytes,
+		State:         api.HostVolumeStateReady,
+	}
+	c.volumes[volume.ID] = volume
+	return volume
+}
+
+// setNodeStatus changes what a node reports, which is what a node that went down
+// looks like to a pass.
+func (c *fakeCluster) setNodeStatus(nodeID, status string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if node := c.nodes[nodeID]; node != nil {
+		node.Status = status
+	}
 }
 
 // setNodeDiskRoom publishes what the driver reports about the filesystem a node
@@ -1007,13 +1181,34 @@ func newTestApp(t *testing.T, indexBody string) *testApp {
 	// A sleep that notices the caller stopping is what a real wait does; a
 	// command that follows a stream would otherwise run on after its context
 	// ended.
+	//
+	// It counts, because it does not wait. A wait loop's deadline comes from the
+	// test clock, and a test that freezes that clock (fakeClock.step = 0) gives
+	// the loop a deadline that never passes: with an immediate sleep the loop
+	// then spins, and every poll is a call the fake cluster records, so the test
+	// binary grows without bound. That is how one run reached 11 GB and had the
+	// kernel kill other people's processes. maxTestWaits turns it into a failed
+	// test with a stack.
+	var waitMu sync.Mutex
+	waits := 0
 	app.Sleep = func(ctx context.Context, d time.Duration) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			return nil
 		}
+		// A command's wait may run in a goroutine of its own (a bake follows the
+		// task log while it waits for it), so the count is guarded.
+		waitMu.Lock()
+		defer waitMu.Unlock()
+		// A wait whose deadline comes from this clock cannot end while the clock
+		// stands still, and while it spins it makes the fake cluster record every
+		// call.
+		if clock.step == 0 || waits > maxTestWaits {
+			panic(testWaitSpinPanic)
+		}
+		waits++
+		return nil
 	}
 	app.SetImageIndexURL("http://images.test/box-base/index.json")
 	// A box's project is resolved from the environment and from the git

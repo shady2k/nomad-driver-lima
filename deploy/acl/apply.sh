@@ -4,6 +4,7 @@
 # Usage:
 #   deploy/acl/apply.sh operator  [--token-name NAME] [--no-token] [--namespace NS]
 #   deploy/acl/apply.sh workloads [BOX ...] [--all] [--namespace NS]
+#   deploy/acl/apply.sh reap      [--namespace NS]
 #   deploy/acl/apply.sh check     [--token SECRET] [--write-probe] [--namespace NS]
 #
 #   operator    apply box-operator.policy.hcl, and (unless --no-token) create the
@@ -12,6 +13,9 @@
 #               (box-workload-<id>), so their workload identities can read
 #               nomad/jobs/box-executors. Without arguments it lists the box jobs
 #               it found and changes nothing.
+#   reap        apply box-reap.policy.hcl to the periodic job reap-boxes
+#               (deploy/reap-boxes.nomad.hcl), which then covers every child it
+#               dispatches. Register the job with deploy/reap.sh.
 #   check       run the permission probes with a token: one PASS or FAIL per
 #               probe, exit 1 if one fails. Without --token it uses NOMAD_TOKEN.
 #
@@ -44,8 +48,8 @@ command=${1:-}
 shift || true
 case $command in
   "" | -h | --help | help) usage; exit 0 ;;
-  operator | workloads | check) ;;
-  *) die "unknown subcommand '$command' (want operator, workloads or check; --help shows the usage)" ;;
+  operator | workloads | reap | check) ;;
+  *) die "unknown subcommand '$command' (want operator, workloads, reap or check; --help shows the usage)" ;;
 esac
 
 while (($# > 0)); do
@@ -171,6 +175,24 @@ cmd_workloads() {
   log "a box job created later needs its own attachment: run this command with its id"
 }
 
+# --- reap --------------------------------------------------------------------
+# The reap pass is a task of the periodic job reap-boxes, and Nomad resolves a
+# dispatched child's policies by its parent job id, so one attachment to the
+# parent covers every reap-boxes/periodic-<time> child.
+cmd_reap() {
+  need "$NOMAD"
+  local policy
+  policy=$(policy_for_namespace "$DIR/box-reap.policy.hcl")
+  [[ $policy == "$DIR/box-reap.policy.hcl" ]] || cleanup_files+=("$policy")
+
+  log "applying the box-reap policy to the job reap-boxes in namespace $NS"
+  "$NOMAD" acl policy apply -namespace "$NS" -job reap-boxes \
+    -description "box reap: delete the disk of a box that stopped 24 hours ago" \
+    box-reap "$policy"
+  log "register the job with deploy/reap.sh, and check the attachment with:"
+  log "  nomad acl policy info box-reap"
+}
+
 # --- check -------------------------------------------------------------------
 fails=0
 pass() { printf 'PASS %s\n' "$*"; }
@@ -289,5 +311,6 @@ PY
 case $command in
   operator) cmd_operator ;;
   workloads) cmd_workloads ;;
+  reap) cmd_reap ;;
   check) cmd_check ;;
 esac

@@ -65,8 +65,11 @@ func (d *Driver) startImageWorkGoroutine(h *taskHandle) {
 
 // doImageWork runs the one step the task is.
 func (d *Driver) doImageWork(ctx context.Context, h *taskHandle) *drivers.ExitResult {
-	if h.cfg.Bake != nil {
+	switch {
+	case h.cfg.Bake != nil:
 		return d.bakeImage(ctx, h)
+	case h.cfg.Reap != nil:
+		return d.reapOnce(ctx, h)
 	}
 	return d.publishImage(ctx, h)
 }
@@ -156,6 +159,8 @@ func imageWorkName(h *taskHandle) string {
 		return "bake of " + h.cfg.Bake.Version
 	case h.cfg.Publish != nil:
 		return "publish of " + h.cfg.Publish.Version
+	case h.cfg.Reap != nil:
+		return "reap pass"
 	}
 	return "box"
 }
@@ -234,6 +239,17 @@ func (l *workLog) line(text string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	_, _ = fmt.Fprintln(l.f, text)
+}
+
+// Write writes one chunk of a command's output to the task log, so a reap pass
+// can be handed the log as its ErrOut.
+func (l *workLog) Write(p []byte) (int, error) {
+	if l == nil || l.f == nil {
+		return len(p), nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.f.Write(p)
 }
 
 // close closes the log file.

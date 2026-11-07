@@ -537,6 +537,14 @@ func (a *App) createBox(ctx context.Context, req boxRequest, wait bool, timeout 
 		return nil, err
 	}
 
+	// A clock left by a box of the same id that is gone -- an interrupted
+	// `box rm`, a pass that could not finish -- would delete this new box's disk
+	// early, so it goes before anything is created. Nothing exists yet: a
+	// failure here changes nothing.
+	if _, err := a.clearBoxClock(ctx, id); err != nil {
+		return nil, err
+	}
+
 	created, err := a.Nomad.CreateHostVolume(ctx, volume)
 	if err != nil {
 		return nil, wrapf(err, "Nomad could not create the box disk %s on node %s",
@@ -647,11 +655,10 @@ func (a *App) printCreate(out *createOutput) error {
 	if box.State == "running" {
 		a.note("next: box session new %s --executor prime --model <provider>/<model>", box.ID)
 	}
-	// The same advice `box wait` gives, in the moment the box is made: a box is
-	// stopped when its work pauses, and stopping it costs nothing but the wait to
-	// start it again.
-	a.note("a stopped box holds no CPU and no memory: `box stop %s` gives them back, and `box start %s` "+
-		"brings it back with its disk and its sessions", box.ID, box.ID)
+	// The rule of a box, at the moment it is made: it is for this task, and its
+	// disk goes with it. A stop is a pause whose disk is deleted 24 hours later.
+	a.note("this box is for this task: push the results to git, then `box rm %s --yes`; a box that is not "+
+		"running has its disk deleted 24 hours after it stopped", box.ID)
 	return nil
 }
 

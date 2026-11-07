@@ -286,7 +286,20 @@ type TaskConfig struct {
 	// Publish, when set, makes this task a publish: it uploads an image that was
 	// baked on this node into the operator's store and writes the store's index.
 	Publish *PublishConfig `codec:"publish"`
+	// Reap, when set, makes this task one pass of `box reap`: it deletes the disks
+	// of the boxes that have not run for their term, and runs no VM.
+	Reap *ReapConfig `codec:"reap"`
 }
+
+// ReapConfig is the task's optional reap block.
+//
+// It carries nothing, and that is the point: the term is one number for everyone
+// (24 hours, internal/cli), and there is no extension, no `box keep` and no
+// per-box setting. A task that could set the term would be a cluster-wide
+// setting of a rule of the product. A test does not need one either: it writes an
+// older clock into the variable nomad/jobs/box-<id>/stopped, and the pass reads
+// that.
+type ReapConfig struct{}
 
 // taskConfigSpec is the HCL schema of the task's driver block.
 var taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
@@ -346,6 +359,9 @@ var taskConfigSpec = hclspec.NewObject(map[string]*hclspec.Spec{
 		"arch":    hclspec.NewAttr("arch", "string", true),
 		"sha256":  hclspec.NewAttr("sha256", "string", true),
 	})),
+	// A reap pass is the third task that runs no VM: it works on the cluster, and
+	// its block carries nothing (see ReapConfig).
+	"reap": hclspec.NewBlock("reap", false, hclspec.NewObject(map[string]*hclspec.Spec{})),
 	// The recipe the box's image carries, base64: the job is where a box keeps
 	// it, so a box baked again, or rebuilt on a newer parent, replays the script
 	// it came from. The driver passes it through and never reads it.
@@ -378,11 +394,12 @@ func (c *TaskConfig) applyDefaults() error {
 	if !strings.HasPrefix(filepath.Clean(c.SecretsDirInGuest), "/run/") {
 		return fmt.Errorf("secrets_dir_in_guest %q must be below /run: the executor credentials live on the guest's tmpfs and must never reach the box disk", c.SecretsDirInGuest)
 	}
-	// A bake and a publish run no VM, so the image, cpus, memory and disk of a box
-	// do not apply to them, and their own block is what has to be usable. Neither
-	// has a box id either: a publish is not a box at all.
-	if c.Bake != nil || c.Publish != nil {
-		return c.validateImageWork()
+	// A bake, a publish and a reap run no VM, so the image, cpus, memory and disk
+	// of a box do not apply to them, and their own block is what has to be
+	// usable. None of them has a box id either: a publish is not a box at all,
+	// and a reap pass is about every box there is.
+	if c.Bake != nil || c.Publish != nil || c.Reap != nil {
+		return c.validateWork()
 	}
 	if c.BoxID == "" {
 		return fmt.Errorf("box_id is required")
@@ -412,11 +429,26 @@ func (c *TaskConfig) applyDefaults() error {
 	return nil
 }
 
+// validateWork checks the block of a task that runs no VM: it is one of a bake,
+// a publish and a reap pass, and never two of them.
+func (c *TaskConfig) validateWork() error {
+	blocks := 0
+	for _, set := range []bool{c.Bake != nil, c.Publish != nil, c.Reap != nil} {
+		if set {
+			blocks++
+		}
+	}
+	if blocks > 1 {
+		return fmt.Errorf("a task bakes an image, publishes an image or runs a reap pass, and never two of them")
+	}
+	if c.Reap != nil {
+		return nil
+	}
+	return c.validateImageWork()
+}
+
 // validateImageWork checks the block of a bake or a publish task.
 func (c *TaskConfig) validateImageWork() error {
-	if c.Bake != nil && c.Publish != nil {
-		return fmt.Errorf("a task bakes or publishes an image, not both")
-	}
 	if b := c.Bake; b != nil {
 		rec := box.BakedRecord{Version: b.Version, Arch: b.Arch, Name: b.Name}
 		if err := box.ValidateBakedRecord(rec); err != nil {

@@ -12,6 +12,11 @@
 #                                        alloc exec, the executors variable)
 #   deploy/acl/box-workload.policy.hcl   one box job's own workloads: read
 #                                        nomad/jobs/box-executors
+#   deploy/acl/box-reap.policy.hcl       the periodic job reap-boxes: delete the
+#                                        disk of a box whose term ran out
+#
+# The periodic job itself is registered with deploy/reap.sh (a token with
+# submit-job); this play only writes the policies.
 #
 # The token comes from the vault, never from this file:
 #
@@ -79,6 +84,7 @@
       loop:
         - box-operator.policy.hcl
         - box-workload.policy.hcl
+        - box-reap.policy.hcl
       register: box_acl_files
 
     - name: ACL | Require both policy files
@@ -86,21 +92,24 @@
         that:
           - box_acl_files.results | rejectattr('stat.exists') | list | length == 0
         fail_msg: >-
-          {{ box_acl_policy_dir }} does not hold box-operator.policy.hcl and
-          box-workload.policy.hcl. This playbook applies the policies of
-          deploy/acl, which is part of the same repository.
+          {{ box_acl_policy_dir }} does not hold box-operator.policy.hcl,
+          box-workload.policy.hcl and box-reap.policy.hcl. This playbook applies
+          the policies of deploy/acl, which is part of the same repository.
         quiet: true
 
     # The policy files carry `namespace "default"`. A cluster that puts the boxes
     # in another namespace says so with box_acl_namespace, and the rules are
     # rendered with that namespace - the file stays namespace-agnostic.
-    - name: ACL | Read the rules of the two policies
+    - name: ACL | Read the rules of the policies
       ansible.builtin.set_fact:
         box_acl_operator_rules: >-
           {{ (lookup('file', box_acl_policy_dir ~ '/box-operator.policy.hcl')
               | replace('namespace "default"', 'namespace "' ~ box_acl_namespace ~ '"')) | trim }}
         box_acl_workload_rules: >-
           {{ (lookup('file', box_acl_policy_dir ~ '/box-workload.policy.hcl')
+              | replace('namespace "default"', 'namespace "' ~ box_acl_namespace ~ '"')) | trim }}
+        box_acl_reap_rules: >-
+          {{ (lookup('file', box_acl_policy_dir ~ '/box-reap.policy.hcl')
               | replace('namespace "default"', 'namespace "' ~ box_acl_namespace ~ '"')) | trim }}
 
     # Applying a policy is one PUT. Reading it first makes the play idempotent:
@@ -194,6 +203,48 @@
         or (item.json.JobACL.JobID | default('')) != 'box-' ~ item.item
       no_log: true
 
+    # The reap policy is attached to the periodic job reap-boxes. Nomad resolves a
+    # dispatched child's policies by its parent job id, so this one attachment
+    # covers every reap-boxes/periodic-<time> child; a policy on a child would be
+    # lost at the next dispatch.
+    - name: ACL | Read the reap policy the cluster has
+      ansible.builtin.uri:
+        url: '{{ box_acl_addr }}/v1/acl/policy/box-reap'
+        method: GET
+        headers:
+          X-Nomad-Token: '{{ box_acl_management_token }}'
+        validate_certs: '{{ box_acl_validate_certs }}'
+        ca_path: '{{ box_acl_cacert | default(omit) }}'
+        status_code: [200, 404]
+        timeout: 20
+      register: box_acl_reap_current
+
+    - name: ACL | Attach the reap policy to the job reap-boxes
+      ansible.builtin.uri:
+        url: '{{ box_acl_addr }}/v1/acl/policy/box-reap'
+        method: PUT
+        headers:
+          X-Nomad-Token: '{{ box_acl_management_token }}'
+        body_format: json
+        body:
+          Name: box-reap
+          Description: 'box reap: delete the disk of a box that stopped 24 hours ago'
+          Rules: '{{ box_acl_reap_rules }}'
+          JobACL:
+            Namespace: '{{ box_acl_namespace }}'
+            JobID: reap-boxes
+            Group: ''
+            Task: ''
+        validate_certs: '{{ box_acl_validate_certs }}'
+        ca_path: '{{ box_acl_cacert | default(omit) }}'
+        status_code: [200]
+        timeout: 20
+      when: >-
+        box_acl_reap_current.status | int != 200
+        or (box_acl_reap_current.json.Rules | default('') | trim) != box_acl_reap_rules
+        or (box_acl_reap_current.json.JobACL.JobID | default('')) != 'reap-boxes'
+      no_log: true
+
     - name: ACL | Report what the cluster has
       ansible.builtin.debug:
         msg:
@@ -203,4 +254,5 @@
             {{ box_acl_jobs | join(", ") if box_acl_jobs | length > 0
                else "none - pass box_acl_workload_jobs=<box id>,... after `box create`" }}
           - 'the coordinator token is a separate step: nomad acl token create -name box-operator -policy box-operator, then put it in ~/.config/box/env'
+          - 'the periodic reap job is a separate step: deploy/reap.sh, after this play'
           - 'deploy/acl/README.md has every capability each policy grants, and deploy/acl/apply.sh does the same from a shell'

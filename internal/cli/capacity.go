@@ -57,6 +57,11 @@ type BoxDisk struct {
 	// Project is the project of the box that owns this disk, empty for a box with
 	// no label and for a disk nothing describes.
 	Project string `json:"project,omitempty"`
+	// StoppedAt and RemovesAt are when a pass first saw the box not running and
+	// when its disk is due, for a disk whose box is not running. Both are empty
+	// for a box that runs, and for one no pass has seen not running yet.
+	StoppedAt string `json:"stopped_at,omitempty"`
+	RemovesAt string `json:"removes_at,omitempty"`
 }
 
 // The driver's disk usage attributes (internal/driver/disk.go).
@@ -829,8 +834,8 @@ func (n *NodeCapacity) ShareNote(id string, cpus, memoryMiB, diskGiB int) string
 	if len(over) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("this box takes %s on node %s; the node is shared: `box stop %s` or `box rm %s --yes` it "+
-		"when the work is done", strings.Join(over, ", "), n.Name, id, id)
+	return fmt.Sprintf("this box takes %s on node %s; the node is shared: `box rm %s --yes` when the task "+
+		"is done", strings.Join(over, ", "), n.Name, id)
 }
 
 // shareMemory renders a pair of memory sizes in one unit, so that "8 of 16 GiB"

@@ -44,6 +44,13 @@ ansible-playbook -i inventory site.yml
 # 3. a cluster with ACLs: the policies, once, with a management token
 ansible-playbook -i inventory acl.yml
 
+# 3b. the periodic reap job, once per cluster, from the repository root: it
+#     deletes the disk of a box that stopped 24 hours ago. The policy comes
+#     first (a management token), then the job (a token with submit-job in the
+#     default namespace: the coordinator's). See "The reap job" below.
+./deploy/acl/apply.sh reap
+./deploy/reap.sh
+
 # 4. the executor credentials the boxes run their agents with (once per cluster);
 #    the key itself stays in Vault and Nomad reads it at render time, so only the
 #    Vault path is staged. The script is in deploy/, so this step runs from the
@@ -491,11 +498,12 @@ Anything bigger is a Nomad installation of its own (three servers,
   `vault_nomad_management_token` (for `acl.yml`) are the only secrets, and they come
   from `ansible-vault` or the environment - `inventory.example/group_vars/vault.example.yml`
   shows both. They are written with `no_log`, mode 0600, and never into a JSON file.
-- **`deploy/ansible/acl.yml`** applies the two policies of `deploy/acl/` with a
-  management token: `box-operator` (the coordinator CLI) and, for the box ids you
-  name, `box-workload-<id>` attached to that job's workload identity (`JobACL`). It
-  reads each policy first, so a second run reports `changed=0`. The capabilities each
-  policy grants, and why a box needs a job-attached policy at all, are in
+- **`deploy/ansible/acl.yml`** applies the policies of `deploy/acl/` with a
+  management token: `box-operator` (the coordinator CLI), `reap-boxes` attached to
+  the periodic job (see "The reap job" below) and, for the box ids you name,
+  `box-workload-<id>` attached to that job's workload identity (`JobACL`). It
+  reads each policy first, so a second run reports `changed=0`. The capabilities
+  each policy grants, and why a box needs a job-attached policy at all, are in
   `deploy/acl/README.md`.
 - **A coordinator token needs a host volume rule, not only namespace
   capabilities.** Nomad checks every host volume of a job by name when it is
@@ -524,6 +532,42 @@ Anything bigger is a Nomad installation of its own (three servers,
   (`prime/auth.json.tmpl`), Nomad reads it from Vault with the box's own workload
   identity, and the job spec holds the path. `box executors show` prints file
   names and sizes, never a value.
+
+## The reap job
+
+A box is for one task. Its disk is deleted with the box (`box rm <id> --yes`),
+and a box that is not running loses its disk **24 hours after it stopped**. The
+periodic job `reap-boxes` is the backstop for an agent that forgot: every 15
+minutes, a task of the box driver runs one pass (`box reap`) over the cluster
+and deletes the disks whose term ran out. Running boxes are never touched,
+however long they idle.
+
+The task runs no VM: it reaches the Nomad API over the task API with its own
+workload identity, which the client gives it because the job sets
+`identity { env = true }` (`NOMAD_UNIX_ADDR`, `NOMAD_TOKEN`). The job carries no
+secret and no address. `deploy/acl/box-reap.policy.hcl` is what that identity may
+do, and it must be applied before the first pass:
+
+```bash
+./deploy/acl/apply.sh reap      # management token: attach the policy to reap-boxes
+./deploy/reap.sh                # a token with submit-job: register the job
+./deploy/reap.sh --dry-run      # the job document, without registering it
+```
+
+The job's log is the record of every disk it deleted: one line per box, with the
+size of its disk and how long it had been stopped.
+
+```bash
+nomad job status reap-boxes
+nomad alloc logs <its newest allocation>   # the allocation id is in the status above
+box reap --dry-run              # from the coordinator: what the next pass would do
+```
+
+A pass deletes nothing it cannot see: an unreadable box state, a live
+allocation, a bake or publish on the disk, and a node that is down all mean "look
+again next pass". `docs/design-decisions.md` ("A box is for one task") has the
+decision and the window the check-and-set leaves against a concurrent
+`box start`; `docs/known-limits.md` has what cannot be told apart afterwards.
 
 ## Vault: where a box's credential comes from
 

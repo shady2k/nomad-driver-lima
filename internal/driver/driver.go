@@ -510,9 +510,9 @@ func (d *Driver) StartTask(tc *drivers.TaskConfig) (*drivers.TaskHandle, *driver
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, nil, err
 	}
-	// A bake and a publish are tasks of this driver too, but they run no VM: the
-	// disk, not a guest, is what they work on.
-	if cfg.Bake != nil || cfg.Publish != nil {
+	// A bake, a publish and a reap pass are tasks of this driver too, but they run
+	// no VM: the disk, or the cluster, is what they work on.
+	if cfg.Bake != nil || cfg.Publish != nil || cfg.Reap != nil {
 		if old := d.tasks.Get(tc.ID); old != nil {
 			d.stopImageWork(old)
 			d.tasks.Delete(tc.ID)

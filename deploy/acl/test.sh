@@ -25,12 +25,32 @@ HTTP=24666
 RPC=24667
 SERF=24668
 ADDR=http://127.0.0.1:$HTTP
+# The test agent's namespace: the policies are written for it.
+NS=default
 
 log() { printf '\n==> %s\n' "$*" >&2; }
 die() { printf 'acl-test: %s\n' "$*" >&2; exit 1; }
 fails=0
 pass() { printf 'PASS %s\n' "$*"; }
 fail() { printf 'FAIL %s\n' "$*"; fails=$((fails + 1)); }
+
+# api METHOD PATH [BODY] -> the HTTP status on stdout, with the token in $token
+api() {
+  local method=$1 path=$2 body=${3:-}
+  local args=(-sS -o /dev/null -w '%{http_code}' --max-time 30 -X "$method" -H "X-Nomad-Token: $token" "$ADDR$path")
+  [[ -n $body ]] && args+=(-H 'Content-Type: application/json' --data-binary "$body")
+  curl "${args[@]}" || true
+}
+
+# expect WHAT METHOD PATH EXPECTED [BODY]
+expect() {
+  local what=$1 method=$2 path=$3 want=$4 body=${5:-} got
+  got=$(api "$method" "$path" "$body")
+  case " $want " in
+    *" $got "*) pass "$what ($got)" ;;
+    *) fail "$what: got HTTP $got, want $want" ;;
+  esac
+}
 
 find_nomad() {
   if [[ -n ${BOX_TEST_NOMAD:-} ]]; then printf '%s\n' "$BOX_TEST_NOMAD"; return; fi
@@ -197,6 +217,53 @@ sys.exit(0 if acl.get("JobID") == "box-test" and acl.get("Namespace") == "defaul
   else
     fail "the operator cannot deregister a job"
   fi
+
+  log "applying the box-reap policy to the job reap-boxes"
+  if "$ROOT/deploy/acl/apply.sh" reap >"$WORK/reap.log" 2>&1; then
+    pass "apply.sh reap applied the policy"
+  else
+    tail -5 "$WORK/reap.log" >&2
+    fail "apply.sh reap failed"
+  fi
+  local reap_info
+  reap_info=$(curl -sS --max-time 30 -H "X-Nomad-Token: $mgmt" "$ADDR/v1/acl/policy/box-reap" 2>/dev/null || true)
+  if python3 -c '
+import json, sys
+doc = json.loads(sys.argv[1])
+acl = doc.get("JobACL") or {}
+sys.exit(0 if acl.get("JobID") == "reap-boxes" and not acl.get("Group") and not acl.get("Task") else 1)
+' "$reap_info" 2>/dev/null; then
+    pass "the box-reap policy is attached to the whole job reap-boxes, so every child gets it"
+  else
+    fail "the box-reap policy is not attached to the job reap-boxes: $reap_info"
+  fi
+
+  # The pass runs as the job's workload identity, but its policy is an ordinary
+  # set of rules: a token that carries it proves the same grant on the HTTP API.
+  log "probing the permissions of the box-reap policy"
+  local reap_token reap_accessor operator_token reap_token_json
+  operator_token=$token
+  reap_token_json=$("$NOMAD" acl token create -name box-reap-probe -policy box-reap -json)
+  reap_token=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["SecretID"])' <<<"$reap_token_json")
+  reap_accessor=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["AccessorID"])' <<<"$reap_token_json")
+  token=$reap_token
+  expect "reap: list the jobs" GET "/v1/jobs?namespace=$NS" 200
+  expect "reap: list the allocations" GET "/v1/allocations?namespace=$NS" 200
+  expect "reap: read a node" GET "/v1/nodes" 200
+  expect "reap: list the host volumes" GET "/v1/volumes?type=host&namespace=$NS" 200
+  expect "reap: write the clock of a box" PUT "/v1/var/nomad/jobs/box-reap-probe/stopped?namespace=$NS" 200 \
+    '{"Items":{"stopped_at":"2026-01-01T00:00:00Z","state":"stopped"}}'
+  expect "reap: read the clock of a box" GET "/v1/var/nomad/jobs/box-reap-probe/stopped?namespace=$NS" 200
+  expect "reap: delete the clock of a box" DELETE "/v1/var/nomad/jobs/box-reap-probe/stopped?namespace=$NS" "200 204"
+  expect "reap: delete the description of a box" DELETE "/v1/var/nomad/jobs/box-reap-probe/spec?namespace=$NS" "200 204 404"
+  expect "reap: purge a job that is already over" DELETE "/v1/job/box-reap-probe?purge=true&namespace=$NS" "200 404"
+  expect "denied: write the executor credentials" PUT "/v1/var/nomad/jobs/box-executors?namespace=$NS" 403 \
+    '{"Items":{"k":"v"}}'
+  expect "denied: read the executor credentials" GET "/v1/var/nomad/jobs/box-executors?namespace=$NS" 403
+  expect "denied: write another job's clock" PUT "/v1/var/nomad/jobs/other-job/stopped?namespace=$NS" 403 \
+    '{"Items":{"stopped_at":"2026-01-01T00:00:00Z"}}'
+  token=$operator_token
+  "$NOMAD" acl token delete -accessor "$reap_accessor" >/dev/null 2>&1 || true
 
   if ((fails > 0)); then
     printf '\n%d check(s) failed\n' "$fails"

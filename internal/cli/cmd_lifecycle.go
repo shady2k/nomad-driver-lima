@@ -32,7 +32,8 @@ func (a *App) cmdStop(ctx context.Context, args []string) error {
 	}
 	out := lifecycleOutput{Action: "stop", Box: box, Volume: BoxVolumeName(id)}
 	if box.State == "stopped" {
-		out.Warn = "the box was already stopped; its disk is untouched"
+		out.Warn = "the box was already stopped; its disk is deleted 24 hours after it stopped, unless `box start " +
+			id + "` runs it again"
 		return a.printLifecycle(&out)
 	}
 	if err := a.Nomad.StopJob(ctx, BoxJobName(id), false); err != nil {
@@ -44,7 +45,8 @@ func (a *App) cmdStop(ctx context.Context, args []string) error {
 		return err
 	}
 	out.Box = stopped
-	out.Warn = "the disk was kept; `box start " + id + "` runs the box again"
+	out.Warn = "the disk is kept until the box has been stopped for 24 hours: `box start " + id +
+		"` runs the box again now, and `box reap` deletes the disk after that"
 	return a.printLifecycle(&out)
 }
 
@@ -63,6 +65,11 @@ func (a *App) cmdStart(ctx context.Context, args []string) error {
 	}
 	out := lifecycleOutput{Action: "start", Box: box, Volume: BoxVolumeName(id)}
 	if box.State == "running" {
+		// A box that runs is not on a term: a clock a pass wrote before it came
+		// back is cleared here too.
+		if _, err := a.clearBoxClock(ctx, id); err != nil {
+			return err
+		}
 		// A start is also the moment to make sure the box can be started again
 		// after Nomad collects its job: a box created before descriptions were
 		// stored has none yet, and every start is a fresh one.
@@ -85,6 +92,12 @@ func (a *App) cmdStart(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// A spec that cannot be rendered stops here, before the clock of the box is
+	// touched: a start that fails must leave the box exactly as it was, on its
+	// old term.
+	if err := spec.Validate(); err != nil {
+		return err
+	}
 	// A start is also where the box picks up what its node reserves per vCPU now:
 	// the node's overcommit may have changed since the box was created, and a
 	// start re-registers the job anyway. A resize and an upgrade do the same.
@@ -93,6 +106,14 @@ func (a *App) cmdStart(ctx context.Context, args []string) error {
 	// as soon as the VM boots, and a node with no room left freezes it. Refused
 	// here, before the job is registered, so nothing is changed.
 	if err := a.lowDiskRefusal(ctx, box.NodeID, id, "start"); err != nil {
+		return err
+	}
+	// The clock goes before the job is registered: a box that comes back is not on
+	// a term any more, and a pass that finds the clock gone knows the box is
+	// starting. The delete is checked, so a pass that claimed the clock first is
+	// seen and this start stops here, before a job runs on a disk that is going.
+	// A failure stops the start for the same reason.
+	if err := a.claimBoxForStart(ctx, id); err != nil {
 		return err
 	}
 	if !*wait {
@@ -207,6 +228,14 @@ func (a *App) cmdRemove(ctx context.Context, args []string) error {
 			"`nomad var delete %s` (%s)",
 			id, BoxSpecVariable(id), id, BoxSpecVariable(id), errOr(err))
 	}
+	// The clock goes with the disk for the same reason, and one more: a box
+	// created later with the same id must not inherit it.
+	unclocked, err := a.clearBoxClock(ctx, id)
+	if err != nil {
+		return partialf("the box %s is gone -- its job and its disk were deleted -- but its clock %s is left behind: "+
+			"a box created later with the same id would inherit it. Delete it with `nomad var delete %s` (%s)",
+			id, BoxStoppedVariable(id), BoxStoppedVariable(id), errOr(err))
+	}
 	box.State = "deleted"
 	out.Box = box
 	if len(deleted) > 0 {
@@ -214,6 +243,9 @@ func (a *App) cmdRemove(ctx context.Context, args []string) error {
 	}
 	if forgot {
 		out.Changes = append(out.Changes, "deleted the description "+BoxSpecVariable(id))
+	}
+	if unclocked {
+		out.Changes = append(out.Changes, "deleted the clock "+BoxStoppedVariable(id))
 	}
 	return a.printLifecycle(&out)
 }
@@ -614,6 +646,6 @@ func orphanCannot(id, action string) error {
 // stoppedCannot refuses a command that changes a box whose job Nomad no longer
 // has. The box is its disk: a start brings it back, and the change can follow.
 func stoppedCannot(id, next string) error {
-	return errorf("the box %s is stopped: Nomad no longer has its job, and its disk is kept. `box start %s` runs it "+
-		"again, and `%s` works on it after that", id, id, next)
+	return errorf("the box %s is stopped: Nomad no longer has its job. Its disk is deleted 24 hours after it "+
+		"stopped, and `box start %s` runs it again until then; `%s` works on it after that", id, id, next)
 }

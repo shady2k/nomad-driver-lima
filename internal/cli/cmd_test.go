@@ -327,7 +327,10 @@ func TestStopKeepsTheDisk(t *testing.T) {
 	ta := newTestApp(t, indexJSON)
 	ta.addBox(t, "dev1")
 	require.Equal(t, ExitOK, ta.run(t, "stop", "dev1"))
-	require.Contains(t, ta.errOut.String(), "disk was kept")
+	// The disk is kept for now, and the command says for how long: a stop is a
+	// pause, and the pass deletes the disk 24 hours later.
+	require.Contains(t, ta.errOut.String(), "kept until the box has been stopped for 24 hours")
+	require.Contains(t, ta.errOut.String(), "box reap")
 	require.Len(t, ta.cluster.volumes, 1)
 	require.True(t, *ta.cluster.jobs["box-dev1"].Stop)
 
@@ -955,7 +958,7 @@ func TestCreateNotesMoreThanAQuarterOfANode(t *testing.T) {
 	msg := ta.errOut.String()
 	require.Contains(t, msg, "note: this box takes 8 of 12 vCPU on node node-1")
 	require.Contains(t, msg, "the node is shared")
-	require.Contains(t, msg, "`box stop dev1` or `box rm dev1 --yes`")
+	require.Contains(t, msg, "`box rm dev1 --yes` when the task is done")
 	require.Contains(t, msg, "created box dev1", "the box really was created")
 	require.Contains(t, ta.cluster.jobs, "box-dev1")
 }
@@ -977,7 +980,7 @@ func TestResizeNotesMoreThanAQuarterOfTheNode(t *testing.T) {
 	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
 	require.Equal(t, ExitOK, ta.run(t, "resize", "dev1", "--cpus", "8"), ta.errOut.String())
 	require.Contains(t, ta.errOut.String(), "note: this box takes 8 of 12 vCPU on node node-1")
-	require.Contains(t, ta.errOut.String(), "`box stop dev1`")
+	require.Contains(t, ta.errOut.String(), "`box rm dev1 --yes` when the task is done")
 }
 
 // TestRunStopsTheGuestCommandWhenItsTimeoutEnds: a silent command that runs

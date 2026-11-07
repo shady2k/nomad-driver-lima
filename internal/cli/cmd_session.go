@@ -406,7 +406,8 @@ func (a *App) noteBoxIsIdle(ctx context.Context, client *Boxctl, id string) {
 	if err != nil || info == nil || info.Activity == nil || info.Activity.Busy {
 		return
 	}
-	a.note("box stop %s if you do not need this box for a while: its disk and sessions are kept", id)
+	a.note("box rm %s --yes when the task is done: the box and its disk go with it. `box stop %s` is only a "+
+		"pause, and a box that is not running loses its disk 24 hours after it stopped", id, id)
 }
 
 // lastTurn returns the number of the last turn of a session, so a wait that lost

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -27,6 +28,28 @@ func stateCell(box BoxRecord) string {
 		return dash(box.State)
 	}
 	return "paused:" + box.VMState
+}
+
+// untilCell says when the disk of a box that is not running is deleted: how long
+// is left, "due" for one the pass has not deleted yet, and "not seen" for a box
+// no pass has seen not running -- which is a fact, not a time invented for it.
+func untilCell(box BoxRecord, now time.Time) string {
+	switch box.State {
+	case "running", "starting", "unknown", "deleted", "gone":
+		return "-"
+	}
+	if box.RemovesAt == "" {
+		return "not seen"
+	}
+	at, err := time.Parse(time.RFC3339, box.RemovesAt)
+	if err != nil {
+		return "?"
+	}
+	left := at.Sub(now)
+	if left <= 0 {
+		return "due"
+	}
+	return humanDuration(left)
 }
 
 // lsOutput is the JSON document of `box ls`.
@@ -140,6 +163,7 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 			fmt.Sprintf("%d", box.CPUs),
 			fmt.Sprintf("%d MiB", box.MemoryMiB),
 			fmt.Sprintf("%d GiB", box.DiskGiB),
+			untilCell(box, now),
 			humanBytes(box.VolumeCapacityBytes),
 			diskColumn(box),
 			alloc,
@@ -147,8 +171,25 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 			idleCell(box),
 		})
 	}
-	a.printTable([]string{"ID", "PROJECT", "NODE", "ARCH", "STATE", "CPU", "MEM", "DISK", "VOLUME", "USED",
-		"ALLOC", "UPTIME", "IDLE"}, rows)
+	a.printTable([]string{"ID", "PROJECT", "NODE", "ARCH", "STATE", "CPU", "MEM", "DISK", "DISK UNTIL", "VOLUME",
+		"USED", "ALLOC", "UPTIME", "IDLE"}, rows)
+	// A box that is not running has a term, and the column says how much of it is
+	// left. A box no pass has seen not running has no term yet: say which they
+	// are, and do not give them a time.
+	var unseen []string
+	for _, box := range boxes {
+		switch box.State {
+		case "running", "starting", "unknown", "deleted", "gone":
+			continue
+		}
+		if box.RemovesAt == "" {
+			unseen = append(unseen, box.ID)
+		}
+	}
+	if len(unseen) > 0 {
+		a.note("no reap pass has seen %s not running yet: a pass runs every 15 minutes (`box reap`), and a disk is "+
+			"deleted 24 hours after the first pass that sees its box stopped", strings.Join(unseen, ", "))
+	}
 	for _, box := range boxes {
 		if box.Note != "" {
 			a.note("%s: %s", box.ID, box.Note)
@@ -158,6 +199,5 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 				"`box status %s` says what the node reports, and resuming it is the operator's decision", box.ID, box.VMState, box.ID)
 		}
 	}
-	_ = now
 	return nil
 }

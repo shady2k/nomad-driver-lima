@@ -1,6 +1,6 @@
 # box ACL policies
 
-Two Nomad ACL policies, the commands that apply them, and a test that proves
+Four Nomad ACL policies, the commands that apply them, and a test that proves
 them against a real Nomad agent.
 
 | file | for whom |
@@ -8,8 +8,9 @@ them against a real Nomad agent.
 | `box-operator.policy.hcl` | the `box` CLI on the coordinator: jobs, host volumes, `alloc exec`, and the executors variable |
 | `box-workload.policy.hcl` | one box job's own workloads: read `nomad/jobs/box-executors` |
 | `box-store.policy.hcl` | one publish job (`box-publish-<version>`): read `nomad/jobs/box-store` |
-| `apply.sh` | applies both, creates the operator token, and probes a cluster |
-| `test.sh` | starts a throwaway agent with ACLs and checks both policies |
+| `box-reap.policy.hcl` | the periodic job `reap-boxes`: delete the disk of a box whose term ran out |
+| `apply.sh` | applies them, creates the operator token, and probes a cluster |
+| `test.sh` | starts a throwaway agent with ACLs and checks the policies |
 
 Nomad's own ACL engine reads these files; `internal/cli/aclpolicy_test.go` parses
 them with `github.com/hashicorp/nomad/acl` and asserts every capability the
@@ -120,6 +121,40 @@ credentials, so one compromised box cannot hand them to another. `-group box`
 and `-task box` narrow the attachment to the box task, which is the same set for
 a box job (one group, one task).
 
+## The reap pass
+
+`box reap` deletes the disk of a box that has not run for 24 hours. The periodic
+job `reap-boxes` (deploy/reap-boxes.nomad.hcl, registered with `deploy/reap.sh`) runs
+that pass as a task of the box driver, and the task authenticates with its **own
+workload identity**: the client sets `NOMAD_UNIX_ADDR` (the task API's unix
+socket) and `NOMAD_TOKEN` (the identity's token) for a task whose job has
+`identity { env = true }`. No secret and no address of the cluster is in the job.
+
+Nomad resolves the policies of a dispatched allocation by the **parent** job id
+(`structs.Job.GetIDforWorkloadIdentity`), so one attachment to the periodic job
+covers every `reap-boxes/periodic-<time>` child it dispatches:
+
+```bash
+deploy/acl/apply.sh reap      # needs a management token
+```
+
+The policy grants exactly what a pass needs: `list-jobs` and `read-job` (the
+boxes, their allocations, and the bakes and publishes that may be using a disk),
+`submit-job` (purge the job of a box whose disk goes), `host-volume-read` and
+`host-volume-delete` (find and delete the box disks), `node read` (a node that is
+down is never a reason to delete anything), and `read`/`write`/`destroy` on
+`nomad/jobs/box-<id>/stopped` plus `destroy` on `nomad/jobs/box-<id>/spec`.
+
+The two variable paths are named one by one, not as `nomad/jobs/box-*`: a glob
+there also matches `nomad/jobs/box-executors`, which holds the executor
+credentials and is none of the pass's business.
+
+A token that should only run the pass is a token with this policy, but the
+product needs no such token: the pass runs as the job's workload identity.
+`internal/cli/aclpolicy_test.go` checks every capability against Nomad's ACL
+engine, and `deploy/acl/test.sh` applies the policy to a throwaway agent and
+probes it with a token.
+
 ## Testing the policies
 
 ```bash
@@ -127,12 +162,14 @@ deploy/acl/test.sh          # throwaway agent on 24666-24668, needs nomad + curl
 go test ./internal/cli/ -run 'ACL|Workload'   # the policies against Nomad's ACL engine
 ```
 
-`test.sh` bootstraps ACLs on its own agent, applies both policies, and checks
+`test.sh` bootstraps ACLs on its own agent, applies the policies, and checks
 that the operator token can list jobs and nodes and host volumes, read the
 executors variable, write it (and clean up after itself), submit and read a job,
 and deregister it — while writing an ACL policy, writing another variable, listing
-another namespace and writing a node are all denied. It also checks that the
-job-attached policy lands on the job (`JobACL` of `box-workload-test`).
+another namespace and writing a node are all denied. It also checks that each
+job-attached policy lands on its job (`JobACL` of `box-workload-test` and of
+`reap-boxes`) and that a token with the reap policy can read the clock of a box
+and cannot write the executors variable.
 
 ## When ACLs are off
 

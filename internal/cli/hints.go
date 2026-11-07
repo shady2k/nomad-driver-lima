@@ -133,7 +133,7 @@ func (a *App) noteIdleBoxes(ctx context.Context, project, arch string) {
 		others = append(others, box)
 	}
 	if len(mine) > 0 {
-		a.noteWait("your idle boxes: %s (box stop <id>)", idleBoxList(mine))
+		a.noteWait("your idle boxes: %s (box rm <id> --yes when their task is done)", idleBoxList(mine))
 	}
 	if len(others) > 0 {
 		// Without a project of the caller's own, nothing is known to be its box,

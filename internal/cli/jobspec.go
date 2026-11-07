@@ -508,7 +508,7 @@ func SpecFromJob(job *api.Job) (BoxSpec, error) {
 	}
 	spec.MemoryMiB = intFromConfig(cfg, "memory_mib", 0)
 	spec.DiskGiB = intFromConfig(cfg, "disk_gib", 0)
-	if image, ok := cfg["image"].(map[string]any); ok {
+	if image, ok := configBlock(cfg, "image"); ok {
 		if v, ok := image["url"].(string); ok {
 			spec.ImageURL = v
 		}
@@ -516,7 +516,7 @@ func SpecFromJob(job *api.Job) (BoxSpec, error) {
 			spec.ImageSHA256 = v
 		}
 	}
-	if platform, ok := cfg["platform"].(map[string]any); ok {
+	if platform, ok := configBlock(cfg, "platform"); ok {
 		if v, ok := platform["version"].(string); ok {
 			spec.PlatformVersion = v
 		}
@@ -602,6 +602,24 @@ func derefInt(p *int, fallback int) int {
 		return fallback
 	}
 	return *p
+}
+
+// configBlock returns one block of a task's config as a map. The CLI renders a
+// block as a map, and a job written in HCL reaches Nomad as a list with one map
+// in it; both are the same block, and a box registered by hand is started and
+// resized like one the CLI made.
+func configBlock(cfg map[string]any, key string) (map[string]any, bool) {
+	switch v := cfg[key].(type) {
+	case map[string]any:
+		return v, true
+	case []any:
+		if len(v) == 1 {
+			if m, ok := v[0].(map[string]any); ok {
+				return m, true
+			}
+		}
+	}
+	return nil, false
 }
 
 func intFromConfig(cfg map[string]any, key string, fallback int) int {

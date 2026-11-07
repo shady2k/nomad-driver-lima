@@ -223,6 +223,31 @@ func TestSpecFromJobAcceptsNumbers(t *testing.T) {
 	require.Equal(t, []string{"journalctl", "-u", "boxd"}, back.GuestLogCommand)
 }
 
+// TestSpecFromJobReadsABlockWrittenInHCL: a job written by hand has its config
+// blocks as a one-element list once Nomad has stored it, and a box registered
+// that way is still a box the CLI can start and resize.
+func TestSpecFromJobReadsABlockWrittenInHCL(t *testing.T) {
+	job, err := RenderJob(goodSpec())
+	require.NoError(t, err)
+	task := job.TaskGroups[0].Tasks[0]
+	task.Config["image"] = []any{map[string]any{
+		"url":    "https://images.test/box-base/1.0.0/amd64/box.qcow2",
+		"sha256": "aa",
+	}}
+	task.Config["platform"] = []any{map[string]any{
+		"version": "0.4.0",
+		"url":     "https://images.test/platform/0.4.0/bundle.tar.gz",
+		"sha256":  "bb",
+	}}
+	back, err := SpecFromJob(job)
+	require.NoError(t, err)
+	require.Equal(t, "https://images.test/box-base/1.0.0/amd64/box.qcow2", back.ImageURL)
+	require.Equal(t, "aa", back.ImageSHA256)
+	require.Equal(t, "0.4.0", back.PlatformVersion)
+	require.Equal(t, "https://images.test/platform/0.4.0/bundle.tar.gz", back.PlatformURL)
+	require.Equal(t, "bb", back.PlatformSHA256)
+}
+
 func TestSpecFromJobNeedsABoxTask(t *testing.T) {
 	job, err := RenderJob(goodSpec())
 	require.NoError(t, err)
