@@ -279,7 +279,8 @@ keeps its own state and its own error, and what the executor still sends is
 
 `still_running` is what the turn left running in the guest: boxd scans `/proc`
 at the moment the turn ends and reports the processes that started after the
-turn did and that are not the box's own machinery (the bundle's `boxd` and
+turn did, belong to that session (or no session claims them), and that are not
+the box's own machinery (the bundle's `boxd` and
 executors, an executor's home) and not another systemd service's. It is
 `{"processes":[{"pid","command","age_seconds","cpu_seconds","children"}],
 "more":N}`: one entry per process **at the top of its own tree or process

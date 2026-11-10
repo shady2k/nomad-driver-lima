@@ -36,15 +36,16 @@ func newFakeProc(t *testing.T, now time.Time) *fakeProc {
 
 // fakeProcess is one process of the fake tree.
 type fakeProcess struct {
-	pid     int
-	ppid    int
-	pgid    int
-	started time.Time
-	cpu     time.Duration
-	argv    []string
-	cgroup  string
-	exe     string
-	state   byte
+	pid        int
+	ppid       int
+	pgid       int
+	started    time.Time
+	cpu        time.Duration
+	argv       []string
+	cgroup     string
+	exe        string
+	state      byte
+	envSession string
 }
 
 // add writes one process.
@@ -87,6 +88,9 @@ func (f *fakeProc) add(p fakeProcess) {
 	f.write(dir, "stat", fmt.Sprintf("%d (%s) %s\n", p.pid, comm, strings.Join(fields, " ")))
 	f.write(dir, "cmdline", strings.Join(p.argv, "\x00")+"\x00")
 	f.write(dir, "cgroup", "0::"+p.cgroup+"\n")
+	if p.envSession != "" {
+		f.write(dir, "environ", "BOX_SESSION="+p.envSession+"\x00")
+	}
 	if p.exe != "" {
 		// /proc/<pid>/exe is a symlink to the program's own file; the target
 		// need not exist for a scan that only reads the path.
@@ -120,6 +124,30 @@ func (f *fakeProc) scan() procScan {
 // every fork of it. The tree is also the process group here, as a tool's
 // command is (boxd gives an executor its own group; a shell gives a pipeline
 // the same one), and the pid of the top is the one a person can kill.
+func TestStillRunningSessionMarker(t *testing.T) {
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	f := newFakeProc(t, now)
+	start := now.Add(-time.Minute)
+	f.add(fakeProcess{pid: 800, started: now.Add(-10 * time.Minute), argv: []string{"executor"}})
+	f.add(fakeProcess{pid: 801, started: now.Add(-10 * time.Minute), argv: []string{"executor"}})
+	f.add(fakeProcess{pid: 301, started: start, argv: []string{"/bin/sh", "work"}, envSession: "B"})
+	f.add(fakeProcess{pid: 302, started: start, argv: []string{"/bin/sh", "work"}, envSession: "A"})
+	f.add(fakeProcess{pid: 303, ppid: 800, started: start, argv: []string{"/bin/sh", "work"}})
+	f.add(fakeProcess{pid: 304, ppid: 801, started: start, argv: []string{"/bin/sh", "work"}})
+	f.add(fakeProcess{pid: 305, started: start, argv: []string{"/bin/sh", "work"}})
+	ps := f.scan()
+	ps.session = "A"
+	ps.executorPID = 800
+	ps.executors = map[int]string{800: "A", 801: "B"}
+	found, err := ps.run(now.Add(-2 * time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 3 {
+		t.Fatalf("found %v, want A marker, A executor descendant and unmarked orphan", found)
+	}
+}
+
 func TestStillRunningLeavesOutLoneSleep(t *testing.T) {
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	f := newFakeProc(t, now)
@@ -411,7 +439,7 @@ func TestStillRunningScanFailureIsLoggedOnceAndLeavesTheTurnAlone(t *testing.T) 
 	m := newManager(t, cfg)
 	now := time.Now().UTC()
 	for i := 0; i < 3; i++ {
-		if report := m.stillRunningAt(now.Add(-time.Minute), now); report != nil {
+		if report := m.stillRunningAt(now.Add(-time.Minute), now, "", 0); report != nil {
 			t.Fatalf("a failed scan reported %+v", report)
 		}
 	}
@@ -439,12 +467,12 @@ func TestStillRunningAtReadsTheManagersOwnGuest(t *testing.T) {
 	f.add(fakeProcess{pid: 103, started: now.Add(-time.Minute), argv: []string{"/usr/bin/sleep", "300"},
 		exe: "/usr/bin/sleep"})
 	m := newManager(t, cfg)
-	report := m.stillRunningAt(now.Add(-2*time.Minute), now)
+	report := m.stillRunningAt(now.Add(-2*time.Minute), now, "", 0)
 	if report != nil {
 		t.Fatalf("report = %+v, want no lone sleep", report)
 	}
 	// A turn without a start has no window at all.
-	if report := m.stillRunningAt(time.Time{}, now); report != nil {
+	if report := m.stillRunningAt(time.Time{}, now, "", 0); report != nil {
 		t.Fatalf("a turn without a start reported %+v", report)
 	}
 }
@@ -459,7 +487,7 @@ func TestStillRunningScanStaysUnderASecond(t *testing.T) {
 	const runs = 5
 	start := time.Now()
 	for i := 0; i < runs; i++ {
-		m.stillRunningAt(now.Add(-time.Minute), time.Now().UTC())
+		m.stillRunningAt(now.Add(-time.Minute), time.Now().UTC(), "", 0)
 	}
 	each := time.Since(start) / runs
 	if each > time.Second {

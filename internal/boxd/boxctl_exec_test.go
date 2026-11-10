@@ -13,6 +13,23 @@ import (
 // environment an executor's session gets -- its HOME, its XDG_CONFIG_HOME, the
 // bundle's bin and the directories its installer writes to in front of PATH --
 // and in the box's workspace, which is where sessions start.
+func TestExecutorEnvironmentReplacesBoxSession(t *testing.T) {
+	t.Setenv("BOX_SESSION", "inherited")
+	env := appendFiltered(os.Environ(), "BOX_SESSION", "BOX_SESSION=session-a")
+	values := 0
+	for _, item := range env {
+		if strings.HasPrefix(item, "BOX_SESSION=") {
+			values++
+			if item != "BOX_SESSION=session-a" {
+				t.Fatalf("BOX_SESSION = %q", item)
+			}
+		}
+	}
+	if values != 1 {
+		t.Fatalf("found %d BOX_SESSION values", values)
+	}
+}
+
 func TestExecPlanIsTheSessionEnvironment(t *testing.T) {
 	cfg := testConfig(t)
 	if _, err := NewManager(cfg); err != nil {

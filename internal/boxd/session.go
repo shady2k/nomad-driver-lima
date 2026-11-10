@@ -1061,7 +1061,14 @@ func (s *session) finishTurn(ts *turnState, state, stopReason, text, errMsg stri
 		// What the turn left running is measured at the moment it ended, and
 		// outside every lock: a scan that fails says nothing and never fails the
 		// turn (stillrunning.go).
-		still := s.m.stillRunningAt(ts.StartedAt, ended)
+		s.mu.Lock()
+		meta := s.meta
+		pid := 0
+		if s.proc != nil {
+			pid = s.proc.pid
+		}
+		s.mu.Unlock()
+		still := s.m.stillRunningAt(ts.StartedAt, ended, meta.ID, pid)
 		s.mu.Lock()
 		ts.State = state
 		ts.StopReason = stopReason
@@ -1428,7 +1435,7 @@ func (s *session) ensureExecutor() (*proc, bool, error) {
 		return nil, false, err
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = env
+	cmd.Env = appendFiltered(env, "BOX_SESSION", "BOX_SESSION="+meta.ID)
 	cmd.Dir = spec.Cwd
 	// Own process group: killing a session kills the agent and its children,
 	// and nothing else.
