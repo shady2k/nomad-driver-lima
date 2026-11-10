@@ -74,7 +74,7 @@ func (a *App) cmdImages(ctx context.Context, args []string) error {
 		a.note("%s", indexNote)
 	}
 	if len(bases) == 0 && len(projects) == 0 && len(drafts) == 0 {
-		a.note("this cluster has no image yet: `box bake <id> --name NAME --yes` makes a draft on the box's node, " +
+		a.note("this cluster has no image yet: `box bake <id> --name NAME` makes a draft on the box's node, " +
 			"and publishing an image writes the index")
 		a.printPlatforms(platforms, url)
 		return nil
