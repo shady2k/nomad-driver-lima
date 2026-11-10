@@ -44,6 +44,9 @@ import (
 //     under the executor homes (<StateDir>/homes), where an executor keeps its
 //     language kernels, downloaded runtimes and helper programs. Those are the
 //     box's machinery, not the work the turn asked for.
+//   - It is not a lone sleep. The prime runtime's own sleep has no result to
+//     wait for, so a process whose executable basename (or comm when exe is
+//     unavailable) is sleep is left out when it has no children.
 //   - It is not a system service. The guest runs boxd as a systemd unit
 //     (boxd.service), and a process boxd starts inherits its cgroup; a process
 //     in another unit's cgroup is that unit's -- the DHCP client, an apt
@@ -424,10 +427,11 @@ func (p procInfo) cpuSeconds() float64 {
 // needs of it.
 type candidate struct {
 	procInfo
-	pid    int
-	argv   []string
-	exe    string
-	cgroup string
+	pid      int
+	argv     []string
+	exe      string
+	cgroup   string
+	children int
 }
 
 // run scans the process table and returns the processes a turn started at
@@ -449,7 +453,7 @@ func (ps procScan) scan(keep func(candidate) bool) ([]StillRunningProcess, error
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", ps.root, err)
 	}
-	var found []candidate
+	var candidates []candidate
 	for _, e := range ents {
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil || pid == ps.self {
@@ -462,6 +466,15 @@ func (ps procScan) scan(keep func(candidate) bool) ([]StillRunningProcess, error
 		if !ok {
 			continue
 		}
+		candidates = append(candidates, c)
+	}
+	children := make(map[int]int, len(candidates))
+	for _, c := range candidates {
+		children[c.ppid]++
+	}
+	var found []candidate
+	for _, c := range candidates {
+		c.children = children[c.pid]
 		if keep(c) {
 			found = append(found, c)
 		}
@@ -554,6 +567,13 @@ func (ps procScan) belongs(c candidate, since time.Time) bool {
 func (ps procScan) isWork(c candidate) bool {
 	// A kernel thread has no command line; a zombie has exited.
 	if len(c.argv) == 0 || c.state == 'Z' || c.state == 'X' {
+		return false
+	}
+	name := c.comm
+	if c.exe != "" {
+		name = filepath.Base(c.exe)
+	}
+	if name == "sleep" && c.children == 0 {
 		return false
 	}
 	// The box's own machinery: boxd, the executors, their tools, and what an
