@@ -400,6 +400,23 @@ from what the box looked like from outside.
   timeout still running; `box run` and `box ssh` return the guest's own exit code;
   `box cp` streams a tar over `alloc exec`, refuses a `..` entry and never writes
   outside the destination.
+- **The CLI is the box's login user, and root only through `boxctl exec`.** `boxd`
+  runs as root, so what an agent makes in `/work` and installs in its `HOME` is
+  root's, while the CLI arrives as the box's login user: a plain `box run` there is
+  "Permission denied" in `/work` and "command not found" for a tool the agent
+  installed. `box run --executor NAME` and `box ssh --executor NAME` run the command
+  as boxd's user through `sudo -n` into `boxctl exec`, which builds the environment
+  from boxd's own code (`internal/boxd/exec.go`) -- HOME, XDG_CONFIG_HOME, the
+  bundle's bin, the agent's own tool directories on PATH, the workspace as the
+  working directory -- so a command and a session cannot disagree about them. A
+  copy into a place the login user cannot write, or out of a place it cannot read,
+  uses the same `sudo -n`, and what it writes is given to the owner of the nearest
+  directory that was already there. Rejected: copying the environment rules into
+  the CLI (two definitions that drift apart, and a CLI that cannot follow a box
+  whose boxd changed); running the executors as the login user (the drivers'
+  mounts, the seal and every path an agent knows are root's); and a `boxctl`
+  command the daemon runs over its socket (a second streaming contract on an API
+  that answers documents, for a command that never needs the daemon).
 - **Capacity counts the VMs Nomad does not.** The driver fingerprints every Lima
   instance (state, cpus, memory, disk, whether a task owns it) and `box capacity`
   subtracts the running instances without a running task from the node's free cpu

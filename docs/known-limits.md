@@ -70,6 +70,13 @@ where one is known, what would close it. Nothing here is a promise to fix it.
 - **The guest journal needs passwordless sudo.** The default guest log command is
   `sudo -n journalctl -u boxd`, because the task user cannot read another user's
   journal. Putting the box user in `systemd-journal` in the image would close it.
+- **`box run --executor`, `box ssh --executor` and a `box cp` of what boxd's user
+  owns need the same passwordless sudo.** They reach root with `sudo -n` because
+  `/work` and the executor homes belong to `boxd`'s user. A box image gives its
+  login user the rule; a box built without it answers with the sentence that says
+  which rule is missing, instead of a permission error from a command that never
+  ran. Closing that would mean running the executors as the login user, which is
+  the problem `--executor` exists for.
 - **On macOS the rendered key passes the node's disk.** Nomad renders a task's
   `secrets/` directory into the allocation directory. On Linux, with the client
   running as root, that directory is a tmpfs; on macOS it is a plain directory

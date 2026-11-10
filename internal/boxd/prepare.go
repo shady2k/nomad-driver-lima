@@ -104,14 +104,8 @@ type preparer struct {
 }
 
 func newPreparer(cfg DaemonConfig) *preparer {
-	p := &preparer{cfg: cfg, path: filepath.Join(cfg.StateDir, "prepare.json"), changed: make(chan struct{})}
-	p.st = PrepareState{State: PrepareNone}
-	if b, err := os.ReadFile(p.path); err == nil {
-		var st PrepareState
-		if json.Unmarshal(b, &st) == nil && st.State != "" {
-			p.st = st
-		}
-	}
+	p := &preparer{cfg: cfg, path: prepareStatePath(cfg), changed: make(chan struct{})}
+	p.st = readPrepareState(cfg)
 	// A preparation boxd did not see end has no process left to end it.
 	if p.st.State == PrepareRunning {
 		p.st.State = PrepareFailed
@@ -123,6 +117,28 @@ func newPreparer(cfg DaemonConfig) *preparer {
 		cfg.logf("prepare: %s", p.st.Error)
 	}
 	return p
+}
+
+// prepareStatePath is where boxd records the box's preparation. It is also read
+// outside the daemon: `boxctl exec` starts a command in the box's workspace
+// without asking boxd, so a command runs there also while boxd is busy.
+func prepareStatePath(cfg DaemonConfig) string {
+	return filepath.Join(cfg.StateDir, "prepare.json")
+}
+
+// readPrepareState is the preparation boxd recorded, or the state of a box that
+// was never prepared.
+func readPrepareState(cfg DaemonConfig) PrepareState {
+	st := PrepareState{State: PrepareNone}
+	b, err := os.ReadFile(prepareStatePath(cfg))
+	if err != nil {
+		return st
+	}
+	var loaded PrepareState
+	if json.Unmarshal(b, &loaded) == nil && loaded.State != "" {
+		st = loaded
+	}
+	return st
 }
 
 // State returns the current state.
@@ -178,13 +194,16 @@ func (p *preparer) sessionGate() error {
 	return nil
 }
 
-// workdir is where a session starts when it names no directory.
-func (p *preparer) workdir() string {
-	st := p.State()
+// sessionWorkdir is where a command that names no directory starts: the sources
+// the box's preparation left, when it is ready and they are still there, and the
+// state directory's work directory otherwise. A session and `boxctl exec` both
+// start there, so a command `box run --executor` runs finds the checkout the
+// agent works in.
+func (c DaemonConfig) sessionWorkdir(st PrepareState) string {
 	if st.State == PrepareReady && st.Dest != "" && dirExists(st.Dest) {
 		return st.Dest
 	}
-	return ""
+	return filepath.Join(c.StateDir, "work")
 }
 
 // Start begins a preparation from git, or runs the recipe again on the last

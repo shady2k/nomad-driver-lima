@@ -87,8 +87,8 @@ func TestPrepareClonesAndRunsTheRecipe(t *testing.T) {
 	if !strings.Contains(journal(), "prepare recipe: toolchain ready in "+dest) || !strings.Contains(journal(), "prepare: ready") {
 		t.Fatalf("journal = %s", journal())
 	}
-	if p.workdir() != dest || p.sessionGate() != nil {
-		t.Fatalf("workdir = %q, gate = %v", p.workdir(), p.sessionGate())
+	if got := cfg.sessionWorkdir(p.State()); got != dest || p.sessionGate() != nil {
+		t.Fatalf("workdir = %q, gate = %v", got, p.sessionGate())
 	}
 }
 

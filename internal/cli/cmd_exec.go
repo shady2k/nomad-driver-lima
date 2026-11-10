@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -23,12 +24,28 @@ func guestExitCode(code int) error {
 }
 
 // cmdSSH opens an interactive shell in a box.
+//
+// With --executor the shell is the one that executor's sessions would have: as
+// boxd's user, with the executor's HOME and PATH, in the box's workspace.
 func (a *App) cmdSSH(ctx context.Context, args []string) error {
 	fs := newFlagSet("ssh")
+	executor := fs.String("executor", "", "the shell runs as this executor's sessions do: prime, opencode or claude")
+	cwd := fs.String("cwd", "", "the shell's working directory (default: the box's workspace)")
 	if err := parseFlags(fs, args, 1); err != nil {
 		return err
 	}
 	id := fs.Arg(0)
+	if *executor != "" && !isBoxExecutor(*executor) {
+		return usagef("box ssh %s: unknown executor %q: the box runs %s", id, *executor, strings.Join(boxExecutorNames, ", "))
+	}
+	if *cwd != "" {
+		if *executor == "" {
+			return usagef("box ssh %s: --cwd needs --executor: a plain box ssh starts in the guest's own directory", id)
+		}
+		if !path.IsAbs(*cwd) {
+			return usagef("box ssh %s: --cwd %q is not an absolute path in the box", id, *cwd)
+		}
+	}
 	if a.Terminal == nil || !a.Terminal.IsInteractive() {
 		return usagef("box ssh needs a terminal (stdin is not one); use `box run %s -- cmd` in scripts", id)
 	}
@@ -48,13 +65,20 @@ func (a *App) cmdSSH(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	shell := []string{"bash", "-l"}
+	if *executor != "" {
+		if err := a.requireSudo(ctx, tr, fmt.Sprintf("box ssh %s --executor %s", id, *executor)); err != nil {
+			return err
+		}
+		shell = boxctlExecCommand(*executor, *cwd, shell)
+	}
 	restore, err := a.Terminal.MakeRaw()
 	if err != nil {
 		return wrapf(err, "cannot put the terminal into raw mode")
 	}
 	defer restore()
 	code, err := tr.Exec(ctx, ExecOpts{
-		Command:  []string{"bash", "-l"},
+		Command:  shell,
 		Stdin:    a.In,
 		Stdout:   a.Out,
 		Stderr:   a.ErrOut,
@@ -70,34 +94,83 @@ func (a *App) cmdSSH(ctx context.Context, args []string) error {
 	return nil
 }
 
+// runOptions are what `box run` reads before the command it runs.
+type runOptions struct {
+	// limit is the --timeout of the run; zero means none.
+	limit time.Duration
+	// executor runs the command the way that executor's sessions run: as boxd's
+	// user, with the executor's HOME and PATH, in the box's workspace. Empty
+	// runs it as the box's login user, which is what `box run` has always done.
+	executor string
+	// cwd is where the command starts. Empty means the executor's own default,
+	// the box's workspace.
+	cwd string
+}
+
+// parseRunArgs reads the flags of `box run` up to its "--" separator. What comes
+// after it is the command, and its flags are none of this command's business:
+// `box run dev1 -- df -h /` gives df its -h.
+func parseRunArgs(id string, args []string) (runOptions, []string, error) {
+	var opts runOptions
+	for len(args) > 0 && args[0] != "--" && strings.HasPrefix(args[0], "-") {
+		name, value, hasValue := strings.Cut(strings.TrimLeft(args[0], "-"), "=")
+		args = args[1:]
+		if !hasValue {
+			if len(args) == 0 {
+				return opts, nil, usagef("box run %s: --%s needs a value", id, name)
+			}
+			value, args = args[0], args[1:]
+		}
+		switch name {
+		case "timeout":
+			d, err := time.ParseDuration(value)
+			if err != nil || d <= 0 {
+				return opts, nil, usagef("box run %s: --timeout %q is not a positive duration (for example 20m)", id, value)
+			}
+			opts.limit = d
+		case "executor":
+			opts.executor = value
+		case "cwd":
+			opts.cwd = value
+		default:
+			return opts, nil, usagef("box run %s: unknown flag --%s; box run takes --timeout, --executor and --cwd before its \"--\"", id, name)
+		}
+	}
+	if len(args) > 0 && args[0] == "--" {
+		args = args[1:]
+	}
+	if opts.executor != "" && !isBoxExecutor(opts.executor) {
+		return opts, nil, usagef("box run %s: unknown executor %q: the box runs %s", id, opts.executor, strings.Join(boxExecutorNames, ", "))
+	}
+	if opts.cwd != "" {
+		if opts.executor == "" {
+			return opts, nil, usagef("box run %s: --cwd needs --executor: a plain box run starts in the guest's own directory", id)
+		}
+		if !path.IsAbs(opts.cwd) {
+			return opts, nil, usagef("box run %s: --cwd %q is not an absolute path in the box", id, opts.cwd)
+		}
+	}
+	return opts, args, nil
+}
+
 // cmdRun runs one command in a box and returns its exit code.
+//
+// With --executor the command runs the way that executor's sessions run, which
+// is how it reaches what the agent made: /work and the executor's HOME belong to
+// boxd's user, and the CLI arrives as the box's login user. Nothing else of the
+// run changes -- the exit code, the streams, --timeout and the unknown result of
+// a lost stream are the same with and without it.
 func (a *App) cmdRun(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return usagef("box run needs a box: box run <id> -- cmd [args...]")
 	}
 	id := args[0]
-	rest := args[1:]
-	var limit time.Duration
-	for len(rest) > 0 && rest[0] != "--" && strings.HasPrefix(rest[0], "--timeout") {
-		value := strings.TrimPrefix(strings.TrimPrefix(rest[0], "--timeout"), "=")
-		rest = rest[1:]
-		if value == "" {
-			if len(rest) == 0 {
-				return usagef("box run %s: --timeout needs a duration, for example --timeout 20m", id)
-			}
-			value, rest = rest[0], rest[1:]
-		}
-		d, err := time.ParseDuration(value)
-		if err != nil || d <= 0 {
-			return usagef("box run %s: --timeout %q is not a positive duration (for example 20m)", id, value)
-		}
-		limit = d
-	}
-	if len(rest) > 0 && rest[0] == "--" {
-		rest = rest[1:]
+	opts, rest, err := parseRunArgs(id, args[1:])
+	if err != nil {
+		return err
 	}
 	if len(rest) == 0 {
-		return usagef("box run %s: no command was given; use: box run %s [--timeout D] -- cmd [args...]", id, id)
+		return usagef("box run %s: no command was given; use: box run %s [--timeout D] [--executor NAME] -- cmd [args...]", id, id)
 	}
 	box, _, err := a.findBox(ctx, id)
 	if err != nil {
@@ -119,17 +192,24 @@ func (a *App) cmdRun(ctx context.Context, args []string) error {
 	if stdin == nil {
 		stdin = strings.NewReader("")
 	}
+	guestCommand := rest
+	if opts.executor != "" {
+		if err := a.requireSudo(ctx, tr, fmt.Sprintf("box run %s --executor %s", id, opts.executor)); err != nil {
+			return err
+		}
+		guestCommand = boxctlExecCommand(opts.executor, opts.cwd, rest)
+	}
 	// Nomad does not tell the box that the caller has gone while the command
 	// prints nothing, so the command would run on with no one to read how it
 	// ended. It runs in a session of its own whose leader writes its pid to a
 	// file; a run that is interrupted or runs out of --timeout stops that
 	// whole session before it returns.
 	pidFile := fmt.Sprintf("/tmp/box-run-%d-%d.pid", os.Getpid(), time.Now().UnixNano())
-	command := append([]string{"setsid", "-w", "sh", "-c", runWrapper, pidFile}, rest...)
+	command := append([]string{"setsid", "-w", "sh", "-c", runWrapper, pidFile}, guestCommand...)
 	runCtx := ctx
-	if limit > 0 {
+	if opts.limit > 0 {
 		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, limit)
+		runCtx, cancel = context.WithTimeout(ctx, opts.limit)
 		defer cancel()
 	}
 	code, err := tr.Exec(runCtx, ExecOpts{
@@ -140,8 +220,8 @@ func (a *App) cmdRun(ctx context.Context, args []string) error {
 	})
 	if runCtx.Err() != nil {
 		stopped := a.stopGuestRun(tr, pidFile)
-		if limit > 0 && errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			return timeoutf("box run %s: %q ran out of its --timeout %s; %s", id, strings.Join(rest, " "), limit, stopped)
+		if opts.limit > 0 && errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			return timeoutf("box run %s: %q ran out of its --timeout %s; %s", id, strings.Join(rest, " "), opts.limit, stopped)
 		}
 		return errorf("box run %s: interrupted; %s", id, stopped)
 	}

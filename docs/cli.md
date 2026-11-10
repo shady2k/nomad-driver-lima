@@ -698,8 +698,10 @@ goes on when the caller goes away and always says how it ended.
   directory's name). A destination that exists is never written over.
 - Then `.box/prepare.sh` in the sources runs, if there is one, as root with
   `BOX_WORKSPACE` set to the sources: what to install is the project's to say.
-  The sources then belong to the box's user, so `box run` and `box cp` work in
-  them.
+  The sources are then handed to the user that asked for them, so a plain
+  `box run` and `box cp` work there. What the agent writes in them afterwards
+  belongs to `boxd`'s user like the rest of `/work`: `box run --executor` is the
+  way in, and `box cp` writes through `sudo -n` when it has to.
 - The command waits until it is done and prints what the step is doing while it
   runs. `--timeout` (default 1h) is the preparation's time limit in the box and
   how long the command waits; `--no-wait` returns at once.
@@ -752,11 +754,18 @@ logs -f` follow until they are interrupted, and `Ctrl-C` still ends them.
 
 ## Inside a box
 
-### `box ssh <id>`
+### `box ssh <id> [--executor NAME] [--cwd DIR]`
 
 An interactive shell in the box, over `alloc exec`. It needs a terminal.
 
-### `box run <id> [--timeout D] -- cmd [args...]`
+A plain `box ssh` is the box's login user. `--executor prime|opencode|claude`
+gives the shell that executor's sessions' environment instead: as `boxd`'s user
+(root), with the executor's `HOME`, its `XDG_CONFIG_HOME`, the bundle's `bin`
+and the agent's own tool directories in front of `PATH`, in the box's workspace
+(`--cwd DIR` for another directory). It is the shell an agent works in, so it
+finds what the agent installed and made.
+
+### `box run <id> [--timeout D] [--executor NAME] [--cwd DIR] -- cmd [args...]`
 
 Runs one command in the box and returns its exit code and output. The command
 runs in a session of its own in the guest: a `box run` that is interrupted
@@ -764,6 +773,28 @@ runs in a session of its own in the guest: a `box run` that is interrupted
 whole session before it returns, so nothing keeps running in the box with no
 one to read how it ended. Nomad itself does not tell the box that the caller
 went away while the command prints nothing. `--timeout` ends with exit 4.
+
+**`--executor NAME` runs the command as that executor's sessions run.** `boxd`
+runs as root, so the executors and what an agent makes -- `/work` and everything
+in it, the tools it installs in its `HOME` -- belong to root. A plain `box run`
+is the box's login user, a different user with a different `HOME` and `PATH`:
+`git -C /work/proj fetch` there is "Permission denied", and `bun --version` is
+"command not found" although the agent installed bun in its own home. With
+`--executor`, the command goes in through `sudo -n` into `boxctl exec`, which
+builds the environment a session of that executor gets
+(`docs/boxctl-contract.md`, `boxctl exec`): its `HOME`, its `XDG_CONFIG_HOME`,
+the bundle's `bin` and the agent's own `~/go/bin`, `~/.local/bin`, `~/.bun/bin`,
+`~/.cargo/bin` and `~/.deno/bin` on `PATH`, and the box's workspace as the
+working directory -- `/work/<repo>` when the box has one, as a session starts
+there -- or `--cwd DIR`. Everything else is a plain `box run`: the command's
+exit code is the command's, its output streams as it comes, `--timeout` stops
+it, and a lost stream still ends with exit 5.
+
+An unknown `--executor` is a usage error that names the executors the box has.
+`--executor` needs passwordless sudo in the box, which every image this project
+builds gives its login user; a box without it says so, and the command is not run.
+A box whose `boxd` predates `boxctl exec` answers ``unknown command "exec"``:
+`box upgrade <id>` moves it to the bundle the node carries.
 
 **A command is never run twice.** When the connection to the box is lost while
 the command runs, `box run` does not send it again — it cannot know whether it
@@ -778,6 +809,17 @@ Copies files or directories in or out, exactly one side inside a box:
 `box cp ./dir dev1:/work/dir` and `box cp dev1:/work/out ./out`. It streams a
 tar over `alloc exec`, refuses a `..` entry, and never writes outside the
 destination.
+
+The copy runs as the box's login user, and a target that user owns stays its
+own. A target it cannot write -- `/work` and what `boxd`'s user made there, which
+is where an agent works -- is made and written through `sudo -n`, and what is
+written is given to the owner of the nearest directory that was already there.
+That owner is the one the copy lands among: `box cp ./x dev1:/work/in/x` makes
+`/work/in` and the file the owner of `/work`, not the uid of the machine the copy
+started from. A copy out reads through `sudo -n` when the login user cannot read
+the source, so a result an agent wrote in `/work` comes out without a detour
+through `box run`. A box whose login user has no passwordless sudo says so, and
+names what is left: a directory that user owns.
 
 ### `box top <id> [-f]`
 

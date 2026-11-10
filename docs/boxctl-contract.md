@@ -16,9 +16,11 @@ nomad alloc exec -task box <alloc> /usr/local/bin/boxctl <args...>
 (the driver does the same through `limactl shell` when it needs the guest
 itself). Large payloads (prompt text, files) go over **stdin**.
 
-`boxctl` prints exactly one JSON document to **stdout** and exits 0. One command
-is the exception: `boxctl seal` streams one document per line, its steps first
-(below). On failure it prints
+`boxctl` prints exactly one JSON document to **stdout** and exits 0. Two
+commands are the exception. `boxctl seal` streams one document per line, its
+steps first (below). `boxctl exec` becomes the command it runs: its stdout and
+stderr are the command's, and its exit status is the command's too (below). On
+failure it prints
 
 ```json
 {"error":{"code":"<snake_case>","message":"<plain words>"}}
@@ -123,7 +125,34 @@ timeout with the state as it is. `boxctl info` carries the same document as
 | `boxctl cancel <id>` | – | `Turn`, with `"state":"cancelled"` once the executor acknowledged it |
 | `boxctl session close <id>` | – | `{"session","state":"closed"}` — stops the executor process and keeps the history |
 | `boxctl reload` | – | re-reads the executor credentials without touching the sessions: it answers `{"configured":[...],"restarted":[...],"deferred":[...]}` — idle sessions restart their executor now, a session in a turn defers to the end of that turn, and a reload whose credential files hold the same **content** restarts nothing at all |
+| `boxctl exec --executor prime\|opencode\|claude [--cwd DIR] -- cmd [args...]` | – | not a document: the command's own stdout and stderr, and its exit status. 2 for a bad invocation, 127 for a command that is not on the executor's PATH — see below |
 | `boxctl seal --name NAME [--version V] [--parent V] [--arch amd64\|arm64] [--recipe FILE\|-]` | – (the recipe, with `--recipe -`) | one `{"line":"..."}` per step, then `{"seal":SealResult}` or `{"error":ErrorBody}` — see below |
+
+### `boxctl exec --executor prime|opencode|claude [--cwd DIR] -- cmd [args...]`
+
+Runs one command the way that executor's sessions run: as the user `boxd` runs
+as, with the environment a session of that executor gets -- the executor's
+`HOME` (`/var/lib/boxd/homes/<executor>`, on the box disk), its
+`XDG_CONFIG_HOME` (`/run/boxd/executors/<executor>-config`), the bundle's `bin`
+and the executor's own `~/go/bin`, `~/.local/bin` and, when they exist,
+`~/.bun/bin`, `~/.cargo/bin` and `~/.deno/bin` in front of `PATH`, and the
+executor's secret environment. `--cwd` is the working directory; without it the
+command starts where a session with no `--cwd` starts, in the sources of a ready
+preparation and in `<state dir>/work` otherwise. The directory is made when it
+is not there.
+
+It is what `box run --executor` calls, through `sudo -n`: the CLI reaches the
+guest as the box's login user, and `/work` and the homes belong to `boxd`'s user.
+It builds the environment from `boxd`'s own code (`internal/boxd/exec.go`), so a
+command and a session cannot disagree about `HOME`, `PATH` or the working
+directory.
+
+The command replaces the `boxctl` process (`exec`), so its streams, its terminal,
+its signals and its exit status are the caller's, exactly as if it had been
+started without `boxctl` in between. It is the only command that prints no JSON,
+also when it fails: a bad invocation writes a sentence to stderr and exits 2, and a
+command that is not on the executor's PATH writes the name and the PATH it
+looked in and exits 127, as a shell does.
 
 ### `boxctl seal --name NAME [--version V] [--parent V] [--arch amd64|arm64] [--recipe FILE|-]`
 

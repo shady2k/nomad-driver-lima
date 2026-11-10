@@ -31,9 +31,10 @@ box send dev1 s-7f3a2c --file prompt.md   # or the prompt as one argument
 box wait dev1 s-7f3a2c --timeout 15m      # blocks until the turn ends, prints the answer
 box events dev1 s-7f3a2c --since 12       # what happened, resumable
 box run dev1 -- python3 /root/repo/check.py   # one command in the guest, to check a result
+box run dev1 --executor prime -- git -C /work/proj status   # as the agent's user: /work is root's
 box run dev1 -- docker info            # on an image older than the docker-group unit: sudo -n docker info
-box cp ./results dev1:/root/in            # files in
-box cp dev1:/root/repo/out ./out          # files out
+box cp ./results dev1:/work/in            # files in
+box cp dev1:/work/repo/out ./out          # files out
 box status dev1                           # state, task events, guest, sessions, disk used
 box top dev1 -f                           # CPU, iowait, load, memory, disk, the biggest processes
 box stop dev1                             # a pause: free the RAM, and the disk goes after its term (24h by default)
@@ -61,6 +62,23 @@ Exit codes: `0` ok, `1` error, `2` usage, `3` not found, `4` timeout (still
 running), `5` unknown (contact with the box was lost: the turn or the command may
 still run), `6` the turn ended but left work running in the box (`box wait
 --strict`). A non-zero exit is always a sentence you can act on.
+
+**`box run` is the login user; `--executor` is the agent's.** `boxd` runs as
+root, so an agent's session, what it installs and everything it makes in `/work`
+belong to root. A plain `box run` goes in as the box's login user, which is a
+different user with a different `HOME` and `PATH`: `git -C /work/proj fetch`
+there is `Permission denied`, and `bun --version` is `command not found` although
+the agent installed bun. `box run <id> --executor prime -- cmd` runs the command
+the way that executor's sessions run -- as root, with the executor's `HOME`, its
+`XDG_CONFIG_HOME`, the bundle's `bin` and the agent's own tool directories on
+`PATH`, in the box's workspace (`--cwd DIR` for another directory) -- and the
+exit code and output are the command's, as they always are. `box ssh
+--executor NAME` is the same shell, and `box cp` writes into a directory the
+login user cannot write through `sudo -n`, giving what it writes the owner of the
+nearest directory that was already there, so a copy lands with the same owner as
+its neighbours. A copy out reads through `sudo -n` when the login user cannot
+read the source. Everything here needs passwordless sudo in the box, which the
+images give that user.
 
 **A lost connection is not a lost turn.** `box wait`, `box events -f` and
 `box logs -f` keep trying while the connection to the box is away — the node's

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -878,6 +879,19 @@ type fakeGuest struct {
 	deafCh chan struct{}
 	// tty records whether a command asked for a terminal.
 	tty bool
+	// owners maps a guest path to the uid:gid that owns it; a path below an entry
+	// belongs to that entry's owner, and a path with none belongs to the box's
+	// login user. It is what makes a copy into a root-owned /work go through
+	// sudo.
+	owners map[string]string
+	// unreadable holds the guest paths the box's login user may not read, which
+	// is what a result written by the agent under a root-owned directory is.
+	unreadable []string
+	// sudoOff makes `sudo -n` fail the way a box whose login user has no sudoers
+	// rule does.
+	sudoOff bool
+	// sudos records every command that ran as root through sudo.
+	sudos [][]string
 	// mu guards calls and stdin: a command that gave up on a call leaves its
 	// goroutine running, so two calls can be in flight at once.
 	mu sync.Mutex
@@ -898,6 +912,7 @@ func newFakeGuest(t *testing.T) *fakeGuest {
 		root:      t.TempDir(),
 		responses: map[string]string{},
 		errors:    map[string]boxctlAnswer{},
+		owners:    map[string]string{},
 		silent:    map[string]bool{},
 		deaf:      map[string]bool{},
 		deafCh:    make(chan struct{}),
@@ -908,6 +923,12 @@ func newFakeGuest(t *testing.T) *fakeGuest {
 func (g *fakeGuest) path(guestPath string) string {
 	clean := strings.TrimPrefix(filepath.Clean("/"+guestPath), "/")
 	return filepath.Join(g.root, filepath.FromSlash(clean))
+}
+
+// makeDir makes a directory in the fake guest.
+func (g *fakeGuest) makeDir(t *testing.T, guestPath string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(g.path(guestPath), 0o755))
 }
 
 // write puts a file into the fake guest.
@@ -949,26 +970,169 @@ func (g *fakeGuest) Exec(ctx context.Context, opts ExecOpts) (int, error) {
 	if opts.TTY {
 		g.tty = true
 	}
-	switch {
-	case len(opts.Command) == 0:
+	if len(opts.Command) == 0 {
 		return 0, fmt.Errorf("empty command")
+	}
+	if opts.Command[0] == "sudo" {
+		return g.sudo(ctx, opts)
+	}
+	return g.run(ctx, opts, false)
+}
+
+// run executes one guest command. asRoot is whether it arrived through sudo: a
+// command that runs as root may write and read what belongs to root, and one that
+// does not is refused, which is what the box does.
+func (g *fakeGuest) run(ctx context.Context, opts ExecOpts, asRoot bool) (int, error) {
+	switch {
 	case opts.Command[0] == boxctlPath:
 		return g.boxctl(ctx, opts)
 	case opts.Command[0] == "tar":
-		return g.tar(opts)
+		return g.tar(opts, asRoot)
 	case opts.Command[0] == "mkdir":
-		dir := opts.Command[len(opts.Command)-1]
-		return 0, os.MkdirAll(g.path(dir), 0o755)
+		return g.mkdir(opts, asRoot)
+	case opts.Command[0] == "chown":
+		return g.chown(opts)
+	case opts.Command[0] == "true":
+		return 0, nil
+	case opts.Command[0] == "sh" && len(opts.Command) > 2 && (opts.Command[2] == copyTargetProbe || opts.Command[2] == copyReadableProbe):
+		return g.probe(opts)
 	case g.block && opts.Command[0] == "setsid":
 		g.recordStdin(opts)
 		<-ctx.Done()
 		return -1, ctx.Err()
 	default:
-		// The stdin of a command that is not boxctl or tar is what the command
-		// would have read: a recipe, for one.
+		// The stdin of a command that is not boxctl, tar or a probe is what the
+		// command would have read: a recipe, for one.
 		g.recordStdin(opts)
 		return g.runExit, nil
 	}
+}
+
+// sudo runs a command as root, or refuses the way a box without passwordless
+// sudo does.
+func (g *fakeGuest) sudo(ctx context.Context, opts ExecOpts) (int, error) {
+	args := opts.Command[1:]
+	if len(args) > 0 && args[0] == "-n" {
+		args = args[1:]
+	}
+	g.mu.Lock()
+	sudoOff := g.sudoOff
+	g.mu.Unlock()
+	if sudoOff {
+		fmt.Fprint(opts.Stderr, "sudo: a password is required\n")
+		return 1, nil
+	}
+	if len(args) == 0 {
+		return 0, fmt.Errorf("sudo: no command")
+	}
+	g.mu.Lock()
+	g.sudos = append(g.sudos, args)
+	g.mu.Unlock()
+	return g.run(ctx, ExecOpts{Command: args, Stdin: opts.Stdin, Stdout: opts.Stdout, Stderr: opts.Stderr}, true)
+}
+
+// probe answers the two questions `box cp` asks the guest before it writes or
+// reads: who may write a directory, and whether the login user may read a file.
+func (g *fakeGuest) probe(opts ExecOpts) (int, error) {
+	switch opts.Command[2] {
+	case copyTargetProbe:
+		dir := opts.Command[3]
+		parent := g.nearestExisting(dir)
+		owner := g.ownerOf(parent)
+		fmt.Fprintf(opts.Stdout, "%s\n%s\n", owner, parent)
+		if owner == fakeLoginOwner {
+			return 0, nil
+		}
+		return 1, nil
+	case copyReadableProbe:
+		entry, dir := opts.Command[3], opts.Command[4]
+		if g.mayNotRead(entry) || g.mayNotRead(dir) {
+			return 1, nil
+		}
+		return 0, nil
+	}
+	return 1, fmt.Errorf("fake sh: unsupported probe %q", opts.Command[2])
+}
+
+// fakeLoginOwner is the uid:gid of the box's login user, which is who `box run`
+// and `box cp` are until they ask for root.
+const fakeLoginOwner = "1000:1000"
+
+// ownerOf is who owns a guest path: the longest entry of owners that holds it,
+// and the login user for every other path.
+func (g *fakeGuest) ownerOf(guestPath string) string {
+	p := path.Clean("/" + guestPath)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	owner, best := fakeLoginOwner, -1
+	for prefix, who := range g.owners {
+		if p == prefix || strings.HasPrefix(p, prefix+"/") {
+			if len(prefix) > best {
+				owner, best = who, len(prefix)
+			}
+		}
+	}
+	return owner
+}
+
+// mayNotRead reports whether the login user cannot read a guest path.
+func (g *fakeGuest) mayNotRead(guestPath string) bool {
+	p := path.Clean("/" + guestPath)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, prefix := range g.unreadable {
+		if p == prefix || strings.HasPrefix(p, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// nearestExisting is the guest path itself, or the nearest directory above it
+// that is there.
+func (g *fakeGuest) nearestExisting(guestPath string) string {
+	p := path.Clean("/" + guestPath)
+	for {
+		if _, err := os.Stat(g.path(p)); err == nil || p == "/" {
+			return p
+		}
+		p = path.Dir(p)
+	}
+}
+
+// writable reports whether the login user, or root, may write into a directory
+// of the fake guest.
+func (g *fakeGuest) writable(dir string, asRoot bool) bool {
+	return asRoot || g.ownerOf(g.nearestExisting(dir)) == fakeLoginOwner
+}
+
+// mkdir is `mkdir -p`, refused where the user may not write.
+func (g *fakeGuest) mkdir(opts ExecOpts, asRoot bool) (int, error) {
+	dir := opts.Command[len(opts.Command)-1]
+	if !g.writable(dir, asRoot) {
+		fmt.Fprintf(opts.Stderr, "mkdir: cannot create directory '%s': Permission denied\n", dir)
+		return 1, nil
+	}
+	return 0, os.MkdirAll(g.path(dir), 0o755)
+}
+
+// chown is `chown -R OWNER -- PATH...`: it records who owns what the copy wrote.
+func (g *fakeGuest) chown(opts ExecOpts) (int, error) {
+	args := opts.Command[1:]
+	if len(args) < 3 || args[0] != "-R" {
+		return 1, fmt.Errorf("fake chown: unsupported arguments %v", opts.Command)
+	}
+	owner := args[1]
+	paths := args[2:]
+	if len(paths) > 0 && paths[0] == "--" {
+		paths = paths[1:]
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, p := range paths {
+		g.owners[path.Clean("/"+p)] = owner
+	}
+	return 0, nil
 }
 
 // callLines is every command the fake guest ran, as one line each.
@@ -1065,7 +1229,7 @@ func lookupAnswer(m map[string]boxctlAnswer, key string) (boxctlAnswer, bool) {
 	return best, found
 }
 
-func (g *fakeGuest) tar(opts ExecOpts) (int, error) {
+func (g *fakeGuest) tar(opts ExecOpts, asRoot bool) (int, error) {
 	args := opts.Command[1:]
 	if len(args) < 3 {
 		return 1, fmt.Errorf("fake tar: unsupported arguments %v", args)
@@ -1076,7 +1240,7 @@ func (g *fakeGuest) tar(opts ExecOpts) (int, error) {
 		case "-C":
 			i++
 			dir = append(dir, args[i])
-		case "-xf", "-cf", "-":
+		case "-xf", "-cf", "-", "--no-same-owner":
 			// flags and the stream marker
 		default:
 			names = append(names, args[i])
@@ -1092,6 +1256,14 @@ func (g *fakeGuest) tar(opts ExecOpts) (int, error) {
 	}
 	switch args[0] {
 	case "-xf":
+		if !g.writable(base, asRoot) {
+			// The refusal reads the stream to its end, as a command that exits
+			// does: the packer on the other side would wait for a reader that is
+			// gone.
+			_, _ = io.Copy(io.Discard, opts.Stdin)
+			fmt.Fprintf(opts.Stderr, "tar: %s: Cannot open: Permission denied\n", base)
+			return 2, nil
+		}
 		if _, err := UnpackTar(opts.Stdin, root); err != nil {
 			return 1, err
 		}
@@ -1101,6 +1273,12 @@ func (g *fakeGuest) tar(opts ExecOpts) (int, error) {
 			return 1, fmt.Errorf("fake tar: -cf without a name")
 		}
 		name := names[0]
+		if !asRoot && g.mayNotRead(path.Join(base, name)) {
+			if opts.Stderr != nil {
+				fmt.Fprintf(opts.Stderr, "tar: %s: Cannot open: Permission denied\n", name)
+			}
+			return 2, nil
+		}
 		if err := PackTar(opts.Stdout, filepath.Join(root, filepath.FromSlash(name)), filepath.Base(name)); err != nil {
 			if opts.Stderr != nil {
 				fmt.Fprintf(opts.Stderr, "tar: %s: Cannot stat: No such file or directory\n", name)

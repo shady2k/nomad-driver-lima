@@ -601,10 +601,7 @@ func (m *Manager) NewSession(executor, model, cwd, title string) (Session, error
 			model, executor, strings.Join(models, ", "))
 	}
 	if cwd == "" {
-		cwd = m.prep.workdir()
-	}
-	if cwd == "" {
-		cwd = filepath.Join(m.cfg.StateDir, "work")
+		cwd = m.cfg.sessionWorkdir(m.prep.State())
 	}
 	if err := os.MkdirAll(cwd, 0o755); err != nil {
 		return Session{}, Errorf(CodeInvalid, "cwd %q: %v", cwd, err)

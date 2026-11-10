@@ -27,6 +27,9 @@ const BoxctlUsage = `usage:
   boxctl events <id> [--since SEQ] [--limit N]
   boxctl cancel <id>
   boxctl reload              (re-read the executor credentials, keep the sessions)
+  boxctl exec --executor prime|opencode|claude [--cwd DIR] -- cmd [args...]
+                             (run cmd as that executor's sessions run: as boxd's
+                              user, with its HOME and PATH, in the box's workspace)
   boxctl prepare start --dest DIR [--repo URL [--ref REF] | --files] [--limit SEC]
                              (--files: a tar stream on stdin; neither: the recipe again)
   boxctl prepare get | wait [--timeout SEC] | cancel | skip
@@ -37,6 +40,9 @@ const BoxctlUsage = `usage:
 global: --socket PATH (default $BOXD_SOCKET or ` + DefaultSocket + `)
 Every command prints one JSON document on stdout and exits 0, or prints
 {"error":{"code":...,"message":...}} and exits 1. Diagnostics go to stderr.
+boxctl exec is the exception: it becomes the command it runs, so its stdout and
+stderr are the command's, and its exit status is the command's too -- 2 when the
+invocation is wrong and 127 when the command is not on the executor's PATH.
 `
 
 // RunBoxctl executes one boxctl command and returns the process exit code.
@@ -83,6 +89,8 @@ func RunBoxctl(args []string, in io.Reader, out, errw io.Writer) int {
 		return cmdCancel(ctx, c, rest[1:], out, errw)
 	case "reload":
 		return cmdReload(ctx, c, rest[1:], out, errw)
+	case "exec":
+		return cmdExec(rest[1:], errw)
 	case "prepare":
 		return cmdPrepare(ctx, c, rest[1:], in, out, errw)
 	case "seal":
@@ -100,6 +108,11 @@ func takeGlobalFlags(args []string) (socket string, rest []string, err error) {
 	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if a == "--" {
+			// Everything after it is the command's own arguments (boxctl exec --
+			// cmd), and a --socket there is not boxctl's.
+			return socket, append(rest, args[i:]...), nil
+		}
 		switch {
 		case a == "--socket" || a == "-socket":
 			if i+1 >= len(args) {
