@@ -122,7 +122,41 @@ func TestCreateFromADraftOnAnotherNodeRefused(t *testing.T) {
 	require.Contains(t, ta.errOut.String(), "the draft project-2 is on node node-1")
 }
 
-// TestImagesPublishRefusesWithoutYes: publishing distributes the image.
+// TestCreateChoosesTheRequestedArchitectureFromPublishedAndDraftArtifacts confirms
+// an arm64 draft is selected when the same version has a published amd64 artifact.
+func TestCreateChoosesTheRequestedArchitectureFromPublishedAndDraftArtifacts(t *testing.T) {
+	base := strings.Repeat("1", 64)
+	ta := newTestApp(t, platformIndexJSON)
+	draft := ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	ta.cluster.addNode("node-2", "node-2", "arm64", 12000, 32768, 150000)
+	ta.cluster.mu.Lock()
+	attrs := ta.cluster.nodes["node-2"].Attributes
+	prefix := draftAttributePrefix + "project-2."
+	attrs[prefix+"arch"] = "arm64"
+	attrs[prefix+"name"] = "project"
+	attrs[prefix+"parent"] = "1.0.0"
+	attrs[prefix+"sha256"] = strings.Repeat("7f", 32)
+	attrs[prefix+"size"] = "1048576"
+	attrs[prefix+"virtual_bytes"] = "8589934592"
+	attrs[prefix+"platform"] = "mount"
+	ta.cluster.mu.Unlock()
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) { c.runBox(job) }
+	rc := ta.run(t, "create", "dev1", "--image", "project-2", "--arch", "arm64", "--cpus", "1", "--memory-mib", "512", "--disk-gib", "8")
+	require.Equal(t, ExitOK, rc, ta.errOut.String())
+	job := ta.cluster.jobs["box-dev1"]
+	require.Equal(t, "arm64", job.Meta["arch"])
+	require.NotNil(t, job)
+	var createdVolume *api.HostVolume
+	for _, volume := range ta.cluster.volumes {
+		if volume.Name == "box-dev1" {
+			createdVolume = volume
+		}
+	}
+	require.NotNil(t, createdVolume)
+	require.Equal(t, "node-2", createdVolume.NodeID)
+	require.NotEqual(t, draft.SHA256, base)
+}
+
 func TestImagesPublishRefusesWithoutYes(t *testing.T) {
 	ta := newTestApp(t, platformIndexJSON)
 	ta.withDraft(t, "project-2", "project", "1.0.0", 8)

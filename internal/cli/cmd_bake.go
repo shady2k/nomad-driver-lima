@@ -332,6 +332,9 @@ func (a *App) bakeRecipe(spec BoxSpec, opts bakeOptions) ([]byte, error) {
 		return nil, nil
 	}
 	if len(opts.Recipe) > 0 {
+		if spec.Recipe != "" {
+			a.note("the supplied recipe is different from the recipe carried by the image the box was created from; it replaces it")
+		}
 		return opts.Recipe, nil
 	}
 	if spec.Recipe != "" {

@@ -240,6 +240,7 @@ type publishOutput struct {
 func (a *App) cmdImagesPublish(ctx context.Context, args []string) error {
 	fs := newFlagSet("images publish")
 	yes := fs.Bool("yes", false, "publish without asking: every node can then create a box from the image")
+	arch := fs.String("arch", "", "publish only this architecture (default: all drafts of the version)")
 	timeout := fs.Duration("timeout", DefaultBakeTimeout, "how long to wait for the upload")
 	if err := parseFlags(fs, args, 1); err != nil {
 		return err
@@ -248,19 +249,69 @@ func (a *App) cmdImagesPublish(ctx context.Context, args []string) error {
 	if err := ValidateImageVersion(version, ""); err != nil {
 		return err
 	}
+	archFilter := NormalizeArch(*arch)
+	if archFilter != "" && archFilter != "amd64" && archFilter != "arm64" {
+		return usagef("--arch must be amd64 or arm64, got %q", *arch)
+	}
 	if !*yes {
 		return errorf("publishing %s distributes it: every node of the cluster can create a box from it, and a "+
-			"published version never changes. Ask its owner before publishing, then run `box images publish %s --yes`",
+			"published architecture never changes. Ask its owner before publishing, then run `box images publish %s --yes`",
 			version, version)
 	}
 	drafts, err := a.nodeDrafts(ctx)
 	if err != nil {
 		return wrapf(err, "cannot read the project images of the nodes")
 	}
-	draft, err := findDraft(drafts, version, "")
-	if err != nil {
+	matching := make([]DraftImage, 0, len(drafts))
+	for _, draft := range drafts {
+		if draft.Version == version && (archFilter == "" || draft.Arch == archFilter) {
+			matching = append(matching, draft)
+		}
+	}
+	if len(matching) == 0 {
+		_, err := findDraft(drafts, version, archFilter)
 		return err
 	}
+	if archFilter == "" {
+		index, err := a.loadIndexOptional(ctx)
+		if err != nil {
+			return err
+		}
+		published := map[string]bool{}
+		if index != nil {
+			for arch := range index.Images[version] {
+				published[NormalizeArch(arch)] = true
+			}
+		}
+		remaining := matching[:0]
+		for _, draft := range matching {
+			if !published[NormalizeArch(draft.Arch)] {
+				remaining = append(remaining, draft)
+			}
+		}
+		matching = remaining
+		if len(matching) == 0 {
+			return errorf("all drafts of %s are already published", version)
+		}
+		publishedArch := make([]string, 0, len(published))
+		for arch := range published {
+			publishedArch = append(publishedArch, arch)
+		}
+		sort.Strings(publishedArch)
+		for i, draft := range matching {
+			if err := a.cmdImagesPublish(ctx, []string{version, "--arch", draft.Arch, "--yes", "--timeout", timeout.String()}); err != nil {
+				unpublished := make([]string, 0, len(matching)-i)
+				for _, pending := range matching[i:] {
+					unpublished = append(unpublished, pending.Arch)
+				}
+				sort.Strings(unpublished)
+				return wrapKeep(err, "published architectures: %s; not published: %s", strings.Join(publishedArch, ", "), strings.Join(unpublished, ", "))
+			}
+			publishedArch = append(publishedArch, draft.Arch)
+		}
+		return nil
+	}
+	draft := &matching[0]
 	store, err := a.Nomad.VariableRead(ctx, boxStoreVariable)
 	if err != nil && !isNotFoundErr(err) {
 		return wrapf(err, "cannot read the variable %s", boxStoreVariable)
