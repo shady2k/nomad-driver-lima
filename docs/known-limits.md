@@ -279,6 +279,12 @@ where one is known, what would close it. Nothing here is a promise to fix it.
   expires an image, and a full cache is the operator's to clean. A cache entry removed by hand is a draft
   whose record stays on the node: creating a box from it fails, and the driver's
   task event names the image it could not find.
+- **A multi-architecture project release is assembled one architecture at a time.**
+  Use `box bake --version NAME-N` on a box of each architecture to add both
+  artifacts under the same version; the index stores a separate immutable entry
+  for each. An automatic bake chooses a globally unused next version instead of
+  joining an existing version, and publishing a draft still publishes that one
+  draft's architecture. There is no single multi-node bake or publish operation.
 - **An arm64 box bakes an arm64 image, and a disk is not portable.** The bake job
   is placed by the node's architecture, so an image is always the architecture of
   the node that baked it, and a box created from it on another architecture is

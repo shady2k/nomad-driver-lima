@@ -113,13 +113,19 @@ box's environment an image instead of repeating it.
    pushed out first, and a bake that fails leaves the box as it was. The box is not
    usable while the bake runs, and it starts again with `/work` and its sessions
    when it ends. If another box took its room meanwhile, `box start` it later.
-5. Create from the image with `box create <id> --image <project>-N`, and check the
+5. To make one project release for both architectures, choose a version such as
+   `<project>-3` and pass `--version <project>-3` when baking each architecture's
+   box. The first bake creates that version's artifact; the second adds the other
+   architecture. Each architecture may be added only once. Without `--version`,
+   bake selects the next unused version globally, so it does not join the first.
+6. Create from the image with `box create <id> --image <project>-N`, and check the
    environment there. A draft is on one node only, so the box goes to that node.
    The box you baked keeps its disk and its sessions: `box rm <id> --yes` when its
    task is done.
-6. Propose publishing, and let the owner decide: `box images publish <version>
-   --yes` puts the image in the operator's store, which is what makes it
-   available on every node. A published version never changes.
+7. Propose publishing each architecture's draft, and let the owner decide:
+   `box images publish <version> --yes` publishes the draft for that version and
+   architecture. The index can then carry both architectures under one version;
+   a published architecture never changes.
 
 **What a seal removes:** `/work` and the `box prepare` destination, the sessions,
 `/tmp`, `/var/tmp`, `/var/log`, the SSH host keys, the cloud-init state and the

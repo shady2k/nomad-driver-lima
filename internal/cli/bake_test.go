@@ -521,6 +521,127 @@ func TestRebuildBakesTheTemporaryBoxAndDeletesIt(t *testing.T) {
 	require.Equal(t, BoxBakeJobName("project-rebuild"), derefStr(ta.workJob.ID, ""))
 }
 
+func TestRebuildArm64UsesRequestedVersionWhenAmd64HasSameBase(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.cluster.addNode("node-arm", "node-arm", "arm64", 12000, 32768, 150000)
+	ta.withArm64Draft(t, "project-2", "1.0.0")
+	ta.withDraft(t, "project-3", "project", "1.0.0", 8)
+	ta.finishWorkJobs(t, map[string]string{"kind": "bake", "version": "project-3", "arch": "arm64",
+		"name": "project", "parent": "1.0.0", "sha256": strings.Repeat("ef", 32), "size": "2048"}, "")
+	require.Equal(t, ExitOK, ta.run(t, "bake", "--rebuild", "project-2", "--base", "1.0.0", "--arch", "arm64", "--version", "project-3"), ta.errOut.String())
+	task, err := boxTask(ta.workJob)
+	require.NoError(t, err)
+	bake := task.Config["bake"].(map[string]any)
+	require.Equal(t, "project-3", bake["version"])
+	require.Equal(t, "arm64", bake["arch"])
+}
+
+func TestRebuildArm64RefusesAmd64VersionWithDifferentBase(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.cluster.addNode("node-arm", "node-arm", "arm64", 12000, 32768, 150000)
+	ta.withArm64Draft(t, "project-2", "1.0.0")
+	ta.withDraft(t, "project-3", "project", "2.0.0", 8)
+	rc := ta.run(t, "bake", "--rebuild", "project-2", "--base", "1.0.0", "--arch", "arm64", "--version", "project-3")
+	require.Equal(t, ExitError, rc)
+	require.Contains(t, ta.errOut.String(), "must have rebuild base 1.0.0 as parent")
+	require.Zero(t, callCount(ta, "RegisterJob box-project-rebuild"))
+}
+
+// withArm64Draft publishes only the other architecture of an image version.
+func (ta *testApp) withArm64Draft(t *testing.T, version, parent string) {
+	d := ta.withDraft(t, version, "project", parent, 8)
+	ta.cluster.mu.Lock()
+	defer ta.cluster.mu.Unlock()
+	node := ta.cluster.nodes[d.NodeID]
+	prefix := draftAttributePrefix + version + "."
+	for _, key := range []string{"arch", "name", "parent", "sha256", "size", "virtual_bytes", "built_at", "platform", "recipe"} {
+		delete(node.Attributes, prefix+key)
+	}
+	for key, value := range map[string]string{"arch": "arm64", "name": "project", "parent": parent, "sha256": strings.Repeat("8a", 32), "size": "1048576", "virtual_bytes": strconv.FormatInt(8<<30, 10), "built_at": "2026-11-02T11:00:00Z", "platform": "mount", "recipe": base64.StdEncoding.EncodeToString([]byte("echo recipe\n"))} {
+		node.Attributes[prefix+key] = value
+	}
+}
+
+// TestBakeVersionRefusalsDoNotStopOrRegister checks explicit version validation before side effects.
+func TestBakeVersionRefusalsDoNotStopOrRegister(t *testing.T) {
+	for _, tc := range []struct {
+		name, version, want string
+		setup               func(*testApp)
+	}{
+		{"wrong name", "other-1", "belongs to", nil},
+		{"already exists for box arch", "project-2", "already exists", func(ta *testApp) { ta.withDraft(t, "project-2", "project", "1.0.0", 8) }},
+		{"target does not exist", "project-3", "does not exist", nil},
+		{"opposite architecture has wrong parent", "project-2", "must have the box's source image", func(ta *testApp) { ta.withArm64Draft(t, "project-2", "2.0.0") }},
+		{"opposite architecture missing", "project-2", "does not exist", func(ta *testApp) {
+			ta.withArm64Draft(t, "project-2", "1.0.0")
+			ta.cluster.mu.Lock()
+			n := ta.cluster.nodes["node-1"]
+			delete(n.Attributes, draftAttributePrefix+"project-2.arch")
+			delete(n.Attributes, draftAttributePrefix+"project-2.name")
+			delete(n.Attributes, draftAttributePrefix+"project-2.parent")
+			delete(n.Attributes, draftAttributePrefix+"project-2.sha256")
+			delete(n.Attributes, draftAttributePrefix+"project-2.size")
+			delete(n.Attributes, draftAttributePrefix+"project-2.virtual_bytes")
+			delete(n.Attributes, draftAttributePrefix+"project-2.built_at")
+			delete(n.Attributes, draftAttributePrefix+"project-2.platform")
+			delete(n.Attributes, draftAttributePrefix+"project-2.recipe")
+			ta.cluster.mu.Unlock()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, platformIndexJSON)
+			ta.addBoxSpec(t, goodProjectSpec())
+			if tc.setup != nil {
+				tc.setup(ta)
+			}
+			ta.sealMayRun()
+			rc := ta.run(t, "bake", "dev1", "--name", "project", "--version", tc.version, "--no-recipe")
+			wantCode := ExitError
+			if tc.name == "wrong name" {
+				wantCode = ExitUsage
+			}
+			if tc.name == "target does not exist" || tc.name == "opposite architecture missing" {
+				wantCode = ExitNotFound
+			}
+			require.Equal(t, wantCode, rc)
+			require.Contains(t, ta.errOut.String(), tc.want)
+			require.Zero(t, callCount(ta, "StopJob box-dev1"))
+			require.Zero(t, callCount(ta, "RegisterJob box-bake"))
+		})
+	}
+}
+
+func TestBakeVersionRegistersRequestedVersionForArm64(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.cluster.addNode("node-arm", "node-arm", "arm64", 12000, 32768, 150000)
+	spec := goodProjectSpec()
+	spec.Arch, spec.NodeID = "arm64", "node-arm"
+	spec.ImageVersion = "1.1.1"
+	spec.ImageURL = "https://images.test/box-base/1.1.1/arm64/box.qcow2"
+	ta.addBoxSpec(t, spec)
+	ta.withDraft(t, "project-1", "project", "1.1.1", 8)
+	ta.withDraftArch(t, "project-1", "amd64", "1.1.1", "recipe-one")
+	ta.finishWorkJobs(t, map[string]string{"kind": "bake", "version": "project-1", "arch": "arm64", "name": "project", "parent": "1.1.1", "sha256": strings.Repeat("ab", 32), "size": "1048576"}, "")
+	ta.sealMayRun()
+	require.Equal(t, ExitOK, ta.run(t, "bake", "dev1", "--name", "project", "--version", "project-1"), ta.errOut.String())
+	task, err := boxTask(ta.workJob)
+	require.NoError(t, err)
+	bake := task.Config["bake"].(map[string]any)
+	require.Equal(t, "project-1", bake["version"])
+	require.Equal(t, "arm64", bake["arch"])
+}
+
+func (ta *testApp) withDraftArch(t *testing.T, version, arch, parent, recipe string) {
+	t.Helper()
+	ta.cluster.mu.Lock()
+	defer ta.cluster.mu.Unlock()
+	node := ta.cluster.nodes["node-1"]
+	prefix := draftAttributePrefix + version + "."
+	node.Attributes[prefix+"arch"] = arch
+	node.Attributes[prefix+"parent"] = parent
+	node.Attributes[prefix+"recipe"] = encodeRecipe([]byte(recipe))
+}
+
 // countRegisterOf counts the registrations of one job.
 func countRegisterOf(ta *testApp, id string) int {
 	return callCount(ta, "RegisterJob "+id)

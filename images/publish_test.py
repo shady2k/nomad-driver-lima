@@ -383,6 +383,28 @@ def case_merge(root):
     c.close()
 
 
+def case_same_version_different_arches(root):
+    print("case: architectures publish independently under the same version")
+    amd64 = Case(root, "1.3.0", arch="amd64", size=120_000)
+    first = expect(amd64.run(), "amd64")
+    check("amd64 publish succeeds", first.returncode == 0, first.stderr)
+
+    arm64 = Case(root, "1.3.0", arch="arm64", size=130_000)
+    arm64.repo = amd64.repo
+    arm64.url = amd64.url
+    second = expect(arm64.run(), "arm64")
+    check("arm64 publish succeeds", second.returncode == 0, second.stderr)
+    idx = amd64.index() or {}
+    arches = (idx.get("images") or {}).get("1.3.0", {})
+    check("both architectures are indexed", set(arches) == {"amd64", "arm64"}, str(arches))
+    check("amd64 entry is unchanged", arches.get("amd64", {}).get("sha256") == amd64.sha())
+    check("arm64 entry is correct", arches.get("arm64", {}).get("sha256") == arm64.sha())
+    check("both artifacts stored", amd64.file(os.path.basename(amd64.image)) == open(amd64.image, "rb").read()
+          and arm64.file(os.path.basename(arm64.image)) == open(arm64.image, "rb").read())
+    arm64.close()
+    amd64.close()
+
+
 def case_live_lock(root):
     print("case: a live lock stops a second publisher")
     c = Case(root, "1.0.0")
@@ -597,6 +619,7 @@ def main():
         case_immutable(root)
         case_chunked(root)
         case_merge(root)
+        case_same_version_different_arches(root)
         case_live_lock(root)
         case_stale_lock(root)
         case_index_tampered(root)
