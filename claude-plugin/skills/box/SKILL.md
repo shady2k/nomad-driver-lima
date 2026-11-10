@@ -59,7 +59,8 @@ same term.
 
 Exit codes: `0` ok, `1` error, `2` usage, `3` not found, `4` timeout (still
 running), `5` unknown (contact with the box was lost: the turn or the command may
-still run). A non-zero exit is always a sentence you can act on.
+still run), `6` the turn ended but left work running in the box (`box wait
+--strict`). A non-zero exit is always a sentence you can act on.
 
 **A lost connection is not a lost turn.** `box wait`, `box events -f` and
 `box logs -f` keep trying while the connection to the box is away — the node's
@@ -230,9 +231,15 @@ current base image, not an old one.
   `box events`, not from the turn that ended.
 - **A done turn with processes still running is not finished work.** `box wait`
   says so on stderr when the turn left a command running in the box (a build, a
-  test run, a server); the exit code stays 0, because when its turn ends is the
-  executor's decision. Look before you take the result or start the next step:
-  `box top <id>`, `box run <id> -- ps -ef`, and wait for them.
+  test run, a server); without `--strict` the exit code stays 0, because when its
+  turn ends is the executor's decision. Look before you take the result or start
+  the next step: `box top <id>`, `box run <id> -- ps -ef`, and wait for them.
+- **A long check goes in the foreground of a tool call, not in the background.**
+  A full test run or a build started in the background outlives the turn that
+  started it: the turn ends while it runs and ends without the result. Run it in
+  the foreground of a tool call with a `timeout` long enough for it. A coordinator
+  script uses `box wait --strict` and treats exit `6` as "send a follow-up to wait
+  and finish".
 - **One turn at a time per session.** A `busy` answer means a turn is running:
   `box wait` for it, or `box cancel` to stop it; do not send a second prompt and
   do not restart the box.
@@ -406,7 +413,11 @@ starts, so no key lands on a disk.
    a note when a box takes more than a quarter of its node, and that it will be
    given back.
 3. Start one session per unit of work; send the prompt; `box wait` with a
-   generous `--timeout`.
+   generous `--timeout`. A coordinator script adds `--strict`: exit `6` means the
+   turn ended but left work running, so send it a follow-up to wait and finish. A
+   long check -- a full test run, a build -- goes in the foreground of a tool call
+   with a timeout long enough for it, never in the background: a turn that ends
+   while it runs ends without the result.
 4. Read the answer from `box wait` or `box events`, check it with `box run`,
    and copy results out with `box cp` or push a branch.
 5. `box rm --yes` when the task is done, after its results are in git: that is

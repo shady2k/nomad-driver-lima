@@ -28,6 +28,11 @@ const (
 	// or the command it was following may still run, so its result is not known.
 	// It is neither a failure nor a timeout, because neither is true.
 	ExitUnknown = 5
+	// ExitLeftRunning is a turn that ended normally and left work running in the
+	// box: the answer is the turn's, and the build, the test run or the server it
+	// started has no result yet. Only `box wait --strict` returns it, in place of
+	// the 0 the turn would otherwise exit with.
+	ExitLeftRunning = 6
 )
 
 // Error is a failure with an exit code and a message meant for the user.
@@ -99,6 +104,12 @@ func partialf(format string, args ...any) *Error {
 // unknownf returns a lost-contact failure (exit 5): the work may still go on.
 func unknownf(format string, args ...any) *Error {
 	return &Error{Code: ExitUnknown, Msg: fmt.Sprintf(format, args...)}
+}
+
+// leftRunningf returns the strict wait's exit 6: the turn is over, and the work
+// it started is not.
+func leftRunningf(format string, args ...any) *Error {
+	return &Error{Code: ExitLeftRunning, Msg: fmt.Sprintf(format, args...)}
 }
 
 // ExitCode reports the process exit code for err: one of the Exit* constants.
