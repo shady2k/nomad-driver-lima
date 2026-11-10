@@ -291,6 +291,7 @@ func (a *App) cmdWait(ctx context.Context, args []string) error {
 	fs := newFlagSet("wait")
 	timeout := fs.Duration("timeout", defaultWaitTimeout, "how long to wait; the turn keeps running when this expires")
 	turnNumber := fs.Int("turn", 0, "wait for this turn number instead of the running one")
+	strict := fs.Bool("strict", false, "exit 6 when the turn ended but left work running in the box")
 	if err := parseFlags(fs, args, 2); err != nil {
 		return err
 	}
@@ -339,7 +340,7 @@ func (a *App) cmdWait(ctx context.Context, args []string) error {
 			cancel()
 			if err == nil {
 				contact.back("wait")
-				turnErr := a.reportTurn(got, id, sessionID, *timeout)
+				turnErr := a.reportTurn(got, id, sessionID, *timeout, *strict)
 				// The turn is over and nobody is waiting in this box any more:
 				// this is the moment its owner decides whether to keep it awake.
 				a.noteBoxIsIdle(ctx, client, id)
@@ -435,7 +436,11 @@ func (a *App) lastTurn(ctx context.Context, client *Boxctl, sessionID string) (i
 }
 
 // reportTurn prints the result of a turn the wait saw finish.
-func (a *App) reportTurn(turn *Turn, id, sessionID string, timeout time.Duration) error {
+//
+// strict turns a done turn that left processes running into exit 6: everything
+// printed is the turn's, and the extra sentence on stderr says why the exit is
+// not 0. Every other ending keeps its own exit code.
+func (a *App) reportTurn(turn *Turn, id, sessionID string, timeout time.Duration, strict bool) error {
 	if turn.State == "running" {
 		if a.JSON {
 			if err := a.printJSON(turn); err != nil {
@@ -468,6 +473,14 @@ func (a *App) reportTurn(turn *Turn, id, sessionID string, timeout time.Duration
 	if turn.State != "done" {
 		return errorf("the turn %d of session %s ended %s%s; `box events %s %s` shows what happened",
 			turn.Turn, sessionID, dash(turn.State), turnSuffix(turn), id, sessionID)
+	}
+	// A script that asks for --strict tells a turn that finished its work from
+	// one that merely stopped talking: 6 for the turn that ended with processes
+	// of its own still running, and no extra output beyond the sentence below.
+	if strict && turn.StillRunning.Count() > 0 {
+		return leftRunningf("the turn %d of session %s left work running in the box, so this wait exits 6: "+
+			"`box send %s %s` with \"wait for it, then finish\" is the usual next step",
+			turn.Turn, sessionID, id, sessionID)
 	}
 	return nil
 }

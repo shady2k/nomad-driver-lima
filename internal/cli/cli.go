@@ -311,7 +311,8 @@ func (a *App) printUsage() {
 		fmt.Fprintf(a.ErrOut, "  %-18s %s\n", name, a.commands()[name].usage)
 	}
 	fmt.Fprintf(a.ErrOut, "\nexit codes: 0 ok, 1 error, 2 usage, 3 not found, 4 timeout (still running),\n"+
-		"            5 unknown: the connection to the box was lost and the turn or the command may still run\n")
+		"            5 unknown: the connection to the box was lost and the turn or the command may still run,\n"+
+		"            6 the turn ended but left work running in the box (box wait --strict)\n")
 }
 
 func (a *App) commands() map[string]command {
@@ -338,7 +339,7 @@ func (a *App) commands() map[string]command {
 		"prepare":   {usage: "put sources in a box and run their recipe: box prepare <id> [--repo URL [--ref R] | --from PATH] [--cancel | --skip | --again]", run: a.cmdPrepare},
 		"session":   {usage: "sessions in a box: box session new|ls|close <id> ...", run: a.cmdSession, subcommands: true},
 		"send":      {usage: "send a prompt to a session: box send <id> <session> [--file F | text]", run: a.cmdSend},
-		"wait":      {usage: "wait for a session turn to finish: box wait <id> <session> [--timeout D]", run: a.cmdWait},
+		"wait":      {usage: "wait for a session turn to finish: box wait <id> <session> [--timeout D] [--strict]", run: a.cmdWait},
 		"events":    {usage: "session events: box events <id> <session> [--since N] [-f]", run: a.cmdEvents},
 		"cancel":    {usage: "cancel the running turn of a session: box cancel <id> <session>", run: a.cmdCancel},
 	}

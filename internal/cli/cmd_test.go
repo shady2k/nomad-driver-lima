@@ -921,6 +921,7 @@ func TestExitCodeMapping(t *testing.T) {
 	require.Equal(t, ExitUsage, ExitCode(usagef("u")))
 	require.Equal(t, ExitNotFound, ExitCode(notFoundf("n")))
 	require.Equal(t, ExitTimeout, ExitCode(timeoutf("t")))
+	require.Equal(t, ExitLeftRunning, ExitCode(leftRunningf("r")))
 	require.Equal(t, ExitError, ExitCode(wrapf(errors.New("cause"), "context")))
 	require.Contains(t, wrapf(errors.New("cause"), "context").Error(), "context: cause")
 	require.Equal(t, "short words", oneLine("  short\n words ", 40))

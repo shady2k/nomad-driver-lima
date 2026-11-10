@@ -17,8 +17,9 @@ box [--json] <command> [arguments]
   follows (`box run dev1 -- df -h /` gives `df` its own `-h`).
 - Exit codes: `0` ok, `1` error, `2` usage, `3` not found, `4` timeout (the
   thing is still running), `5` unknown (contact with the box was lost and the
-  turn or the command may still run: see "When the connection is lost"). `box
-  run` and `box ssh` return the guest's own exit code.
+  turn or the command may still run: see "When the connection is lost"), `6` the
+  turn ended but left work running in the box (`box wait --strict`). `box run`
+  and `box ssh` return the guest's own exit code.
 
 The environment the CLI reads:
 
@@ -848,10 +849,11 @@ Starts one turn and returns at once. A second send while a turn runs answers
 session of the box is working in this session's directory; the send goes ahead
 and the exit code does not change.
 
-### `box wait <id> <session> [--timeout D] [--turn N] [--json]`
+### `box wait <id> <session> [--timeout D] [--turn N] [--strict] [--json]`
 
 Waits for the turn and prints its final text. On timeout it exits 4 and the turn
 keeps running. `--turn N` waits for an older turn instead of the running one.
+`--strict` exits 6 when the turn ended but left work running (see below).
 
 A lost connection to the box — the Nomad client restarted for a driver update,
 the server lost the path to the node, a 5xx, boxd restarted in the guest — is
@@ -891,6 +893,20 @@ going is how a coordinator reports work that was never done. Look before you go
 on, and say what you saw. `--json` carries the same list as `still_running`
 (`docs/boxctl-contract.md`, `Turn`); nothing is printed on stderr then, and the
 field is missing when the turn left nothing running.
+
+**`--strict` makes that turn an exit code.** A script cannot read a warning, so
+with `--strict` a turn that ended normally and left at least one process running
+exits `6` instead of `0`. Everything printed is the same -- the answer, the
+warning and the `--json` document -- and stderr adds one sentence:
+
+```
+box: the turn 1 of session s-7f3a2c left work running in the box, so this wait exits 6: `box send dev1 s-7f3a2c` with "wait for it, then finish" is the usual next step
+```
+
+The usual next step is the one the sentence names: send the session a follow-up
+that waits for the work and then finishes the task. Every other ending keeps its
+own exit code under `--strict` (a failed or cancelled turn `1`, a timeout `4`, a
+lost contact `5`); `6` is only for a turn that would otherwise have exited `0`.
 
 **When the turn is over and the box is doing nothing, the wait says so.** If the
 guest reports that no session of the box has a turn running, the wait ends with
