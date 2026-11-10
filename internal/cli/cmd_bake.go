@@ -204,6 +204,13 @@ func (a *App) bakeBox(ctx context.Context, id string, opts bakeOptions) (*bakeOu
 		if parentImage == nil || parentImage.Parent != spec.ImageVersion {
 			return nil, errorf("the target image %s must have the box's source image %s as parent", version, spec.ImageVersion)
 		}
+		carriedRecipe := ""
+		if !opts.NoRecipe {
+			carriedRecipe = encodeRecipe(recipe)
+		}
+		if note := recipeDifferenceNote(version, other, parentImage.Recipe, carriedRecipe); note != "" {
+			a.note("%s", note)
+		}
 	} else {
 		version, err = NextImageVersion(opts.Name, versions)
 		if err != nil {
@@ -332,9 +339,6 @@ func (a *App) bakeRecipe(spec BoxSpec, opts bakeOptions) ([]byte, error) {
 		return nil, nil
 	}
 	if len(opts.Recipe) > 0 {
-		if spec.Recipe != "" {
-			a.note("the supplied recipe is different from the recipe carried by the image the box was created from; it replaces it")
-		}
 		return opts.Recipe, nil
 	}
 	if spec.Recipe != "" {
@@ -714,6 +718,16 @@ func (a *App) waitForJobDone(ctx context.Context, jobID, evalID string, since ui
 			return nil, wrapf(err, "stopped waiting for %s", jobID)
 		}
 	}
+}
+
+// recipeDifferenceNote describes a cross-architecture recipe mismatch for an
+// explicitly named target version. Automatic version selection has no counterpart
+// recipe to compare.
+func recipeDifferenceNote(version, otherArch, targetRecipe, carriedRecipe string) string {
+	if version == "" || targetRecipe == carriedRecipe {
+		return ""
+	}
+	return fmt.Sprintf("note: target image %s on %s carries a different recipe from the one this bake will carry", version, otherArch)
 }
 
 // rebuildImage replays an image's recipe on a newer base image.

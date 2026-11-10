@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/nomad/api"
 	"github.com/stretchr/testify/require"
@@ -242,6 +243,134 @@ func TestImagesPublishRendersTheTokenPlace(t *testing.T) {
 
 // TestImagesPublishWithoutAStore: the store is a Variable, and its absence says
 // which command writes it.
+func TestImagesPublishTwoDraftsSequentially(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	ta.cluster.addNode("node-2", "node-2", "arm64", 12000, 32768, 150000)
+	ta.cluster.mu.Lock()
+	attrs := ta.cluster.nodes["node-2"].Attributes
+	prefix := draftAttributePrefix + "project-2."
+	for k, v := range map[string]string{"arch": "arm64", "name": "project", "parent": "1.0.0", "sha256": strings.Repeat("8a", 32), "size": "1048576"} {
+		attrs[prefix+k] = v
+	}
+	ta.cluster.mu.Unlock()
+	ta.cluster.variables[boxStoreVariable] = &api.Variable{Path: boxStoreVariable, Items: map[string]string{"url": "https://store.example.com"}}
+	seen := []string{}
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) {
+		id := derefStr(job.ID, "")
+		if !strings.HasPrefix(id, boxPublishJobPrefix) {
+			return
+		}
+		task, err := boxTask(job)
+		require.NoError(t, err)
+		arch := task.Config["publish"].(map[string]any)["arch"].(string)
+		seen = append(seen, arch)
+		c.allocSeq++
+		event := &api.TaskEvent{Type: "Driver", Time: 1, Details: map[string]string{"kind": "publish", "index": "https://store.example.com/index.json"}}
+		state := &api.TaskState{State: "dead", StartedAt: time.Now(), FinishedAt: time.Now(), Events: []*api.TaskEvent{event}}
+		c.allocs["alloc-work"] = &api.Allocation{ID: "alloc-work", JobID: id, Job: job, NodeID: "node-1", NodeName: "node-1", ClientStatus: "complete", DesiredStatus: "run", CreateIndex: uint64(c.allocSeq), TaskStates: map[string]*api.TaskState{boxTaskName: state}}
+	}
+	require.Equal(t, ExitOK, ta.run(t, "images", "publish", "project-2", "--yes"), ta.errOut.String())
+	require.Equal(t, []string{"amd64", "arm64"}, seen)
+}
+
+func TestImagesPublishExplicitArm64(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	ta.cluster.addNode("node-2", "node-2", "arm64", 12000, 32768, 150000)
+	ta.cluster.mu.Lock()
+	attrs := ta.cluster.nodes["node-2"].Attributes
+	prefix := draftAttributePrefix + "project-2."
+	for k, v := range map[string]string{"arch": "arm64", "name": "project", "parent": "1.0.0", "sha256": strings.Repeat("8a", 32), "size": "1048576"} {
+		attrs[prefix+k] = v
+	}
+	ta.cluster.mu.Unlock()
+	ta.cluster.variables[boxStoreVariable] = &api.Variable{Path: boxStoreVariable, Items: map[string]string{"url": "https://store.example.com"}}
+	ta.finishWorkJobs(t, map[string]string{"kind": "publish", "version": "project-2", "arch": "arm64", "sha256": strings.Repeat("8a", 32), "index": "https://store.example.com/index.json"}, "")
+	require.Equal(t, ExitOK, ta.run(t, "images", "publish", "project-2", "--arch", "arm64", "--yes"), ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "published project-2 (arm64)")
+}
+
+func TestImagesPublishFailureReportsArchitectureStatus(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	ta.cluster.variables[boxStoreVariable] = &api.Variable{Path: boxStoreVariable, Items: map[string]string{"url": "https://store.example.com"}}
+	ta.finishWorkJobs(t, nil, "upload failed")
+	require.Equal(t, ExitError, ta.run(t, "images", "publish", "project-2", "--yes"))
+	require.Contains(t, ta.errOut.String(), "published architectures: ; not published: amd64")
+	require.Contains(t, ta.errOut.String(), "upload failed")
+}
+
+func TestImagesPublishSkipsAlreadyPublishedAMD64(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	amd := ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	ta.cluster.addNode("node-2", "node-2", "arm64", 12000, 32768, 150000)
+	ta.cluster.mu.Lock()
+	attrs := ta.cluster.nodes["node-2"].Attributes
+	prefix := draftAttributePrefix + "project-2."
+	for k, v := range map[string]string{"arch": "arm64", "name": "project", "parent": "1.0.0", "sha256": strings.Repeat("8a", 32), "size": "1048576"} {
+		attrs[prefix+k] = v
+	}
+	ta.cluster.mu.Unlock()
+	index := `{"schema":1,"images":{"project-2":{"amd64":{"url":"https://store.example.com/x","sha256":"` + amd.SHA256 + `","size":1048576,"kind":"project","name":"project","parent":"1.0.0"}}}}`
+	ta.images.body = index
+	ta.cluster.variables[boxStoreVariable] = &api.Variable{Path: boxStoreVariable, Items: map[string]string{"url": "https://store.example.com"}}
+	seen := []string{}
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) {
+		id := derefStr(job.ID, "")
+		if !strings.HasPrefix(id, boxPublishJobPrefix) {
+			return
+		}
+		task, err := boxTask(job)
+		require.NoError(t, err)
+		seen = append(seen, task.Config["publish"].(map[string]any)["arch"].(string))
+		c.allocSeq++
+		event := &api.TaskEvent{Type: "Driver", Time: 1, Details: map[string]string{"kind": "publish", "index": "https://store.example.com/index.json"}}
+		state := &api.TaskState{State: "dead", StartedAt: time.Now(), FinishedAt: time.Now(), Events: []*api.TaskEvent{event}}
+		c.allocs["alloc-work"] = &api.Allocation{ID: "alloc-work", JobID: id, Job: job, NodeID: "node-1", NodeName: "node-1", ClientStatus: "complete", DesiredStatus: "run", CreateIndex: uint64(c.allocSeq), TaskStates: map[string]*api.TaskState{boxTaskName: state}}
+	}
+	require.Equal(t, ExitOK, ta.run(t, "images", "publish", "project-2", "--yes"), ta.errOut.String())
+	require.Equal(t, []string{"arm64"}, seen)
+}
+
+func TestImagesPublishSecondArchitectureFailureReportsStatus(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.withDraft(t, "project-2", "project", "1.0.0", 8)
+	ta.cluster.addNode("node-2", "node-2", "arm64", 12000, 32768, 150000)
+	ta.cluster.mu.Lock()
+	attrs := ta.cluster.nodes["node-2"].Attributes
+	prefix := draftAttributePrefix + "project-2."
+	for k, v := range map[string]string{"arch": "arm64", "name": "project", "parent": "1.0.0", "sha256": strings.Repeat("8a", 32), "size": "1048576"} {
+		attrs[prefix+k] = v
+	}
+	ta.cluster.mu.Unlock()
+	ta.cluster.variables[boxStoreVariable] = &api.Variable{Path: boxStoreVariable, Items: map[string]string{"url": "https://store.example.com"}}
+	registered := 0
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) {
+		id := derefStr(job.ID, "")
+		if !strings.HasPrefix(id, boxPublishJobPrefix) {
+			return
+		}
+		registered++
+		c.allocSeq++
+		var event *api.TaskEvent
+		var client string
+		if registered == 1 {
+			event = &api.TaskEvent{Type: "Driver", Time: 1, Details: map[string]string{"kind": "publish", "index": "https://store.example.com/index.json"}}
+			client = "complete"
+		} else {
+			event = &api.TaskEvent{Type: "Driver", Time: 1, Details: map[string]string{"kind": "exit"}, DisplayMessage: "upload failed"}
+			client = "failed"
+		}
+		state := &api.TaskState{State: "dead", StartedAt: time.Now(), FinishedAt: time.Now(), Failed: client == "failed", Events: []*api.TaskEvent{event}}
+		c.allocs["alloc-work"] = &api.Allocation{ID: "alloc-work", JobID: id, Job: job, NodeID: "node-1", NodeName: "node-1", ClientStatus: client, DesiredStatus: "run", CreateIndex: uint64(c.allocSeq), TaskStates: map[string]*api.TaskState{boxTaskName: state}}
+	}
+	require.Equal(t, ExitError, ta.run(t, "images", "publish", "project-2", "--yes"))
+	require.Equal(t, 2, registered)
+	require.Contains(t, ta.errOut.String(), "published architectures: amd64; not published: arm64")
+	require.Contains(t, ta.errOut.String(), "upload failed")
+}
+
 func TestImagesPublishWithoutAStore(t *testing.T) {
 	ta := newTestApp(t, platformIndexJSON)
 	ta.withDraft(t, "project-2", "project", "1.0.0", 8)
@@ -332,6 +461,42 @@ func TestRebuildRefusals(t *testing.T) {
 		require.Equal(t, ExitError, rc)
 		require.Contains(t, ta.errOut.String(), "takes no platform bundle")
 	})
+}
+
+func TestRecipeDifferenceNoteRequiresVersionAndDifferentRecipe(t *testing.T) {
+	require.Empty(t, recipeDifferenceNote("", "arm64", "other", "carried"), "automatic versions have no cross-architecture target")
+	require.Empty(t, recipeDifferenceNote("project-3", "arm64", "same", "same"), "identical recipes need no note")
+	require.Equal(t, "note: target image project-3 on arm64 carries a different recipe from the one this bake will carry",
+		recipeDifferenceNote("project-3", "arm64", "other", "carried"))
+}
+
+func TestBakeRecipeNoteOnlyForExplicitVersionDifference(t *testing.T) {
+	for _, tc := range []struct{ name, version, targetRecipe, expected string }{
+		{"explicit version differs", "project-2", encodeRecipe([]byte("other")), "carries a different recipe"},
+		{"explicit version same", "project-2", "", ""},
+		{"automatic version differs", "", encodeRecipe([]byte("other")), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, platformIndexJSON)
+			ta.addBoxSpec(t, goodProjectSpec())
+			ta.withArm64Draft(t, "project-2", "1.0.0")
+			ta.cluster.mu.Lock()
+			ta.cluster.nodes["node-1"].Attributes[draftAttributePrefix+"project-2.recipe"] = tc.targetRecipe
+			ta.cluster.mu.Unlock()
+			ta.finishWorkJobs(t, map[string]string{"kind": "bake", "version": "project-2", "arch": "amd64", "name": "project", "parent": "1.0.0", "sha256": strings.Repeat("ab", 32), "size": "1048576"}, "")
+			ta.sealMayRun()
+			args := []string{"bake", "dev1", "--name", "project", "--no-recipe"}
+			if tc.version != "" {
+				args = append(args, "--version", tc.version)
+			}
+			require.Equal(t, ExitOK, ta.run(t, args...), ta.errOut.String())
+			if tc.expected == "" {
+				require.NotContains(t, ta.errOut.String(), "carries a different recipe")
+			} else {
+				require.Contains(t, ta.errOut.String(), tc.expected)
+			}
+		})
+	}
 }
 
 // TestRebuildCreatesTheBoxAndKeepsItWhenTheRecipeFails: the temporary box is what
