@@ -521,6 +521,32 @@ func TestRebuildBakesTheTemporaryBoxAndDeletesIt(t *testing.T) {
 	require.Equal(t, BoxBakeJobName("project-rebuild"), derefStr(ta.workJob.ID, ""))
 }
 
+func TestRebuildArm64UsesRequestedVersionWhenAmd64HasSameBase(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.cluster.addNode("node-arm", "node-arm", "arm64", 12000, 32768, 150000)
+	ta.withArm64Draft(t, "project-2", "1.0.0")
+	ta.withDraft(t, "project-3", "project", "1.0.0", 8)
+	ta.finishWorkJobs(t, map[string]string{"kind": "bake", "version": "project-3", "arch": "arm64",
+		"name": "project", "parent": "1.0.0", "sha256": strings.Repeat("ef", 32), "size": "2048"}, "")
+	require.Equal(t, ExitOK, ta.run(t, "bake", "--rebuild", "project-2", "--base", "1.0.0", "--arch", "arm64", "--version", "project-3"), ta.errOut.String())
+	task, err := boxTask(ta.workJob)
+	require.NoError(t, err)
+	bake := task.Config["bake"].(map[string]any)
+	require.Equal(t, "project-3", bake["version"])
+	require.Equal(t, "arm64", bake["arch"])
+}
+
+func TestRebuildArm64RefusesAmd64VersionWithDifferentBase(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	ta.cluster.addNode("node-arm", "node-arm", "arm64", 12000, 32768, 150000)
+	ta.withArm64Draft(t, "project-2", "1.0.0")
+	ta.withDraft(t, "project-3", "project", "2.0.0", 8)
+	rc := ta.run(t, "bake", "--rebuild", "project-2", "--base", "1.0.0", "--arch", "arm64", "--version", "project-3")
+	require.Equal(t, ExitError, rc)
+	require.Contains(t, ta.errOut.String(), "must have rebuild base 1.0.0 as parent")
+	require.Zero(t, callCount(ta, "RegisterJob box-project-rebuild"))
+}
+
 // withArm64Draft publishes only the other architecture of an image version.
 func (ta *testApp) withArm64Draft(t *testing.T, version, parent string) {
 	d := ta.withDraft(t, version, "project", parent, 8)
