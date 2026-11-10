@@ -567,11 +567,13 @@ func (ps procScan) belongs(c candidate, since time.Time) bool {
 	if !ps.isWork(c) {
 		return false
 	}
-	if ps.descendsFrom(c.pid, ps.executorPID) {
-		// A process below this turn's executor belongs to this session even if
-		// its environment was changed by a child process.
-	} else if owner := ps.processSession(c.pid); owner != "" && owner != ps.session {
-		return false
+	// A process below this turn's executor is this session's whatever its
+	// environment says; any other process is left out when another session
+	// claims it.
+	if !ps.descendsFrom(c.pid, ps.executorPID) {
+		if owner := ps.processSession(c.pid); owner != "" && owner != ps.session {
+			return false
+		}
 	}
 
 	// Started after the turn did. A scan without a boot time cannot place a
@@ -590,6 +592,8 @@ func (ps procScan) belongs(c candidate, since time.Time) bool {
 	return true
 }
 
+// descendsFrom reports whether pid is ancestor or below it, following ppid up
+// to init.
 func (ps procScan) descendsFrom(pid, ancestor int) bool {
 	if ancestor <= 0 {
 		return false
@@ -609,6 +613,9 @@ func (ps procScan) descendsFrom(pid, ancestor int) bool {
 	return false
 }
 
+// processSession is the session that claims pid: the BOX_SESSION marker of the
+// process or of its nearest marked ancestor, or the session of its nearest
+// executor ancestor, whichever comes first going up. Empty when none does.
 func (ps procScan) processSession(pid int) string {
 	seen := map[int]bool{}
 	for pid > 1 && !seen[pid] {
@@ -628,6 +635,7 @@ func (ps procScan) processSession(pid int) string {
 	return ""
 }
 
+// executorPIDs maps the pid of every session's running executor to its session.
 func (m *Manager) executorPIDs() map[int]string {
 	m.mu.Lock()
 	sessions := make(map[string]*session, len(m.sessions))

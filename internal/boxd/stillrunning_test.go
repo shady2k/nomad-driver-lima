@@ -119,22 +119,26 @@ func (f *fakeProc) scan() procScan {
 	}
 }
 
-// TestStillRunningCollapsesATreeToOneLine: a build and its children are one
-// line with a count, not forty-one lines: a person reads what is running, not
-// every fork of it. The tree is also the process group here, as a tool's
-// command is (boxd gives an executor its own group; a shell gives a pipeline
-// the same one), and the pid of the top is the one a person can kill.
+// TestStillRunningSessionMarker: several sessions share one box, so a turn of
+// session A reports its own processes and those no session claims, and never
+// the work of session B. A marker survives reparenting to init; without one,
+// the nearest executor ancestor decides.
 func TestStillRunningSessionMarker(t *testing.T) {
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	f := newFakeProc(t, now)
 	start := now.Add(-time.Minute)
-	f.add(fakeProcess{pid: 800, started: now.Add(-10 * time.Minute), argv: []string{"executor"}})
-	f.add(fakeProcess{pid: 801, started: now.Add(-10 * time.Minute), argv: []string{"executor"}})
-	f.add(fakeProcess{pid: 301, started: start, argv: []string{"/bin/sh", "work"}, envSession: "B"})
-	f.add(fakeProcess{pid: 302, started: start, argv: []string{"/bin/sh", "work"}, envSession: "A"})
-	f.add(fakeProcess{pid: 303, ppid: 800, started: start, argv: []string{"/bin/sh", "work"}})
-	f.add(fakeProcess{pid: 304, ppid: 801, started: start, argv: []string{"/bin/sh", "work"}})
-	f.add(fakeProcess{pid: 305, started: start, argv: []string{"/bin/sh", "work"}})
+	f.add(fakeProcess{pid: 800, ppid: 1, started: now.Add(-10 * time.Minute), argv: []string{"executor", "a"}, envSession: "A"})
+	f.add(fakeProcess{pid: 801, ppid: 1, started: now.Add(-10 * time.Minute), argv: []string{"executor", "b"}, envSession: "B"})
+	// B's test run, reparented to init: not A's.
+	f.add(fakeProcess{pid: 301, ppid: 1, started: start, argv: []string{"/bin/sh", "b-work"}, envSession: "B"})
+	// A's background work, reparented to init: A's.
+	f.add(fakeProcess{pid: 302, ppid: 1, started: start, argv: []string{"/bin/sh", "a-work"}, envSession: "A"})
+	// A child of A's executor with a cleared environment: A's.
+	f.add(fakeProcess{pid: 303, ppid: 800, started: start, argv: []string{"/bin/sh", "a-child"}})
+	// A child of B's executor with a cleared environment: B's.
+	f.add(fakeProcess{pid: 304, ppid: 801, started: start, argv: []string{"/bin/sh", "b-child"}})
+	// No marker and no executor above it (env -i, setsid): still reported.
+	f.add(fakeProcess{pid: 305, ppid: 1, started: start, argv: []string{"/bin/sh", "orphan"}})
 	ps := f.scan()
 	ps.session = "A"
 	ps.executorPID = 800
@@ -143,8 +147,12 @@ func TestStillRunningSessionMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(found) != 3 {
-		t.Fatalf("found %v, want A marker, A executor descendant and unmarked orphan", found)
+	got := map[int]bool{}
+	for _, p := range found {
+		got[p.Pid] = true
+	}
+	if len(found) != 3 || !got[302] || !got[303] || !got[305] {
+		t.Fatalf("found = %v, want pids 302, 303 and 305", found)
 	}
 }
 
@@ -164,6 +172,11 @@ func TestStillRunningLeavesOutLoneSleep(t *testing.T) {
 	}
 }
 
+// TestStillRunningCollapsesATreeToOneLine: a build and its children are one
+// line with a count, not forty-one lines: a person reads what is running, not
+// every fork of it. The tree is also the process group here, as a tool's
+// command is (boxd gives an executor its own group; a shell gives a pipeline
+// the same one), and the pid of the top is the one a person can kill.
 func TestStillRunningCollapsesATreeToOneLine(t *testing.T) {
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	f := newFakeProc(t, now)
@@ -672,5 +685,23 @@ func TestInfoCarriesTheWorkRunningWithNoTurn(t *testing.T) {
 	}
 	if line := info.Usage.Leftover.Processes[0].Line(); !strings.Contains(line, "cc1 -c big.c") {
 		t.Fatalf("line = %q", line)
+	}
+}
+
+// TestWithSessionMarkerReplacesAnInheritedOne: an executor started from a
+// shell that carried another session's marker gets its own, once.
+func TestWithSessionMarkerReplacesAnInheritedOne(t *testing.T) {
+	env := withSessionMarker([]string{"PATH=/bin", "BOX_SESSION=s-old"}, "s-new")
+	n := 0
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "BOX_SESSION=") {
+			n++
+			if kv != "BOX_SESSION=s-new" {
+				t.Fatalf("env = %v, want BOX_SESSION=s-new", env)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("env = %v, want one BOX_SESSION", env)
 	}
 }
