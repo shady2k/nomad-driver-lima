@@ -120,8 +120,6 @@ func (a *App) cmdImages(ctx context.Context, args []string) error {
 		describeCount(len(bases), "base image"), describeCount(len(projects), "published project image"),
 		describeCount(len(drafts), "draft"), dash(url))
 	if newestBase != "" {
-		a.note("create a box with: box create <id> --image %s --arch %s --cpus %d --memory-mib %d --disk-gib %d",
-			newestBase, archOfFirst(bases), defaultCPUs, defaultMemoryMiB, defaultDiskGiB)
 		a.note("choose the size for the task: %d vCPU and %d MiB are for light work without a build, and a build "+
 			"or a test run needs more memory from the start", defaultCPUs, defaultMemoryMiB)
 		a.note("when in doubt take more: a guest out of memory just stops answering (`box top` and `box status` " +
@@ -146,6 +144,12 @@ func (a *App) cmdImages(ctx context.Context, args []string) error {
 		"project wants 20-40 GiB;", defaultDiskGiB)
 	a.note("the host spends only what the box writes, and box resize --disk-gib grows the disk later (it never shrinks)")
 	a.printPlatforms(platforms, url)
+	// The hint is the last line, after the bundle table: a reader who looks at the
+	// end of the output must see the image to create from, not a bundle version.
+	if newestBase != "" {
+		a.note("create a box with: box create <id> --image %s --arch %s --cpus %d --memory-mib %d --disk-gib %d",
+			newestBase, archOfFirst(bases), defaultCPUs, defaultMemoryMiB, defaultDiskGiB)
+	}
 	return nil
 }
 
@@ -334,6 +338,8 @@ func (a *App) printPlatforms(platforms []*PlatformArtifact, url string) {
 		a.note("no platform bundles are published yet: every image runs the boxd it carries.")
 		return
 	}
+	a.note("the rows below are platform bundles (boxd and the executors), mounted into a box by the driver; " +
+		"they are not images for --image:")
 	rows := make([][]string, 0, len(platforms))
 	for _, bundle := range platforms {
 		rows = append(rows, []string{
@@ -346,7 +352,7 @@ func (a *App) printPlatforms(platforms []*PlatformArtifact, url string) {
 			dash(bundle.BuiltAt),
 		})
 	}
-	a.printTable([]string{"VERSION", "ARCH", "SIZE", "SHA256", "BOXD", "TOOLS", "BUILT"}, rows)
+	a.printTable([]string{"BUNDLE", "ARCH", "SIZE", "SHA256", "BOXD", "TOOLS", "BUILT"}, rows)
 	a.note("%s from %s", describeCount(len(platforms), "platform bundle"), url)
 }
 

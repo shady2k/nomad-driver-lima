@@ -149,6 +149,9 @@ func TestImagesOutput(t *testing.T) {
 	require.Contains(t, table, "amd64")
 	require.Contains(t, table, "arm64")
 	require.Contains(t, ta.errOut.String(), "--memory-mib 4096", "the hint is the default create takes")
+	errLines := strings.Split(strings.TrimSpace(ta.errOut.String()), "\n")
+	require.True(t, strings.HasPrefix(errLines[len(errLines)-1], "create a box with: box create <id> --image 1.0.0"),
+		"the create hint is the last line: %q", errLines[len(errLines)-1])
 
 	ta.out.Reset()
 	ta.errOut.Reset()

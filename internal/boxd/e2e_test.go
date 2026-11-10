@@ -59,6 +59,7 @@ func startBoxd(t *testing.T, b *boxdProc) {
 	cmd := exec.Command(b.bin,
 		"-socket", b.socket,
 		"-state-dir", b.state,
+		"-runtime-dir", filepath.Join(b.root, "run"),
 		"-secrets-dir", filepath.Join(b.root, "secrets"),
 		"-local-dir", filepath.Join(b.root, "local"),
 		"-prime-agent", b.fake,

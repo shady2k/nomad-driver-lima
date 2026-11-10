@@ -259,7 +259,7 @@ func rewriteModels(cfg DaemonConfig, executor, path string, keys map[string]stri
 	}
 	b, err := json.MarshalIndent(doc, "", "  ")
 	if err == nil {
-		err = os.WriteFile(path, append(b, '\n'), 0o600)
+		err = writeFileAtomic(path, append(b, '\n'), 0o600)
 	}
 	if err != nil {
 		cfg.logf("%s: cannot write the model list to %s: %v", executor, filepath.Base(path), err)
