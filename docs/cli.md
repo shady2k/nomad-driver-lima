@@ -192,7 +192,14 @@ Exit codes are the page's: `0` published, `1` the job failed or no store is
 configured, `2` usage, `3` no node holds that draft, `4` the job did not finish
 within `--timeout` (default 30m).
 
-### `box bake <id> --name NAME [--recipe FILE | --no-recipe] [--timeout D]`
+### `box bake <id> --name NAME [--version NAME-N] [--recipe FILE | --no-recipe] [--timeout D]`
+
+A project image version can contain one artifact for each architecture. Bake the
+same `--version` from an amd64 box and an arm64 box to build one cross-architecture
+release; the version is immutable per architecture, so an existing version for
+that box's architecture is refused, while the other architecture may still be
+added. Without `--version`, the CLI chooses the next unused project version across
+the index and drafts on all nodes.
 
 Turns a box into an image without emptying the box: a copy of its disk is sealed
 and baked into the node's image cache as a draft, and the box carries on with its
@@ -223,6 +230,7 @@ script belongs in the project's sources, which the recipe prepares.
 | flag | default | meaning |
 | --- | --- | --- |
 | `--name NAME` | – (required) | the project the image belongs to: `NAME-1`, `NAME-2`, ... |
+| `--version NAME-N` | next unused version | exact project image version; may add a different architecture to an existing version |
 | `--recipe FILE` | the box's image record | the script that makes this environment from the parent image |
 | `--no-recipe` | false | bake without a recipe; such an image cannot be rebuilt |
 | `--timeout D` | 30m | how long to wait for the bake job |
@@ -273,7 +281,11 @@ as big as the box.
 
 The version is `NAME-N`, with `N` one above the highest number among the versions
 of that name in the index and the drafts of every node, so a draft and a published
-image never share a number. `NAME` is 1 to 63 lower-case letters, digits and
+image never share a number. `--version NAME-N` instead requests that exact version;
+it is refused if that version already exists for the box's architecture, but can
+add another architecture to that version. A version may therefore have separate
+amd64 and arm64 artifacts; each is immutable once present. Without `--version`,
+allocation remains global across architectures and drafts. `NAME` is 1 to 63 lower-case letters, digits and
 dashes, starting and ending with a letter or a digit, and it may not look like a
 base image's version (`1.0.0`, `v2`).
 

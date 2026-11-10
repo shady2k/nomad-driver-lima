@@ -63,11 +63,13 @@ type bakeOutput struct {
 func (a *App) cmdBake(ctx context.Context, args []string) error {
 	fs := newFlagSet("bake")
 	name := fs.String("name", "", "the image's name: the project it belongs to (its versions are NAME-1, NAME-2, ...)")
+	version := fs.String("version", "", "the exact image version to bake (an existing NAME-N target without this architecture)")
 	recipe := fs.String("recipe", "", "the script that makes this environment from the parent image (a file on this host)")
 	noRecipe := fs.Bool("no-recipe", false, "bake without a recipe: such an image cannot be rebuilt later")
 	timeout := fs.Duration("timeout", DefaultBakeTimeout, "how long to wait for the bake")
 	rebuild := fs.String("rebuild", "", "rebuild this image from its recipe on a newer base image")
 	base := fs.String("base", "", "the base image a rebuild starts from (default: the newest base image)")
+	arch := fs.String("arch", "", "the architecture to rebuild (amd64 or arm64)")
 	if err := parseFlagsMin(fs, args, 0); err != nil {
 		return err
 	}
@@ -82,10 +84,9 @@ func (a *App) cmdBake(ctx context.Context, args []string) error {
 			return usagef("box bake --rebuild takes no box: it makes its own temporary box (unexpected %q)", fs.Arg(0))
 		}
 		if *name != "" || *recipe != "" || *noRecipe {
-			return usagef("box bake --rebuild takes --base and --timeout only: the image names itself, and its " +
-				"recipe is the one it carries")
+			return usagef("box bake --rebuild takes --base, --arch, --version and --timeout only: the image names itself, and its recipe is the one it carries")
 		}
-		return a.rebuildImage(ctx, *rebuild, *base, *timeout)
+		return a.rebuildImage(ctx, *rebuild, *base, *arch, *version, *timeout)
 	}
 	if fs.NArg() != 1 {
 		return usagef("box bake needs a box: box bake <id> --name NAME [--recipe FILE | --no-recipe] [--timeout D]")
@@ -116,6 +117,7 @@ func (a *App) cmdBake(ctx context.Context, args []string) error {
 		Name:     *name,
 		Recipe:   recipeData,
 		NoRecipe: *noRecipe,
+		Version:  *version,
 		Timeout:  *timeout,
 	})
 	if err != nil {
@@ -130,7 +132,8 @@ const maxRecipeBytes = 64 << 10
 // bakeOptions is one bake of one box.
 type bakeOptions struct {
 	// Name is the image's name; its version is computed here.
-	Name string
+	Name    string
+	Version string
 	// Recipe is the recipe's script; empty means the image's own recipe, if it has
 	// one.
 	Recipe   []byte
@@ -170,9 +173,42 @@ func (a *App) bakeBox(ctx context.Context, id string, opts bakeOptions) (*bakeOu
 	if err != nil {
 		return nil, err
 	}
-	version, err := NextImageVersion(opts.Name, versions)
-	if err != nil {
-		return nil, err
+	version := opts.Version
+	if version != "" {
+		if err := ValidateImageVersion(version, opts.Name); err != nil {
+			return nil, err
+		}
+		existing, err := existingImageForArch(ctx, a, version, spec.Arch)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			return nil, errorf("the image %s already exists for %s", version, spec.Arch)
+		}
+		exists, err := imageVersionExists(ctx, a, version)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			return nil, notFoundf("the target image version %s does not exist", version)
+		}
+		// Validate its parent on the other architecture: output must extend the same source.
+		other := "amd64"
+		if spec.Arch == "amd64" {
+			other = "arm64"
+		}
+		parentImage, err := existingImageForArch(ctx, a, version, other)
+		if err != nil {
+			return nil, err
+		}
+		if parentImage == nil || parentImage.Parent != spec.ImageVersion {
+			return nil, errorf("the target image %s must have the box's source image %s as parent", version, spec.ImageVersion)
+		}
+	} else {
+		version, err = NextImageVersion(opts.Name, versions)
+		if err != nil {
+			return nil, err
+		}
 	}
 	wasRunning := box.State == "running"
 	// The seal's refusals -- a running turn, a preparation in progress -- are
@@ -234,6 +270,50 @@ func (a *App) bakeBox(ctx context.Context, id string, opts bakeOptions) (*bakeOu
 func (a *App) bakeStopped(ctx context.Context, box BoxRecord, spec BoxSpec, name, version string, recipe []byte, timeout time.Duration) (*bakeOutput, error) {
 	id := box.ID
 	return a.runBakeJob(ctx, bakeJobSpecFor(id, spec, name, version, recipe), timeout)
+}
+
+func imageVersionExists(ctx context.Context, a *App, version string) (bool, error) {
+	index, err := a.loadIndexOptional(ctx)
+	if err != nil {
+		return false, err
+	}
+	if index != nil && len(index.Images[version]) > 0 {
+		return true, nil
+	}
+	drafts, err := a.nodeDrafts(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, d := range drafts {
+		if d.Version == version {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func existingImageForArch(ctx context.Context, a *App, version, arch string) (*ImageArtifact, error) {
+	index, err := a.loadIndexOptional(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if index != nil {
+		if arches := index.Images[version]; arches != nil {
+			if image := arches[arch]; image != nil {
+				return image, nil
+			}
+		}
+	}
+	drafts, err := a.nodeDrafts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range drafts {
+		if d.Version == version && NormalizeArch(d.Arch) == arch {
+			return d.Artifact(), nil
+		}
+	}
+	return nil, nil
 }
 
 // takesPlatformBundle reports whether a box's image expects a platform bundle.
@@ -640,8 +720,13 @@ func (a *App) waitForJobDone(ctx context.Context, jobID, evalID string, since ui
 // runs in it, and the result is baked as the next version of the same name. The
 // temporary box is deleted; on a failure it is kept, because what it ran is the
 // only way to see why.
-func (a *App) rebuildImage(ctx context.Context, named, base string, timeout time.Duration) error {
-	source, err := a.latestProjectImage(ctx, named)
+func (a *App) rebuildImage(ctx context.Context, named, base, arch, version string, timeout time.Duration) error {
+	requestedVersion := version
+	arch = NormalizeArch(arch)
+	if arch != "" && arch != "amd64" && arch != "arm64" {
+		return usagef("--arch must be amd64 or arm64, got %q", arch)
+	}
+	source, err := a.latestProjectImageArch(ctx, named, arch)
 	if err != nil {
 		return err
 	}
@@ -688,9 +773,40 @@ func (a *App) rebuildImage(ctx context.Context, named, base string, timeout time
 	if err != nil {
 		return wrapf(err, "a rebuild needs a node with room for a %d GiB box", diskGiB)
 	}
-	version, err := NextImageVersion(source.Name, mustVersions(a.imageVersions(ctx, source.Name)))
-	if err != nil {
-		return err
+	if requestedVersion != "" {
+		if err := ValidateImageVersion(version, source.Name); err != nil {
+			return err
+		}
+		existing, err := existingImageForArch(ctx, a, version, parent.Arch)
+		if err != nil {
+			return err
+		}
+		if existing != nil {
+			return errorf("the image %s already exists for %s", version, parent.Arch)
+		}
+		exists, err := imageVersionExists(ctx, a, version)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return notFoundf("the target image version %s does not exist", version)
+		}
+		other := "amd64"
+		if parent.Arch == "amd64" {
+			other = "arm64"
+		}
+		parentImage, err := existingImageForArch(ctx, a, version, other)
+		if err != nil {
+			return err
+		}
+		if parentImage == nil || parentImage.Parent != parent.Version {
+			return errorf("the target image %s must have rebuild base %s as parent", version, parent.Version)
+		}
+	} else {
+		version, err = NextImageVersion(source.Name, mustVersions(a.imageVersions(ctx, source.Name)))
+		if err != nil {
+			return err
+		}
 	}
 	if !a.JSON {
 		a.note("rebuilding %s: a temporary box %s from the base image %s, then its recipe", source.Version, boxID, parent.Version)
@@ -740,6 +856,7 @@ func (a *App) rebuildImage(ctx context.Context, named, base string, timeout time
 		Recipe:    []byte(script),
 		Timeout:   timeout,
 		Temporary: true,
+		Version:   requestedVersion,
 	})
 	if err != nil {
 		return keep(err)
@@ -779,13 +896,17 @@ func mustVersions(versions []string, err error) []string {
 // latestProjectImage finds an image of a project: the version named, or the newest
 // version of the name among the published images and the drafts.
 func (a *App) latestProjectImage(ctx context.Context, named string) (*ImageArtifact, error) {
+	return a.latestProjectImageArch(ctx, named, "")
+}
+
+func (a *App) latestProjectImageArch(ctx context.Context, named, arch string) (*ImageArtifact, error) {
 	named = strings.TrimSpace(named)
 	if named == "" {
 		return nil, usagef("box bake --rebuild needs the image's name or version, for example --rebuild my-project")
 	}
 	byVersion := map[string]*ImageArtifact{}
 	add := func(artifact *ImageArtifact) {
-		if artifact == nil || artifact.Version == "" {
+		if artifact == nil || artifact.Version == "" || (arch != "" && NormalizeArch(artifact.Arch) != arch) {
 			return
 		}
 		if existing, ok := byVersion[artifact.Version]; ok && existing.IsDraft() && !artifact.IsDraft() {
