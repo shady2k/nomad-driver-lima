@@ -482,14 +482,35 @@ func TestImagesShowsPlatformBundles(t *testing.T) {
 	ta := newTestApp(t, platformIndexJSON)
 	require.Equal(t, ExitOK, ta.run(t, "images"), ta.errOut.String())
 	table := ta.out.String()
-	require.Contains(t, table, "VERSION")
+	require.Contains(t, table, "VERSION", "the image table keeps its version column")
 	require.Contains(t, table, "BOXD")
 	require.Contains(t, table, "TOOLS")
 	require.Contains(t, table, "1.10.0")
 	require.Contains(t, table, "0.5.0")
 	require.Contains(t, table, "editor 3.0.1, opencode 1.3.0", "the tools are sorted by name")
+	require.Contains(t, ta.errOut.String(), "they are not images for --image")
 	require.Contains(t, ta.errOut.String(), "3 platform bundles from http://images.test/box-base/index.json")
 	require.NotContains(t, ta.errOut.String(), "no platform bundles are published yet")
+
+	// The bundle table's first column is BUNDLE, not VERSION: a reader must not
+	// mistake a bundle version for an image version.
+	lines := strings.Split(strings.TrimSpace(table), "\n")
+	require.True(t, strings.HasPrefix(lines[0], "VERSION "), "the first table is the images: %q", lines[0])
+	bundleHeader := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "BUNDLE ") {
+			bundleHeader = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, bundleHeader, "the bundle table has a BUNDLE column: %q", table)
+	require.True(t, strings.HasPrefix(lines[bundleHeader], "BUNDLE "))
+
+	// The tail of the output names the image to use, not a bundle version.
+	errLines := strings.Split(strings.TrimSpace(ta.errOut.String()), "\n")
+	last := errLines[len(errLines)-1]
+	require.True(t, strings.HasPrefix(last, "create a box with: box create <id> --image 2.0.0"),
+		"the last line must name the newest image, got %q", last)
 
 	ta.out.Reset()
 	require.Equal(t, ExitOK, ta.run(t, "images", "--json"))
@@ -499,6 +520,15 @@ func TestImagesShowsPlatformBundles(t *testing.T) {
 	require.Equal(t, "1.10.0", doc.Platforms[0].Version)
 	require.Equal(t, "amd64", doc.Platforms[0].Arch)
 	require.Equal(t, "0.5.0", doc.Platforms[0].Boxd)
+}
+
+func TestCreateWithABundleVersionSaysItIsNotAnImage(t *testing.T) {
+	ta := newTestApp(t, platformIndexJSON)
+	rc := ta.run(t, "create", "dev1", "--image", "1.10.0", "--cpus", "1", "--memory-mib", "512", "--disk-gib", "4")
+	require.Equal(t, ExitNotFound, rc)
+	require.Contains(t, ta.errOut.String(),
+		"1.10.0 is a platform bundle, not an image; the newest image is 2.0.0")
+	require.Contains(t, ta.errOut.String(), `there is no image version "1.10.0"`)
 }
 
 func TestImagesSaysWhenThereAreNoBundles(t *testing.T) {

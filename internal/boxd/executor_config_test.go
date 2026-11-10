@@ -125,6 +125,73 @@ func TestOpenCodeSeesItsConfigFile(t *testing.T) {
 	}
 }
 
+// TestExecutorConfigDirIsTraversableByAnotherUser: a session's process may drop
+// to another user and keeps XDG_CONFIG_HOME. git then looks for
+// $XDG_CONFIG_HOME/git/attributes, and a 0700 directory answers "Permission
+// denied" for a file that does not exist; 0711 answers ENOENT. The directory is
+// traversable, and every file boxd writes beneath it stays 0600.
+func TestExecutorConfigDirIsTraversableByAnotherUser(t *testing.T) {
+	cfg := testConfig(t)
+	writeSecrets(t, cfg, "prime", map[string]string{
+		"settings.json": `{}`,
+		"auth.json":     `{}`,
+	})
+	writeSecrets(t, cfg, "opencode", map[string]string{
+		"opencode.json": `{"providers":{"gateway":{"name":"Gateway"}}}`,
+		"env":           "GATEWAY_API_KEY=secret\n",
+	})
+	if _, err := NewManager(cfg); err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	modeOf := func(path string) os.FileMode {
+		t.Helper()
+		st, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		return st.Mode().Perm()
+	}
+
+	root := filepath.Join(cfg.RuntimeDir, "executors")
+	if got := modeOf(root); got != 0o711 {
+		t.Fatalf("%s mode = %o, want 0711 so another user can reach a config directory", root, got)
+	}
+	for _, name := range []string{"prime", "opencode", "claude"} {
+		dir := filepath.Join(root, name+"-config")
+		if got := modeOf(dir); got != 0o711 {
+			t.Fatalf("%s mode = %o, want 0711", dir, got)
+		}
+	}
+
+	// An existing directory is set back to 0711: a boxd before this change made
+	// it 0700, and a box's /run exists only for the life of the boot.
+	primeConfig := filepath.Join(root, "prime-config")
+	if err := os.Chmod(primeConfig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareExecutorDirs(cfg); err != nil {
+		t.Fatalf("prepareExecutorDirs: %v", err)
+	}
+	if got := modeOf(primeConfig); got != 0o711 {
+		t.Fatalf("%s mode = %o after prepareExecutorDirs, want 0711", primeConfig, got)
+	}
+
+	// Every file in the runtime copy is owner-only, wherever it sits.
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() && info.Mode().Perm() != 0o600 {
+			t.Errorf("%s mode = %o, want 0600", path, info.Mode().Perm())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+}
+
 // envValue returns the value of key in env ("" when it is not set).
 func envValue(env []string, key string) string {
 	for _, kv := range env {

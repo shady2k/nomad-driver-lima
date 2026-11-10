@@ -72,10 +72,30 @@ func probeEnv(dirs executorDirs, platformBin string) []string {
 		return env
 	}
 	env = appendFiltered(env, "HOME", "HOME="+dirs.home)
-	if dirs.config != "" && os.MkdirAll(dirs.config, 0o700) == nil {
+	if dirs.config != "" && ensureExecutorConfigDir(dirs.config) == nil {
 		env = appendFiltered(env, "XDG_CONFIG_HOME", "XDG_CONFIG_HOME="+dirs.config)
 	}
 	return env
+}
+
+// executorConfigDirMode lets a process of another user traverse an executor's
+// XDG_CONFIG_HOME without letting it list or open anything there.
+//
+// A process in a session may drop to another user (a test sandbox with setpriv
+// or sudo -u) and keeps XDG_CONFIG_HOME. git then reads
+// $XDG_CONFIG_HOME/git/attributes: with a 0700 directory it prints
+// "Permission denied" for a file that does not exist, which changes the output
+// of every git command in that sandbox. 0711 makes the lookup answer ENOENT.
+// Every file and directory inside is still owner-only.
+const executorConfigDirMode = 0o711
+
+// ensureExecutorConfigDir creates dir traversable by another user and sets the
+// mode again when it exists already: a boxd before this change made it 0700.
+func ensureExecutorConfigDir(dir string) error {
+	if err := os.MkdirAll(dir, executorConfigDirMode); err != nil {
+		return err
+	}
+	return os.Chmod(dir, executorConfigDirMode)
 }
 
 // executorDirs are the two directories an executor process writes into besides
@@ -472,7 +492,11 @@ func secretsDigest(cfg DaemonConfig) string {
 // an executor gets it from the runtime copy or from its environment.
 func prepareExecutorDirs(cfg DaemonConfig) error {
 	root := cfg.executorsDir()
-	if err := os.MkdirAll(root, 0o700); err != nil {
+	// The root is traversable for the same reason the config directories are (see
+	// executorConfigDirMode): a process of another user must reach its
+	// XDG_CONFIG_HOME through it. Its listing stays closed, and every directory
+	// and file it holds is owner-only.
+	if err := ensureExecutorConfigDir(root); err != nil {
 		return fmt.Errorf("create %s: %w", root, err)
 	}
 	for _, name := range executorNames {
@@ -480,10 +504,11 @@ func prepareExecutorDirs(cfg DaemonConfig) error {
 		// that finds no HOME of its own writes into the home of the user boxd
 		// runs as.
 		dirs := cfg.dirsOf(name)
-		for _, dir := range []string{dirs.home, dirs.config} {
-			if err := os.MkdirAll(dir, 0o700); err != nil {
-				return fmt.Errorf("create %s for the %s executor: %w", dir, name, err)
-			}
+		if err := os.MkdirAll(dirs.home, 0o700); err != nil {
+			return fmt.Errorf("create %s for the %s executor: %w", dirs.home, name, err)
+		}
+		if err := ensureExecutorConfigDir(dirs.config); err != nil {
+			return fmt.Errorf("create %s for the %s executor: %w", dirs.config, name, err)
 		}
 		src := filepath.Join(cfg.SecretsDir, name)
 		if !dirExists(src) {
@@ -531,7 +556,7 @@ func prepareOpenCodeConfig(cfg DaemonConfig) error {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(dst, e.Name()), b, 0o600); err != nil {
+		if err := writeFileAtomic(filepath.Join(dst, e.Name()), b, 0o600); err != nil {
 			return err
 		}
 	}
@@ -611,7 +636,9 @@ func copyTree(src, dst string) error {
 		digest := hex.EncodeToString(sum[:])
 		current[rel] = digest
 		if synced[rel] == digest && fileExists(target) {
-			return nil
+			// A copy made by an older boxd may not be owner-only; a credential is
+			// 0600 whether or not its content changed.
+			return os.Chmod(target, 0o600)
 		}
 		return writeFileAtomic(target, b, 0o600)
 	})

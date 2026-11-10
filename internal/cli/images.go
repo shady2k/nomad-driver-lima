@@ -415,6 +415,13 @@ func (i *ImageIndex) Resolve(version, arch string) (*ImageArtifact, error) {
 
 	arches, ok := i.Images[version]
 	if !ok {
+		if _, bundle := i.Platforms[version]; bundle {
+			if newest := i.NewestImageVersion(); newest != "" {
+				return nil, notFoundf("there is no image version %q; %s is a platform bundle, not an image; "+
+					"the newest image is %s; published versions: %s",
+					version, version, newest, strings.Join(i.Versions(), ", "))
+			}
+		}
 		return nil, notFoundf("there is no image version %q; published versions: %s",
 			version, strings.Join(i.Versions(), ", "))
 	}
@@ -429,6 +436,21 @@ func (i *ImageIndex) Resolve(version, arch string) (*ImageArtifact, error) {
 			version, arch, strings.Join(have, ", "))
 	}
 	return artifact, nil
+}
+
+// NewestImageVersion returns the newest base image version, or "" when the index
+// lists none. A project image is not a base image, so it is skipped the way
+// "latest" skips it.
+func (i *ImageIndex) NewestImageVersion() string {
+	for _, version := range i.Versions() {
+		if IsProjectImage(version) {
+			continue
+		}
+		if len(i.Images[version]) > 0 {
+			return version
+		}
+	}
+	return ""
 }
 
 // PlatformVersions returns the platform bundle versions in the index, newest

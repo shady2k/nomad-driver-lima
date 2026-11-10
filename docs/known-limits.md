@@ -28,6 +28,10 @@ where one is known, what would close it. Nothing here is a promise to fix it.
 - **arm64 has no automated end-to-end test.** `box-driver`, `box-volume` and
   `boxd` cross-build for `linux/arm64` in every release, and arm64 boxes run on
   the Mac above, but no driver or CLI suite runs a box on arm64.
+- **A box runs its own architecture only.** An amd64 binary is not runnable on
+  an arm64 box: qemu-user is not installed or supported. Take `--arch amd64` to
+  smoke-test an x64 build, and `box capacity` shows whether the amd64 node has
+  the memory.
 - **A guest is Linux only.** A box on a Mac is an arm64 Linux VM; nothing here
   boots a macOS guest, so a macOS build is checked by CI on a macOS runner, not
   in a box.
@@ -336,6 +340,16 @@ where one is known, what would close it. Nothing here is a promise to fix it.
 
 ## Sessions and executors
 
+- **A box's cgroups are the guest's, and handing a subtree to a sandbox is not
+  supported.** A box is a VM with cgroup v2; how delegation inside it behaves
+  depends on the systemd units in the guest. What worked in practice: create a
+  scope under `system.slice` (for example
+  `/sys/fs/cgroup/system.slice/<name>.slice/<name>.scope`) with a leaf cgroup,
+  write `+memory +cpu +pids` to the parent's `cgroup.subtree_control`, and enter
+  the leaf with `setpriv`, not `su` (PAM moves the process back into the session
+  cgroup). A process cannot be moved into a cgroup that has controllers enabled
+  for children (the "no internal processes" rule), which is the usual cause of
+  an I/O error on `cgroup.procs`.
 - **Resume works for prime only.** opencode keeps its own transcripts and the
   adapter does not pass a resume flag, so `executor_session` stays empty and an
   executor restart starts a fresh session; opencode does advertise

@@ -22,7 +22,7 @@ polling loop**: `box wait` and `box events` report progress.
 
 ```bash
 box capacity                      # 1. where can a box go, and how much is free
-box images                        # 2. which base images exist: take the newest
+box images                        # 2. which base images exist: the first table; take the newest image, the one the last line names
 box executors show                # 3. which executors have credentials, and their models
 box create dev1 --image <newest> --arch amd64 --disk-gib 16 \
     --repo https://github.com/org/proj        # 2 vCPU, 4096 MiB by default; returns when the box is ready
@@ -137,8 +137,11 @@ current base image, not an old one.
 
 - **The architecture is yours to say.** Without `--arch` the box goes to any
   node that has room, Linux or Mac. A task that needs a platform says so:
-  `--arch amd64` or `--arch arm64`. `box capacity` lists both, never add their
-  free resources together.
+  `--arch amd64` or `--arch arm64`. A box runs its own architecture only: an
+  amd64 binary is not runnable on an arm64 box (qemu-user is not supported), so
+  take `--arch amd64` to smoke-test an x64 build. `box capacity` lists both,
+  never add their free resources together, and shows whether the amd64 node has
+  the memory.
 - **Only one of `box capacity`'s disk columns is free space.** `FREE disk
   (driver)` is what the node can really write, and the number a box's disk grows
   into. `DISK free/total (scheduler)` is Nomad's scheduling arithmetic, its total
@@ -147,10 +150,12 @@ current base image, not an old one.
   keeps for itself says `LOW DISK` on stderr and takes no new box. `unknown` in
   the driver column means that node's driver did not measure its filesystem --
   not that the node is roomy.
-- **Take the newest image** from `box images`; an older one lacks fixes. Then
-  look for a project image of your project: a `project` row whose parent is the
-  newest base image already holds the toolchain and the caches, and a box from it
-  starts ahead of one that installs them again.
+- **Take the newest image** from the first table of `box images`, the one the
+  last line of its output names; an older one lacks fixes. The table below it
+  lists platform bundles, which are not images for `--image`. Then look for a
+  project image of your project: a `project` row whose parent is the newest base
+  image already holds the toolchain and the caches, and a box from it starts
+  ahead of one that installs them again.
 - **`box events <id> <session> --tail 20`** is the news of a long session: the
   last N events instead of the feed from a cursor. Use it when you come back to a
   session you did not follow, then `--since` with the last sequence to go on.
@@ -307,6 +312,16 @@ starts, so no key lands on a disk.
 
 - **The agent in a box runs as root and its tool calls are approved
   automatically.** There is no human to ask, so it can run anything in the box.
+- **cgroups inside a box are the guest's.** A box is a VM with cgroup v2, and how
+  delegation inside it behaves depends on the systemd units inside the guest;
+  the platform does not provide a supported way to hand a subtree to a sandbox.
+  What worked in practice: create a scope under `system.slice` (for example
+  `/sys/fs/cgroup/system.slice/<name>.slice/<name>.scope`) with a leaf cgroup,
+  write `+memory +cpu +pids` to the parent's `cgroup.subtree_control`, and enter
+  the leaf with `setpriv`, not `su` (PAM moves the process back into the session
+  cgroup). A process cannot be moved into a cgroup that has controllers enabled
+  for children (the "no internal processes" rule), which is the usual cause of
+  an I/O error on `cgroup.procs`.
 - **Every box gets the same executor key**, and anything in the box can read it.
   Do not put untrusted code, or a repository you would not run with that key,
   into a box.
