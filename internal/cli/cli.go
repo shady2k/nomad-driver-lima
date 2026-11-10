@@ -320,7 +320,7 @@ func (a *App) commands() map[string]command {
 		"capacity":  {usage: "nodes that can run boxes, with their free CPU, memory and disk", run: a.cmdCapacity},
 		"executors": {usage: "executor credentials of the boxes: box executors set --from-dir DIR --provider NAME | show | delete", run: a.cmdExecutors, subcommands: true},
 		"images":    {usage: "the images a box can be created from: box images | box images publish <version> --yes", run: a.cmdImages, subcommands: true},
-		"bake":      {usage: "bake a box into an image: box bake <id> --name NAME [--recipe FILE | --no-recipe] [--yes]; box bake --rebuild NAME [--base VERSION]", run: a.cmdBake},
+		"bake":      {usage: "bake a box into an image: box bake <id> --name NAME [--recipe FILE | --no-recipe] [--timeout D]; box bake --rebuild NAME [--base VERSION] [--timeout D]", run: a.cmdBake},
 		"store":     {usage: "the image store a publish writes to: box store set --url URL --from-file FILE | --template FILE; box store show", run: a.cmdStore, subcommands: true},
 		"create":    {usage: "create a box: box create <id> --image <version> [--arch amd64|arm64] [--cpus N] [--memory-mib N] [--disk-gib N] [--project NAME]", run: a.cmdCreate},
 		"ls":        {usage: "list boxes; --project NAME or --mine shows one project's", run: a.cmdList},

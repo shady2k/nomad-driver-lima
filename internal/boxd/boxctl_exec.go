@@ -129,6 +129,9 @@ func execPlanFor(cfg DaemonConfig, executor, cwd string, command []string) (exec
 	if err != nil {
 		return execPlan{}, execBrokenf("the environment of the %s executor: %v", executor, err)
 	}
+	env = withoutSudoEnv(env)
+	env = appendFiltered(env, "USER", "USER=root")
+	env = appendFiltered(env, "LOGNAME", "LOGNAME=root")
 	if cwd == "" {
 		cwd = cfg.sessionWorkdir(readPrepareState(cfg))
 	}
@@ -144,6 +147,18 @@ func execPlanFor(cfg DaemonConfig, executor, cwd string, command []string) (exec
 			"%s: command not found in the %s executor's PATH (%s)", command[0], executor, pathOf(env))}
 	}
 	return execPlan{path: path, argv: command, env: env, dir: cwd}, nil
+}
+
+// withoutSudoEnv removes the login user's sudo metadata from a command environment.
+func withoutSudoEnv(env []string) []string {
+	out := env[:0]
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if !strings.HasPrefix(key, "SUDO_") {
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // lookPathIn finds a program on the PATH of an environment. exec.LookPath asks

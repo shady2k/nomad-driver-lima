@@ -145,7 +145,8 @@ It is what `box run --executor` calls, through `sudo -n`: the CLI reaches the
 guest as the box's login user, and `/work` and the homes belong to `boxd`'s user.
 It builds the environment from `boxd`'s own code (`internal/boxd/exec.go`), so a
 command and a session cannot disagree about `HOME`, `PATH` or the working
-directory.
+directory, and removes `SUDO_*` variables while setting `USER` and `LOGNAME` to
+`root`.
 
 The command replaces the `boxctl` process (`exec`), so its streams, its terminal,
 its signals and its exit status are the caller's, exactly as if it had been

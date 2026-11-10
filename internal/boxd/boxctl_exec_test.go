@@ -28,6 +28,13 @@ func TestExecPlanIsTheSessionEnvironment(t *testing.T) {
 	writeExecutable(t, filepath.Join(bin, "bun"))
 	t.Setenv("PATH", bin+":/usr/bin:/bin")
 
+	t.Setenv("SUDO_USER", "login")
+	t.Setenv("SUDO_UID", "1000")
+	t.Setenv("SUDO_GID", "1000")
+	t.Setenv("SUDO_COMMAND", "boxctl exec")
+	t.Setenv("SUDO_HOME", "/home/login")
+	t.Setenv("USER", "login")
+	t.Setenv("LOGNAME", "login")
 	plan, err := execPlanFor(cfg, "prime", "", []string{"bun", "--version"})
 	if err != nil {
 		t.Fatalf("execPlanFor: %v", err)
@@ -55,6 +62,17 @@ func TestExecPlanIsTheSessionEnvironment(t *testing.T) {
 	}
 	if got := envValue(plan.env, "XDG_CONFIG_HOME"); got != dirs.config {
 		t.Fatalf("XDG_CONFIG_HOME = %q, want %q", got, dirs.config)
+	}
+	for _, name := range []string{"SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND", "SUDO_HOME"} {
+		if got := envValue(plan.env, name); got != "" {
+			t.Errorf("%s = %q, want it removed", name, got)
+		}
+	}
+	if got := envValue(plan.env, "USER"); got != "root" {
+		t.Errorf("USER = %q, want root", got)
+	}
+	if got := envValue(plan.env, "LOGNAME"); got != "root" {
+		t.Errorf("LOGNAME = %q, want root", got)
 	}
 
 	// A session of the same executor runs with that PATH too: the two must not

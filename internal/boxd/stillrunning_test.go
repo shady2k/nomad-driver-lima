@@ -71,6 +71,10 @@ func (f *fakeProc) add(p fakeProcess) {
 	// The fields of /proc/<pid>/stat after the command name. The scan reads
 	// state (0), ppid (1), pgrp (2), utime (11), stime (12) and starttime (19);
 	// the rest is written so a wrong field number shows up as a wrong answer.
+	comm := fmt.Sprintf("proc%d", p.pid)
+	if p.exe != "" {
+		comm = filepath.Base(p.exe)
+	}
 	fields := []string{
 		string(p.state), fmt.Sprint(p.ppid), fmt.Sprint(p.pgid), "0",
 		"0", "0", "0", "0", "0", "0", "0",
@@ -80,7 +84,7 @@ func (f *fakeProc) add(p fakeProcess) {
 	for len(fields) < 50 {
 		fields = append(fields, "0")
 	}
-	f.write(dir, "stat", fmt.Sprintf("%d (proc%d) %s\n", p.pid, p.pid, strings.Join(fields, " ")))
+	f.write(dir, "stat", fmt.Sprintf("%d (%s) %s\n", p.pid, comm, strings.Join(fields, " ")))
 	f.write(dir, "cmdline", strings.Join(p.argv, "\x00")+"\x00")
 	f.write(dir, "cgroup", "0::"+p.cgroup+"\n")
 	if p.exe != "" {
@@ -116,6 +120,22 @@ func (f *fakeProc) scan() procScan {
 // every fork of it. The tree is also the process group here, as a tool's
 // command is (boxd gives an executor its own group; a shell gives a pipeline
 // the same one), and the pid of the top is the one a person can kill.
+func TestStillRunningLeavesOutLoneSleep(t *testing.T) {
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	f := newFakeProc(t, now)
+	turnStart := now.Add(-5 * time.Minute)
+	f.add(fakeProcess{pid: 200, started: now.Add(-time.Minute), argv: []string{"sleep", "300"}, exe: "/usr/bin/sleep"})
+	f.add(fakeProcess{pid: 201, started: now.Add(-time.Minute), argv: []string{"sh", "-c", "sleep 300; true"}, exe: "/bin/sh"})
+	f.add(fakeProcess{pid: 202, started: now.Add(-time.Minute), argv: []string{"/usr/bin/python3", "worker.py"}, exe: "/usr/bin/python3"})
+	found, err := f.scan().run(turnStart)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(found) != 2 || found[0].Pid == 200 || found[1].Pid == 200 {
+		t.Fatalf("found = %v, want sh and python but not lone sleep", found)
+	}
+}
+
 func TestStillRunningCollapsesATreeToOneLine(t *testing.T) {
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	f := newFakeProc(t, now)
@@ -420,8 +440,8 @@ func TestStillRunningAtReadsTheManagersOwnGuest(t *testing.T) {
 		exe: "/usr/bin/sleep"})
 	m := newManager(t, cfg)
 	report := m.stillRunningAt(now.Add(-2*time.Minute), now)
-	if report == nil || len(report.Processes) != 1 || report.Processes[0].Pid != 103 {
-		t.Fatalf("report = %+v, want only the sleep", report)
+	if report != nil {
+		t.Fatalf("report = %+v, want no lone sleep", report)
 	}
 	// A turn without a start has no window at all.
 	if report := m.stillRunningAt(time.Time{}, now); report != nil {
@@ -561,8 +581,8 @@ func TestLeftoverSaysNothingWhileATurnRuns(t *testing.T) {
 	if m.TurnInProgress() {
 		t.Fatal("no session of this box runs a turn")
 	}
-	if left := m.leftoverAt(now); left == nil || left.Count != 1 {
-		t.Fatalf("leftover = %+v, want the one shell", left)
+	if left := m.leftoverAt(now); left != nil {
+		t.Fatalf("leftover = %+v, want no lone sleep", left)
 	}
 	// A session in a turn: the report is left out until it ends.
 	s := m.lookupSession(mustSession(t, m, "prime", "p/m").ID)

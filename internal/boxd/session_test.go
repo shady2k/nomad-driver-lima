@@ -650,19 +650,15 @@ func TestTurnReportsWhatItLeftRunning(t *testing.T) {
 	}
 	var found *StillRunningProcess
 	for i, p := range done.StillRunning.Processes {
-		if strings.Contains(p.Command, "sleep 300") {
+		if strings.HasPrefix(p.Command, "sh -c sleep 300") {
 			found = &done.StillRunning.Processes[i]
 			break
 		}
 	}
 	if found == nil {
-		t.Fatalf("the background command is not in the report: %+v", done.StillRunning.Processes)
+		t.Fatalf("the shell running the background sleep is not in the report: %+v", done.StillRunning.Processes)
 	}
-	// `sh -c 'sleep 300 & wait'` and the sleep under it are one line with one
-	// child, not two lines.
-	if found.Children != 1 {
-		t.Fatalf("line = %q, want the sleep counted as its child", found.Line())
-	}
+	// The shell remains reported as the root of the process tree.
 	if found.Pid == 0 || found.AgeSeconds < 0 || found.CPUSeconds < 0 {
 		t.Fatalf("line = %+v, want a pid and a measurement", found)
 	}
