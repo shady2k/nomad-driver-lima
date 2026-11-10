@@ -910,12 +910,9 @@ func mustVersions(versions []string, err error) []string {
 	return versions
 }
 
-// latestProjectImage finds an image of a project: the version named, or the newest
-// version of the name among the published images and the drafts.
-func (a *App) latestProjectImage(ctx context.Context, named string) (*ImageArtifact, error) {
-	return a.latestProjectImageArch(ctx, named, "")
-}
-
+// latestProjectImageArch finds an image of a project: the version named, or the
+// newest version of the name among the published images and the drafts. A
+// non-empty arch takes only that architecture's images.
 func (a *App) latestProjectImageArch(ctx context.Context, named, arch string) (*ImageArtifact, error) {
 	named = strings.TrimSpace(named)
 	if named == "" {
