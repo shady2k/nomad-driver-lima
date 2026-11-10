@@ -95,6 +95,13 @@ func (a *App) cmdCP(ctx context.Context, args []string) error {
 }
 
 // copyToBox streams a local file or directory into the box.
+//
+// The copy runs as the box's login user, which is what `box cp` has always done,
+// and what that user owns stays its own. A target it cannot write -- /work below
+// the agent's own directories, which belong to boxd's user -- is written through
+// `sudo -n` instead, and what is written belongs to the owner of the nearest
+// directory that is already there: a copy into the agent's /work is still the
+// agent's.
 func (a *App) copyToBox(ctx context.Context, tr ExecTransport, boxID, localPath, guestPath string) (*cpOutput, error) {
 	info, err := os.Lstat(localPath)
 	if err != nil {
@@ -104,7 +111,16 @@ func (a *App) copyToBox(ctx context.Context, tr ExecTransport, boxID, localPath,
 		return nil, wrapf(err, "cannot read %s", localPath)
 	}
 	guestDir, entryName := splitGuestTarget(guestPath, filepath.Base(localPath))
-	if err := guestMkdir(ctx, tr, guestDir); err != nil {
+	target, err := copyTargetIn(ctx, tr, guestDir)
+	if err != nil {
+		return nil, err
+	}
+	if !target.writable {
+		if err := a.requireSudo(ctx, tr, fmt.Sprintf("writing %s in box %s", guestDir, boxID)); err != nil {
+			return nil, err
+		}
+	}
+	if err := guestMkdir(ctx, tr, guestDir, !target.writable); err != nil {
 		return nil, err
 	}
 
@@ -115,9 +131,16 @@ func (a *App) copyToBox(ctx context.Context, tr ExecTransport, boxID, localPath,
 		pw.CloseWithError(err)
 		packed <- err
 	}()
+	// An archive written as root keeps the uid it was packed with, which is the
+	// local machine's and means nothing here: what is written is handed to the
+	// target's owner below.
+	command := []string{"tar", "-xf", "-", "-C", guestDir}
+	if !target.writable {
+		command = append([]string{"sudo", "-n", "tar", "-xf", "-", "--no-same-owner", "-C"}, guestDir)
+	}
 	var stderr bytes.Buffer
 	code, execErr := tr.Exec(ctx, ExecOpts{
-		Command: []string{"tar", "-xf", "-", "-C", guestDir},
+		Command: command,
 		Stdin:   pr,
 		Stdout:  io.Discard,
 		Stderr:  &stderr,
@@ -133,6 +156,11 @@ func (a *App) copyToBox(ctx context.Context, tr ExecTransport, boxID, localPath,
 		return nil, tarFailure(code, stderr.String(), fmt.Sprintf("box %s could not write %s", boxID, path.Join(guestDir, entryName)))
 	}
 	guestTarget := path.Join(guestDir, entryName)
+	if !target.writable {
+		if err := handOverCopy(ctx, tr, target, guestTarget); err != nil {
+			return nil, err
+		}
+	}
 	return &cpOutput{
 		From:  localPath,
 		To:    boxID + ":" + guestTarget,
@@ -143,9 +171,25 @@ func (a *App) copyToBox(ctx context.Context, tr ExecTransport, boxID, localPath,
 }
 
 // copyFromBox streams a file or directory out of the box.
+//
+// It reads as the box's login user like the rest of `box cp`, and through
+// `sudo -n` when that user cannot read the source -- what an agent made in /work
+// is root's, and a result is read out of the box more often than it is written
+// into it.
 func (a *App) copyFromBox(ctx context.Context, tr ExecTransport, boxID, guestPath, localPath string) (*cpOutput, error) {
 	guestDir, entryName := splitGuestSource(guestPath)
 	destDir, targetName := splitLocalTarget(localPath, entryName, guestPath)
+	readable, err := copyReadable(ctx, tr, path.Join(guestDir, entryName), guestDir)
+	if err != nil {
+		return nil, err
+	}
+	command := []string{"tar", "-cf", "-", "-C", guestDir, entryName}
+	if !readable {
+		if err := a.requireSudo(ctx, tr, fmt.Sprintf("reading %s in box %s", guestPath, boxID)); err != nil {
+			return nil, err
+		}
+		command = append([]string{"sudo", "-n"}, command...)
+	}
 
 	pr, pw := io.Pipe()
 	type execResult struct {
@@ -157,7 +201,7 @@ func (a *App) copyFromBox(ctx context.Context, tr ExecTransport, boxID, guestPat
 	var stderr bytes.Buffer
 	go func() {
 		code, err := tr.Exec(ctx, ExecOpts{
-			Command: []string{"tar", "-cf", "-", "-C", guestDir, entryName},
+			Command: command,
 			Stdout:  pw,
 			Stderr:  &stderr,
 		})
@@ -236,14 +280,19 @@ func splitLocalTarget(localPath, entryName, guestPath string) (dir, name string)
 	return filepath.Dir(localPath), filepath.Base(localPath)
 }
 
-// guestMkdir creates a directory in the guest.
-func guestMkdir(ctx context.Context, tr ExecTransport, dir string) error {
+// guestMkdir creates a directory in the guest, as the box's login user or, when
+// that user may not write the place, through sudo -n.
+func guestMkdir(ctx context.Context, tr ExecTransport, dir string, asRoot bool) error {
 	if dir == "" || dir == "." || dir == "/" {
 		return nil
 	}
+	command := []string{"mkdir", "-p", "--", dir}
+	if asRoot {
+		command = append([]string{"sudo", "-n"}, command...)
+	}
 	var stderr bytes.Buffer
 	code, err := tr.Exec(ctx, ExecOpts{
-		Command: []string{"mkdir", "-p", "--", dir},
+		Command: command,
 		Stdout:  io.Discard,
 		Stderr:  &stderr,
 	})
@@ -252,6 +301,119 @@ func guestMkdir(ctx context.Context, tr ExecTransport, dir string) error {
 	}
 	if code != 0 {
 		return errorf("cannot create the directory %s in the box: %s", dir, oneLine(stderr.String(), 200))
+	}
+	return nil
+}
+
+// copyTarget is where a copy into the box goes, and who may write it.
+type copyTarget struct {
+	// writable is whether the box's login user may write the target directory,
+	// or the nearest directory above it that is already there.
+	writable bool
+	// owner is the uid:gid of that directory: what a copy written as root
+	// belongs to afterwards.
+	owner string
+	// created are the directories a copy written as root makes, from the first
+	// one that is missing down to the target.
+	created []string
+}
+
+// copyTargetProbe reports who may write a directory in the box: the owner and the
+// path of the nearest directory that is there, then whether the box's login user
+// may write it (exit 0) or may not (exit 1). It is one call, so a copy into a
+// place that is already the user's costs one answer and nothing else.
+const copyTargetProbe = `d=$0; while [ ! -e "$d" ] && [ "$d" != / ]; do d=$(dirname -- "$d"); done; ` +
+	`stat -c '%u:%g' -- "$d" && printf '%s\n' "$d"; [ -w "$d" ]`
+
+// copyReadableProbe reports whether the box's login user may read what tar has to
+// read for a copy out: the entry itself and the directory it is read from.
+const copyReadableProbe = `[ -r "$0" ] && [ -x "$1" ]`
+
+// copyTargetIn asks the guest where a copy into dir may be written, and who owns
+// the place it would go.
+func copyTargetIn(ctx context.Context, tr ExecTransport, dir string) (copyTarget, error) {
+	var out, stderr bytes.Buffer
+	code, err := tr.Exec(ctx, ExecOpts{
+		Command: []string{"sh", "-c", copyTargetProbe, dir},
+		Stdout:  &out,
+		Stderr:  &stderr,
+	})
+	if err != nil {
+		return copyTarget{}, wrapf(err, "cannot ask the box who may write %s", dir)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) < 2 {
+		return copyTarget{}, errorf("cannot ask the box who may write %s: %s", dir,
+			oneLine(stderr.String(), 200))
+	}
+	return copyTarget{
+		writable: code == 0,
+		owner:    strings.TrimSpace(lines[0]),
+		created:  createdDirs(strings.TrimSpace(lines[len(lines)-1]), dir),
+	}, nil
+}
+
+// copyReadable reports whether the box's login user may read entry, which is
+// inside dir.
+func copyReadable(ctx context.Context, tr ExecTransport, entry, dir string) (bool, error) {
+	var stderr bytes.Buffer
+	code, err := tr.Exec(ctx, ExecOpts{
+		Command: []string{"sh", "-c", copyReadableProbe, entry, dir},
+		Stdout:  io.Discard,
+		Stderr:  &stderr,
+	})
+	if err != nil {
+		return false, wrapf(err, "cannot ask the box whether %s is readable", entry)
+	}
+	switch code {
+	case 0:
+		return true, nil
+	case 1:
+		return false, nil
+	}
+	return false, errorf("cannot ask the box whether %s is readable: %s", entry, oneLine(stderr.String(), 200))
+}
+
+// createdDirs are the directories between the nearest one that is there (parent)
+// and the target: root makes them, so they are handed over with what is written.
+func createdDirs(parent, dir string) []string {
+	parent, dir = path.Clean(parent), path.Clean(dir)
+	if parent == dir {
+		return nil
+	}
+	rest := strings.TrimPrefix(strings.TrimPrefix(dir, parent), "/")
+	var dirs []string
+	cur := parent
+	for _, part := range strings.Split(rest, "/") {
+		if part == "" {
+			continue
+		}
+		cur = path.Join(cur, part)
+		dirs = append(dirs, cur)
+	}
+	return dirs
+}
+
+// handOverCopy gives what a copy written as root made -- the directories and the
+// entry -- to the owner of the nearest directory that was already there. A copy
+// into the agent's /work is the agent's then, not root's.
+func handOverCopy(ctx context.Context, tr ExecTransport, target copyTarget, entry string) error {
+	paths := append(append([]string(nil), target.created...), entry)
+	if target.owner == "" {
+		return nil
+	}
+	var stderr bytes.Buffer
+	code, err := tr.Exec(ctx, ExecOpts{
+		Command: append([]string{"sudo", "-n", "chown", "-R", target.owner, "--"}, paths...),
+		Stdout:  io.Discard,
+		Stderr:  &stderr,
+	})
+	if err != nil {
+		return wrapf(err, "cannot give %s in the box to %s", entry, target.owner)
+	}
+	if code != 0 {
+		return errorf("%s in the box was written as root and could not be given to %s: %s",
+			entry, target.owner, oneLine(stderr.String(), 200))
 	}
 	return nil
 }

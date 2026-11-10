@@ -34,6 +34,10 @@ type Executor interface {
 	Name() string
 	// Probe reports availability and version for "boxctl info".
 	Probe(ctx context.Context) ExecutorInfo
+	// Env returns the environment every session of this executor runs with,
+	// without a model: its HOME, its XDG_CONFIG_HOME and its PATH. `boxctl exec`
+	// starts a command in it, and Argv builds the same one for a session.
+	Env() ([]string, error)
 	// Argv returns the command line and extra environment for one session.
 	Argv(spec ExecSpec) ([]string, []string, error)
 	// TranscriptIDs lists the resumable transcripts in a session directory.
@@ -193,11 +197,10 @@ func executorEnv(envFile string, dirs executorDirs, platformBin string, extra ma
 	}
 	path := withPathFront(pathOf(env), platformBin)
 	if dirs.home != "" && dirExists(dirs.home) {
-		// What an agent installs for itself lands in its HOME: `go install` in
-		// ~/go/bin, `uv tool` and pip --user in ~/.local/bin. Without them on
-		// PATH a tool it has just installed is "command not found".
-		path = withPath(path,
-			filepath.Join(dirs.home, "go", "bin"), filepath.Join(dirs.home, ".local", "bin"))
+		// What an agent installs for itself lands in its HOME, and a tool it has
+		// just installed is "command not found" without it on PATH. The bundle
+		// comes first, so a tool it carries still runs whatever the box holds.
+		path = withPath(path, homePathDirs(dirs.home)...)
 	}
 	if path != pathOf(env) {
 		env = appendFiltered(env, "PATH", "PATH="+path)
@@ -220,6 +223,25 @@ func executorEnv(envFile string, dirs executorDirs, platformBin string, extra ma
 		env = appendFiltered(env, k, kv)
 	}
 	return env, nil
+}
+
+// homePathDirs are the directories an executor's own programs are installed in,
+// in the order they go on PATH: what `go install`, `uv tool` and pip --user write
+// to, then the ones bun, cargo and deno use. The last three are there only when
+// they exist -- an image does not carry them, the agent's installer makes them --
+// because that is what tells a tool the agent installed from one the box never
+// had.
+func homePathDirs(home string) []string {
+	if home == "" {
+		return nil
+	}
+	dirs := []string{filepath.Join(home, "go", "bin"), filepath.Join(home, ".local", "bin")}
+	for _, rel := range []string{".bun/bin", ".cargo/bin", ".deno/bin"} {
+		if dir := filepath.Join(home, rel); dirExists(dir) {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
 }
 
 // appendFiltered sets key=value in env, replacing an existing assignment.
@@ -282,6 +304,12 @@ func (p *primeExecutor) Probe(ctx context.Context) ExecutorInfo {
 	return info
 }
 
+func (p *primeExecutor) Env() ([]string, error) {
+	return executorEnv(p.envFile, p.dirs, p.platformBin, map[string]string{
+		"PRIME_AGENT_CODING_AGENT_DIR": p.configDir,
+	})
+}
+
 func (p *primeExecutor) Argv(spec ExecSpec) ([]string, []string, error) {
 	argv := []string{p.bin, "--mode", "acp", "--session-dir", spec.SessionDir}
 	if spec.Model != "" {
@@ -294,9 +322,7 @@ func (p *primeExecutor) Argv(spec ExecSpec) ([]string, []string, error) {
 	if spec.ResumeRootID != "" {
 		argv = append(argv, "-r", spec.ResumeRootID)
 	}
-	env, err := executorEnv(p.envFile, p.dirs, p.platformBin, map[string]string{
-		"PRIME_AGENT_CODING_AGENT_DIR": p.configDir,
-	})
+	env, err := p.Env()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -364,12 +390,17 @@ func (o *opencodeExecutor) Probe(ctx context.Context) ExecutorInfo {
 	return info
 }
 
+func (o *opencodeExecutor) Env() ([]string, error) {
+	return executorEnv(o.envFile, o.dirs, o.platformBin, nil)
+}
+
 func (o *opencodeExecutor) Argv(spec ExecSpec) ([]string, []string, error) {
-	env, err := executorEnv(o.envFile, o.dirs, o.platformBin, map[string]string{
-		"BOX_MODEL": spec.Model,
-	})
+	env, err := o.Env()
 	if err != nil {
 		return nil, nil, err
+	}
+	if spec.Model != "" {
+		env = appendFiltered(env, "BOX_MODEL", "BOX_MODEL="+spec.Model)
 	}
 	return []string{o.bin, "acp"}, env, nil
 }
@@ -412,12 +443,17 @@ func (c *claudeExecutor) Probe(ctx context.Context) ExecutorInfo {
 	return info
 }
 
+func (c *claudeExecutor) Env() ([]string, error) {
+	return executorEnv(c.envFile, c.dirs, c.platformBin, nil)
+}
+
 func (c *claudeExecutor) Argv(spec ExecSpec) ([]string, []string, error) {
-	env, err := executorEnv(c.envFile, c.dirs, c.platformBin, map[string]string{
-		"BOX_MODEL": spec.Model,
-	})
+	env, err := c.Env()
 	if err != nil {
 		return nil, nil, err
+	}
+	if spec.Model != "" {
+		env = appendFiltered(env, "BOX_MODEL", "BOX_MODEL="+spec.Model)
 	}
 	return []string{c.bin}, env, nil
 }
