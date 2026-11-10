@@ -47,6 +47,13 @@ import (
 //   - It is not a lone sleep. The prime runtime's own sleep has no result to
 //     wait for, so a process whose executable basename (or comm when exe is
 //     unavailable) is sleep is left out when it has no children.
+//   - It belongs to this turn's session. Every executor gets BOX_SESSION=<session id>,
+//     which tools inherit after reparenting. A different marker excludes a process
+//     unless it descends from this session's executor. Without a marker, the nearest
+//     known executor ancestor decides; a process with no marker and no executor
+//     ancestor is still reported, so env -i cannot hide work. Several sessions share
+//     one box and one boxd cgroup, so one session's work must not fail another's
+//     strict wait. An unreadable environment is treated as having no marker.
 //   - It is not a system service. The guest runs boxd as a systemd unit
 //     (boxd.service), and a process boxd starts inherits its cgroup; a process
 //     in another unit's cgroup is that unit's -- the DHCP client, an apt
@@ -159,7 +166,8 @@ func newStillRunning(found []StillRunningProcess) *StillRunning {
 // ask. The usage boxctl info answers carries that count instead -- how many work
 // processes are alive while no turn runs in any session.
 //
-// WHICH PROCESSES COUNT. The rule of a finished turn's report, without its
+// WHICH PROCESSES COUNT. This report stays box-wide: it includes work from every
+// session while no turn runs. The rule of a finished turn's report, without its
 // start-time test: a process that started before the turn started is not the
 // turn's, and this report has no turn to compare with. So a userspace process
 // that is not the box's own machinery (the platform bundle, the executor homes
@@ -224,7 +232,10 @@ func newLeftover(found []StillRunningProcess) *Leftover {
 // outside /proc is decided once, so a test can run it against a fake tree.
 type procScan struct {
 	// root is the guest's /proc (a test gives a directory of its own).
-	root string
+	root        string
+	session     string
+	executorPID int
+	executors   map[int]string
 	// boot is when the guest booted; now is the moment of the scan. A process's
 	// starttime, counted from boot in clockTicks, is placed on the clock with
 	// these two.
@@ -278,13 +289,16 @@ func (m *Manager) stillRunningScan(now time.Time) procScan {
 // A scan that fails is not a turn that fails: the failure is logged once and
 // the report is empty. The turn's state, its text and its stop reason are the
 // executor's, and nothing boxd measures may change them.
-func (m *Manager) stillRunningAt(since, now time.Time) *StillRunning {
+func (m *Manager) stillRunningAt(since, now time.Time, session string, executorPID int) *StillRunning {
 	if since.IsZero() {
 		// A turn without a start has no window: nothing is "after the turn
 		// started", so nothing is reported.
 		return nil
 	}
-	found, err := m.stillRunningScan(now).run(since)
+	ps := m.stillRunningScan(now)
+	ps.session, ps.executorPID = session, executorPID
+	ps.executors = m.executorPIDs()
+	found, err := ps.run(since)
 	if err != nil {
 		m.stillRunningErr.Do(func() {
 			m.cfg.logf("could not read the guest's process table to report what the turn left running: %v", err)
@@ -427,11 +441,12 @@ func (p procInfo) cpuSeconds() float64 {
 // needs of it.
 type candidate struct {
 	procInfo
-	pid      int
-	argv     []string
-	exe      string
-	cgroup   string
-	children int
+	pid        int
+	argv       []string
+	exe        string
+	cgroup     string
+	envSession string
+	children   int
 }
 
 // run scans the process table and returns the processes a turn started at
@@ -506,7 +521,15 @@ func (ps procScan) read(pid int) (candidate, bool) {
 		// rule leaves it out.
 		return candidate{}, false
 	}
-	c := candidate{procInfo: info, pid: pid, argv: argv, cgroup: cgroupPath(cgroup)}
+	envData, _ := os.ReadFile(filepath.Join(dir, "environ"))
+	marker := ""
+	for _, item := range strings.Split(string(envData), "\x00") {
+		if value, ok := strings.CutPrefix(item, "BOX_SESSION="); ok {
+			marker = value
+			break
+		}
+	}
+	c := candidate{procInfo: info, pid: pid, argv: argv, cgroup: cgroupPath(cgroup), envSession: marker}
 	// /proc/<pid>/exe is a symlink into the program's own file; it is missing
 	// for a process that ended, and unreadable for one of another user.
 	if exe, err := os.Readlink(filepath.Join(dir, "exe")); err == nil {
@@ -544,6 +567,15 @@ func (ps procScan) belongs(c candidate, since time.Time) bool {
 	if !ps.isWork(c) {
 		return false
 	}
+	// A process below this turn's executor is this session's whatever its
+	// environment says; any other process is left out when another session
+	// claims it.
+	if !ps.descendsFrom(c.pid, ps.executorPID) {
+		if owner := ps.processSession(c.pid); owner != "" && owner != ps.session {
+			return false
+		}
+	}
+
 	// Started after the turn did. A scan without a boot time cannot place a
 	// process on the clock, and an unplaceable process is left out: saying
 	// nothing is better than saying a process started when the turn did not.
@@ -558,6 +590,68 @@ func (ps procScan) belongs(c candidate, since time.Time) bool {
 		return false
 	}
 	return true
+}
+
+// descendsFrom reports whether pid is ancestor or below it, following ppid up
+// to init.
+func (ps procScan) descendsFrom(pid, ancestor int) bool {
+	if ancestor <= 0 {
+		return false
+	}
+	seen := map[int]bool{}
+	for pid > 1 && !seen[pid] {
+		if pid == ancestor {
+			return true
+		}
+		seen[pid] = true
+		c, ok := ps.read(pid)
+		if !ok {
+			return false
+		}
+		pid = c.ppid
+	}
+	return false
+}
+
+// processSession is the session that claims pid: the BOX_SESSION marker of the
+// process or of its nearest marked ancestor, or the session of its nearest
+// executor ancestor, whichever comes first going up. Empty when none does.
+func (ps procScan) processSession(pid int) string {
+	seen := map[int]bool{}
+	for pid > 1 && !seen[pid] {
+		seen[pid] = true
+		c, ok := ps.read(pid)
+		if !ok {
+			return ""
+		}
+		if c.envSession != "" {
+			return c.envSession
+		}
+		if owner, ok := ps.executors[pid]; ok {
+			return owner
+		}
+		pid = c.ppid
+	}
+	return ""
+}
+
+// executorPIDs maps the pid of every session's running executor to its session.
+func (m *Manager) executorPIDs() map[int]string {
+	m.mu.Lock()
+	sessions := make(map[string]*session, len(m.sessions))
+	for id, s := range m.sessions {
+		sessions[id] = s
+	}
+	m.mu.Unlock()
+	out := make(map[int]string)
+	for id, s := range sessions {
+		s.mu.Lock()
+		if s.proc != nil && s.proc.pid > 0 {
+			out[s.proc.pid] = id
+		}
+		s.mu.Unlock()
+	}
+	return out
 }
 
 // isWork applies everything of the rule but its start-time test: this is a

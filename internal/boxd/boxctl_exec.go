@@ -130,6 +130,8 @@ func execPlanFor(cfg DaemonConfig, executor, cwd string, command []string) (exec
 		return execPlan{}, execBrokenf("the environment of the %s executor: %v", executor, err)
 	}
 	env = withoutSudoEnv(env)
+	// This is a boxctl command, not a session executor. Do not claim it for a session.
+	env = appendFiltered(env, "BOX_SESSION", "BOX_SESSION=")
 	env = appendFiltered(env, "USER", "USER=root")
 	env = appendFiltered(env, "LOGNAME", "LOGNAME=root")
 	if cwd == "" {

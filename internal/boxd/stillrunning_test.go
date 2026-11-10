@@ -36,15 +36,16 @@ func newFakeProc(t *testing.T, now time.Time) *fakeProc {
 
 // fakeProcess is one process of the fake tree.
 type fakeProcess struct {
-	pid     int
-	ppid    int
-	pgid    int
-	started time.Time
-	cpu     time.Duration
-	argv    []string
-	cgroup  string
-	exe     string
-	state   byte
+	pid        int
+	ppid       int
+	pgid       int
+	started    time.Time
+	cpu        time.Duration
+	argv       []string
+	cgroup     string
+	exe        string
+	state      byte
+	envSession string
 }
 
 // add writes one process.
@@ -87,6 +88,9 @@ func (f *fakeProc) add(p fakeProcess) {
 	f.write(dir, "stat", fmt.Sprintf("%d (%s) %s\n", p.pid, comm, strings.Join(fields, " ")))
 	f.write(dir, "cmdline", strings.Join(p.argv, "\x00")+"\x00")
 	f.write(dir, "cgroup", "0::"+p.cgroup+"\n")
+	if p.envSession != "" {
+		f.write(dir, "environ", "BOX_SESSION="+p.envSession+"\x00")
+	}
 	if p.exe != "" {
 		// /proc/<pid>/exe is a symlink to the program's own file; the target
 		// need not exist for a scan that only reads the path.
@@ -115,11 +119,43 @@ func (f *fakeProc) scan() procScan {
 	}
 }
 
-// TestStillRunningCollapsesATreeToOneLine: a build and its children are one
-// line with a count, not forty-one lines: a person reads what is running, not
-// every fork of it. The tree is also the process group here, as a tool's
-// command is (boxd gives an executor its own group; a shell gives a pipeline
-// the same one), and the pid of the top is the one a person can kill.
+// TestStillRunningSessionMarker: several sessions share one box, so a turn of
+// session A reports its own processes and those no session claims, and never
+// the work of session B. A marker survives reparenting to init; without one,
+// the nearest executor ancestor decides.
+func TestStillRunningSessionMarker(t *testing.T) {
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	f := newFakeProc(t, now)
+	start := now.Add(-time.Minute)
+	f.add(fakeProcess{pid: 800, ppid: 1, started: now.Add(-10 * time.Minute), argv: []string{"executor", "a"}, envSession: "A"})
+	f.add(fakeProcess{pid: 801, ppid: 1, started: now.Add(-10 * time.Minute), argv: []string{"executor", "b"}, envSession: "B"})
+	// B's test run, reparented to init: not A's.
+	f.add(fakeProcess{pid: 301, ppid: 1, started: start, argv: []string{"/bin/sh", "b-work"}, envSession: "B"})
+	// A's background work, reparented to init: A's.
+	f.add(fakeProcess{pid: 302, ppid: 1, started: start, argv: []string{"/bin/sh", "a-work"}, envSession: "A"})
+	// A child of A's executor with a cleared environment: A's.
+	f.add(fakeProcess{pid: 303, ppid: 800, started: start, argv: []string{"/bin/sh", "a-child"}})
+	// A child of B's executor with a cleared environment: B's.
+	f.add(fakeProcess{pid: 304, ppid: 801, started: start, argv: []string{"/bin/sh", "b-child"}})
+	// No marker and no executor above it (env -i, setsid): still reported.
+	f.add(fakeProcess{pid: 305, ppid: 1, started: start, argv: []string{"/bin/sh", "orphan"}})
+	ps := f.scan()
+	ps.session = "A"
+	ps.executorPID = 800
+	ps.executors = map[int]string{800: "A", 801: "B"}
+	found, err := ps.run(now.Add(-2 * time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[int]bool{}
+	for _, p := range found {
+		got[p.Pid] = true
+	}
+	if len(found) != 3 || !got[302] || !got[303] || !got[305] {
+		t.Fatalf("found = %v, want pids 302, 303 and 305", found)
+	}
+}
+
 func TestStillRunningLeavesOutLoneSleep(t *testing.T) {
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	f := newFakeProc(t, now)
@@ -136,6 +172,11 @@ func TestStillRunningLeavesOutLoneSleep(t *testing.T) {
 	}
 }
 
+// TestStillRunningCollapsesATreeToOneLine: a build and its children are one
+// line with a count, not forty-one lines: a person reads what is running, not
+// every fork of it. The tree is also the process group here, as a tool's
+// command is (boxd gives an executor its own group; a shell gives a pipeline
+// the same one), and the pid of the top is the one a person can kill.
 func TestStillRunningCollapsesATreeToOneLine(t *testing.T) {
 	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	f := newFakeProc(t, now)
@@ -411,7 +452,7 @@ func TestStillRunningScanFailureIsLoggedOnceAndLeavesTheTurnAlone(t *testing.T) 
 	m := newManager(t, cfg)
 	now := time.Now().UTC()
 	for i := 0; i < 3; i++ {
-		if report := m.stillRunningAt(now.Add(-time.Minute), now); report != nil {
+		if report := m.stillRunningAt(now.Add(-time.Minute), now, "", 0); report != nil {
 			t.Fatalf("a failed scan reported %+v", report)
 		}
 	}
@@ -439,12 +480,12 @@ func TestStillRunningAtReadsTheManagersOwnGuest(t *testing.T) {
 	f.add(fakeProcess{pid: 103, started: now.Add(-time.Minute), argv: []string{"/usr/bin/sleep", "300"},
 		exe: "/usr/bin/sleep"})
 	m := newManager(t, cfg)
-	report := m.stillRunningAt(now.Add(-2*time.Minute), now)
+	report := m.stillRunningAt(now.Add(-2*time.Minute), now, "", 0)
 	if report != nil {
 		t.Fatalf("report = %+v, want no lone sleep", report)
 	}
 	// A turn without a start has no window at all.
-	if report := m.stillRunningAt(time.Time{}, now); report != nil {
+	if report := m.stillRunningAt(time.Time{}, now, "", 0); report != nil {
 		t.Fatalf("a turn without a start reported %+v", report)
 	}
 }
@@ -459,7 +500,7 @@ func TestStillRunningScanStaysUnderASecond(t *testing.T) {
 	const runs = 5
 	start := time.Now()
 	for i := 0; i < runs; i++ {
-		m.stillRunningAt(now.Add(-time.Minute), time.Now().UTC())
+		m.stillRunningAt(now.Add(-time.Minute), time.Now().UTC(), "", 0)
 	}
 	each := time.Since(start) / runs
 	if each > time.Second {
@@ -644,5 +685,23 @@ func TestInfoCarriesTheWorkRunningWithNoTurn(t *testing.T) {
 	}
 	if line := info.Usage.Leftover.Processes[0].Line(); !strings.Contains(line, "cc1 -c big.c") {
 		t.Fatalf("line = %q", line)
+	}
+}
+
+// TestWithSessionMarkerReplacesAnInheritedOne: an executor started from a
+// shell that carried another session's marker gets its own, once.
+func TestWithSessionMarkerReplacesAnInheritedOne(t *testing.T) {
+	env := withSessionMarker([]string{"PATH=/bin", "BOX_SESSION=s-old"}, "s-new")
+	n := 0
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "BOX_SESSION=") {
+			n++
+			if kv != "BOX_SESSION=s-new" {
+				t.Fatalf("env = %v, want BOX_SESSION=s-new", env)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("env = %v, want one BOX_SESSION", env)
 	}
 }
