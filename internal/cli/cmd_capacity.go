@@ -326,10 +326,15 @@ func diskBoxNote(boxes map[string]BoxRecord, boxID string, now time.Time, term b
 // cluster's term cannot be read now.
 func diskTermNote(box BoxRecord, now time.Time, term boxTerm) string {
 	if box.RemovesAt == "" {
-		if !term.known() {
-			return "when the cluster's stopped-box term can be read again (" + term.why + ")"
+		if box.ClockUnknown != "" {
+			return "when `reap-boxes` can read its clock again: the stopped-box term has not started, " +
+				"and no pass can delete the disk until then (" + box.ClockUnknown + ")"
 		}
-		return termWords(term.term) + " after the first reap pass sees it stopped, and no pass has seen it yet"
+		if !term.known() {
+			return "when the cluster's stopped-box term can be read again (" + term.why +
+				"); its stopped-box term has not started yet"
+		}
+		return "when the `reap-boxes` pass writes its clock: the stopped-box term has not started yet"
 	}
 	at, err := time.Parse(time.RFC3339, box.RemovesAt)
 	if err != nil {

@@ -56,6 +56,15 @@ runs every few hours) - but only while its term has not run out (24 hours by
 default). A disk nothing describes shows as `orphan`, and it is deleted on the
 same term.
 
+The term does not start by itself: the periodic `reap-boxes` pass writes the
+clock (`nomad/jobs/box-<id>/stopped`) the first time it sees the box stopped.
+`box ls` (`DISK UNTIL`), `box status` and `box capacity` say `not started` until
+then. A `box reap` that reports a box as `failed` because the clock could not be
+written or read means its term is not running and its disk will not be deleted;
+the note names the variable rule and `deploy/acl/box-operator.policy.hcl`, which
+an operator has to grant. Do not keep a box on the hope of a term that has not
+started.
+
 `--json` on any command gives one JSON document to parse.
 
 Exit codes: `0` ok, `1` error, `2` usage, `3` not found, `4` timeout (still
@@ -304,9 +313,11 @@ it stopped: stopping one is a pause, not a way to keep it.
   `box rm <id> --yes`. No need to ask: you created it for this task, and this is
   the step that gives the disk back.
 - **Your own box, short pause:** `box stop <id>` frees the memory and starts the
-  clock of its term (24 hours by default; `box status <id>` says when). `box
-  start <id>` before it ends brings the box back; a box forgotten past its term
-  has no disk to come back to. Only `box bake` keeps a disk.
+  clock of its term (24 hours by default; `box status <id>` says when). The clock
+  is written by the `reap-boxes` pass, so `box status` says `not started` until
+  that pass runs; a pass whose clock write is refused reports `failed`. `box
+  start <id>` before the term ends brings the box back; a box forgotten past its
+  term has no disk to come back to. Only `box bake` keeps a disk.
 - **A box you did not create:** leave it alone, even when it looks abandoned;
   tell the owner its id and what `box status` says.
 - **An orphan** in `box capacity` (a VM with no box task and no description, or
@@ -385,6 +396,11 @@ starts, so no key lands on a disk.
   `box stop` frees the memory too, but starts its term's clock, 24 hours by default).
 - `Nomad rejected the box job ... the Nomad token needs ...` - the token lacks
   a rule, and the message names it. Tell the operator; do not retry.
+- `box ls` / `box status` / `box capacity` say `not started`, or `box reap`
+  reports a box `failed` because its clock could not be written or read - the
+  stopped-box term is not running for that box, so its disk will not be deleted.
+  The message names the variable capability and `deploy/acl/box-operator.policy.hcl`;
+  tell the operator. Do not wait for the disk to go by itself.
 - `the box <id> is stopped` - `box start <id>` brings it back on its disk, also
   when Nomad no longer has its job, as long as its term (24 hours by default)
   has not run out: after that its disk is deleted. `box status <id>` says when.

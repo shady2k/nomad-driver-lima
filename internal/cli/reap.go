@@ -58,8 +58,9 @@ const (
 	// reapKept is a box the pass could not decide about, or must not touch now.
 	// It looks again on the next pass, and nothing was deleted.
 	reapKept reapOutcome = "kept"
-	// reapFailed is a box whose deletion was attempted and did not finish. The
-	// pass goes on with the other boxes.
+	// reapFailed is a box the pass could not finish: a clock it could not read or
+	// write, or a deletion that was attempted and did not finish. The pass goes
+	// on with the other boxes.
 	reapFailed reapOutcome = "failed"
 )
 
@@ -222,23 +223,31 @@ func (a *App) reapBox(ctx context.Context, id string, volume *api.HostVolumeStub
 
 	clock, seen, err := a.readBoxClock(ctx, id)
 	if err != nil {
-		out.Outcome = reapKept
-		out.Note = oneLine(err.Error(), 240)
+		// A clock nobody can read is not a box to leave for the next pass: its
+		// term cannot be known, and a cluster whose token cannot read the clock
+		// would never delete a stopped disk. It is a failure of the pass.
+		out.Outcome = reapFailed
+		out.Note = oneLine(err.Error(), 600)
 		return out
 	}
 	now := a.now()
 	if !seen {
 		// A dry run writes nothing, not even the clock of a box it has not seen
-		// before: the term shown is the one this pass would start.
+		// before. It has no time to show either: reporting now as stopped_at would
+		// turn "the term will start" into a fact, and two dry runs would give two
+		// different times.
 		if dryRun {
-			setReapClock(&out, now, now, term)
 			out.Outcome = reapStarted
+			out.Note = "no clock yet: the real pass starts its term, and this dry run writes nothing"
 			return out
 		}
 		clock, err = a.startBoxClock(ctx, id, now)
 		if err != nil {
-			out.Outcome = reapKept
-			out.Note = oneLine(err.Error(), 240)
+			// The write is what starts the term. A refused write is a failed box,
+			// not one the next pass simply looks at again: without the clock the
+			// term never starts and the disk is never deleted.
+			out.Outcome = reapFailed
+			out.Note = oneLine(err.Error(), 600)
 			return out
 		}
 		setReapClock(&out, clock.at, now, term)
@@ -276,8 +285,8 @@ func (a *App) reapBox(ctx context.Context, id string, volume *api.HostVolumeStub
 	// check-and-set Nomad offers here.
 	current, still, err := a.readBoxClock(ctx, id)
 	if err != nil {
-		out.Outcome = reapKept
-		out.Note = oneLine(err.Error(), 240)
+		out.Outcome = reapFailed
+		out.Note = oneLine(err.Error(), 600)
 		return out
 	}
 	if !still || current.modifyIndex != clock.modifyIndex {

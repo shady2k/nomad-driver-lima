@@ -5,6 +5,7 @@ package cli
 // `box start`.
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -238,15 +239,6 @@ func TestReapNeverDeletesWhatItCannotRead(t *testing.T) {
 			break_: func(ta *testApp) { ta.cluster.setNodeStatus("node-1", "down") },
 			want:   "is down",
 		},
-		{
-			name: "the clock cannot be read",
-			break_: func(ta *testApp) {
-				ta.cluster.variableReadErrPath = map[string]error{
-					BoxStoppedVariable("dev1"): errors.New("Permission denied"),
-				}
-			},
-			want: "cannot read",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -261,6 +253,62 @@ func TestReapNeverDeletesWhatItCannotRead(t *testing.T) {
 			ta.requireDiskKept(t, "dev1")
 		})
 	}
+}
+
+// TestReapFailsWhenTheClockCannotBeRead: a clock the token cannot read is not a
+// box the pass can leave alone. The term cannot be known, so the pass counts the
+// box as a failure and the command exits 1; otherwise a cluster where the token
+// lacks the clock's rule never deletes a stopped disk, and nobody notices.
+func TestReapFailsWhenTheClockCannotBeRead(t *testing.T) {
+	ta := newReapApp(t)
+	ta.addBox(t, "dev1")
+	ta.stopForReap(t, "dev1")
+	ta.cluster.variableReadErrPath = map[string]error{
+		BoxStoppedVariable("dev1"): deniedErr{},
+	}
+
+	require.Equal(t, ExitError, ta.run(t, "reap"), ta.errOut.String())
+	out := ta.errOut.String()
+	require.Contains(t, out, "box dev1")
+	require.Contains(t, out, "cannot read "+BoxStoppedVariable("dev1"))
+	require.Contains(t, out, "deploy/acl/box-operator.policy.hcl")
+	require.Contains(t, out, "1 box(es) failed")
+	ta.requireDiskKept(t, "dev1")
+
+	ta.out.Reset()
+	ta.errOut.Reset()
+	require.Equal(t, ExitError, ta.run(t, "reap", "--json"), ta.errOut.String())
+	require.Contains(t, ta.out.String(), `"failed": 1`)
+	require.Contains(t, ta.out.String(), `"outcome": "failed"`)
+}
+
+// TestReapFailsWhenTheClockCannotBeWritten: the first pass that sees a stopped
+// box writes its clock. A refused write is a failed box, not one to look at on
+// the next pass: without the clock the term never starts, and the disk is never
+// deleted.
+func TestReapFailsWhenTheClockCannotBeWritten(t *testing.T) {
+	ta := newReapApp(t)
+	ta.addBox(t, "dev1")
+	ta.stopForReap(t, "dev1")
+	ta.cluster.variableCreateErrPath = map[string]error{
+		BoxStoppedVariable("dev1"): deniedErr{},
+	}
+
+	require.Equal(t, ExitError, ta.run(t, "reap"), ta.errOut.String())
+	out := ta.errOut.String()
+	require.Contains(t, out, "box dev1")
+	require.Contains(t, out, "cannot write "+BoxStoppedVariable("dev1"))
+	require.Contains(t, out, "deploy/acl/box-operator.policy.hcl")
+	require.Contains(t, out, "1 box(es) failed")
+	ta.requireDiskKept(t, "dev1")
+	_, ok := ta.reapClock(t, "dev1")
+	require.False(t, ok, "the clock was not written")
+
+	ta.out.Reset()
+	ta.errOut.Reset()
+	require.Equal(t, ExitError, ta.run(t, "reap", "--json"), ta.errOut.String())
+	require.Contains(t, ta.out.String(), `"failed": 1`)
+	require.Contains(t, ta.out.String(), `"outcome": "failed"`)
 }
 
 // TestReapFailsWhenTheClusterCannotBeRead: without the volumes there is nothing
@@ -416,9 +464,10 @@ func TestReapOneBoxFailingDoesNotStopThePass(t *testing.T) {
 
 	require.Equal(t, ExitError, ta.run(t, "reap"), ta.errOut.String())
 	out := ta.errOut.String()
-	require.Contains(t, out, "box dev1: its disk could not be deleted")
+	require.Contains(t, out, "box dev1: the pass could not finish it")
+	require.Contains(t, out, "the volume plugin did not answer")
 	require.Contains(t, out, "deleted box dev2")
-	require.Contains(t, out, "1 box(es) could not be deleted")
+	require.Contains(t, out, "1 box(es) failed")
 
 	// The disk of the box that failed is still there, and its clock was put back:
 	// the next pass tries again instead of waiting another 24 hours.
@@ -456,9 +505,28 @@ func TestReapDryRunDeletesNothing(t *testing.T) {
 	ta.stopForReap(t, "dev3")
 	ta.errOut.Reset()
 	require.Equal(t, ExitOK, ta.run(t, "reap", "--dry-run"), ta.errOut.String())
-	require.Contains(t, ta.errOut.String(), "box dev3: 8 GiB of disk, not running; this pass starts its term")
+	require.Contains(t, ta.errOut.String(), "box dev3: 8 GiB of disk, not running; no clock yet")
+	require.Contains(t, ta.errOut.String(), "this dry run writes nothing")
 	_, ok := ta.reapClock(t, "dev3")
 	require.False(t, ok, "a dry run writes no clock")
+
+	// The JSON says the outcome this pass would take and no time it does not
+	// have: a dry run has not seen the clock, so it reports none.
+	ta.errOut.Reset()
+	require.Equal(t, ExitOK, ta.run(t, "reap", "--dry-run", "--json"), ta.errOut.String())
+	var got reapResult
+	require.NoError(t, json.Unmarshal(ta.out.Bytes(), &got))
+	var dev3 *reapedBox
+	for i := range got.Boxes {
+		if got.Boxes[i].ID == "dev3" {
+			dev3 = &got.Boxes[i]
+		}
+	}
+	require.NotNil(t, dev3)
+	require.Equal(t, reapStarted, dev3.Outcome)
+	require.Empty(t, dev3.StoppedAt, "a dry run has no clock, so it reports no stopped_at")
+	require.Empty(t, dev3.RemovesAt, "and no removes_at invented from now")
+	require.Contains(t, dev3.Note, "no clock yet")
 }
 
 // TestReapDryRunChangesNothing: a dry run is what an operator runs to look at a
@@ -523,8 +591,9 @@ func TestReapReadsAClockItCannotParseAsAFailure(t *testing.T) {
 	}
 	ta.cluster.mu.Unlock()
 
-	require.Equal(t, ExitOK, ta.run(t, "reap"), ta.errOut.String())
+	require.Equal(t, ExitError, ta.run(t, "reap"), ta.errOut.String())
 	require.Contains(t, ta.errOut.String(), "not an RFC3339 time")
+	require.Contains(t, ta.errOut.String(), "1 box(es) failed")
 	ta.requireDiskKept(t, "dev1")
 }
 
@@ -659,14 +728,36 @@ func TestListShowsTheTimeLeft(t *testing.T) {
 	table := ta.out.String()
 	require.Contains(t, table, "DISK UNTIL")
 	require.Contains(t, table, "23h", "the time left of dev1 is shown")
-	require.Contains(t, table, "not seen", "dev2 has no clock, and says so")
-	require.Contains(t, ta.errOut.String(), "no reap pass has seen dev2 not running yet")
+	require.Contains(t, table, "not started", "dev2 has no clock, and its term has not started")
+	require.Contains(t, ta.errOut.String(), "the stopped-box term has not started for dev2")
+	require.Contains(t, ta.errOut.String(), "`reap-boxes`")
+	require.Contains(t, ta.errOut.String(), "the term does not run until one does")
 
 	// The JSON carries it as fields of its own.
 	ta.out.Reset()
 	require.Equal(t, ExitOK, ta.run(t, "ls", "--json"), ta.out.String())
 	require.Contains(t, ta.out.String(), `"removes_at": "2026-11-03T11:00:00Z"`)
 	require.Contains(t, ta.out.String(), `"stopped_at": "2026-11-02T11:00:00Z"`)
+}
+
+// TestListSaysWhenTheClockCannotBeRead: an unreadable clock is not a time to
+// invent. `box ls` keeps the box in the table with an unknown DISK UNTIL, and
+// says that the term has not started and why -- including the rule the token
+// lacks when Nomad refused the read.
+func TestListSaysWhenTheClockCannotBeRead(t *testing.T) {
+	ta := newReapApp(t)
+	ta.addBox(t, "dev1")
+	ta.stopForReap(t, "dev1")
+	ta.cluster.variableReadErrPath = map[string]error{
+		BoxStoppedVariable("dev1"): deniedErr{},
+	}
+
+	require.Equal(t, ExitOK, ta.run(t, "ls"), ta.errOut.String())
+	require.Contains(t, ta.out.String(), "unknown", "the clock cannot be read, so there is no time")
+	out := ta.errOut.String()
+	require.Contains(t, out, "the clock of this box cannot be read")
+	require.Contains(t, out, "stopped-box term has not started")
+	require.Contains(t, out, "deploy/acl/box-operator.policy.hcl")
 }
 
 // TestStatusShowsTheDiskTerm: `box status` says when the disk goes, or that no
@@ -677,7 +768,8 @@ func TestStatusShowsTheDiskTerm(t *testing.T) {
 	ta.stopForReap(t, "dev1")
 
 	require.Equal(t, ExitOK, ta.run(t, "status", "dev1"), ta.errOut.String())
-	require.Contains(t, ta.errOut.String(), "no reap pass has seen this box stopped yet")
+	require.Contains(t, ta.errOut.String(), "stopped-box term has not started")
+	require.Contains(t, ta.errOut.String(), "`reap-boxes`")
 
 	ta.setReapClock(t, "dev1", reapNow.Add(-1*time.Hour))
 	ta.errOut.Reset()
@@ -690,24 +782,63 @@ func TestStatusShowsTheDiskTerm(t *testing.T) {
 	require.Contains(t, ta.out.String(), `"removes_at": "2026-11-03T11:00:00Z"`)
 }
 
+// TestStatusSaysWhenTheClockCannotBeRead: the disk line of `box status` says the
+// term has not started, and names the missing rule when the read was refused.
+func TestStatusSaysWhenTheClockCannotBeRead(t *testing.T) {
+	ta := newReapApp(t)
+	ta.addBox(t, "dev1")
+	ta.stopForReap(t, "dev1")
+	ta.cluster.variableReadErrPath = map[string]error{
+		BoxStoppedVariable("dev1"): deniedErr{},
+	}
+
+	require.Equal(t, ExitOK, ta.run(t, "status", "dev1"), ta.errOut.String())
+	out := ta.errOut.String()
+	require.Contains(t, out, "the clock of this box cannot be read")
+	require.Contains(t, out, "stopped-box term has not started")
+	require.Contains(t, out, "deploy/acl/box-operator.policy.hcl")
+}
+
 // TestCapacityShowsTheTimeLeft: the disk lines of `box capacity` say when a disk
 // that is not in use goes.
 func TestCapacityShowsTheTimeLeft(t *testing.T) {
 	ta := newReapApp(t)
 	ta.addBox(t, "dev1")
+	ta.addBox(t, "dev2")
 	ta.stopForReap(t, "dev1")
+	ta.stopForReap(t, "dev2")
 	ta.setReapClock(t, "dev1", reapNow.Add(-2*time.Hour))
 
 	require.Equal(t, ExitOK, ta.run(t, "capacity"), ta.errOut.String())
 	out := ta.errOut.String()
 	require.Contains(t, out, "dev1 is stopped")
 	require.Contains(t, out, "its disk is deleted in 22h")
+	require.Contains(t, out, "dev2 is stopped")
+	require.Contains(t, out, "its disk is deleted when the `reap-boxes` pass writes its clock")
+	require.Contains(t, out, "the stopped-box term has not started")
 
 	// The same term is a field of the disk under --json.
 	ta.out.Reset()
 	require.Equal(t, ExitOK, ta.run(t, "capacity", "--json"), ta.out.String())
 	require.Contains(t, ta.out.String(), `"removes_at": "2026-11-03T10:00:00Z"`)
 	require.Contains(t, ta.out.String(), `"stopped_at": "2026-11-02T10:00:00Z"`)
+}
+
+// TestCapacitySaysWhenTheClockCannotBeRead: the disk line of `box capacity` says
+// the term has not started there too, and names the rule the token lacks.
+func TestCapacitySaysWhenTheClockCannotBeRead(t *testing.T) {
+	ta := newReapApp(t)
+	ta.addBox(t, "dev1")
+	ta.stopForReap(t, "dev1")
+	ta.cluster.variableReadErrPath = map[string]error{
+		BoxStoppedVariable("dev1"): deniedErr{},
+	}
+
+	require.Equal(t, ExitOK, ta.run(t, "capacity"), ta.errOut.String())
+	out := ta.errOut.String()
+	require.Contains(t, out, "dev1 is stopped")
+	require.Contains(t, out, "its disk is deleted when `reap-boxes` can read its clock again")
+	require.Contains(t, out, "deploy/acl/box-operator.policy.hcl")
 }
 
 // TestReapHelpAndUsage: the command takes no arguments and has a flag.
