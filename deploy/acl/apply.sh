@@ -5,7 +5,8 @@
 #   deploy/acl/apply.sh operator  [--token-name NAME] [--no-token] [--namespace NS]
 #   deploy/acl/apply.sh workloads [BOX ...] [--all] [--namespace NS]
 #   deploy/acl/apply.sh reap      [--namespace NS]
-#   deploy/acl/apply.sh check     [--token SECRET] [--write-probe] [--namespace NS]
+#   deploy/acl/apply.sh clock     [--token ACCESSOR] [--namespace NS]
+#   deploy/acl/apply.sh check     [--token SECRET] [--write-probe] [--clock-probe] [--namespace NS]
 #
 #   operator    apply box-operator.policy.hcl, and (unless --no-token) create the
 #               ACL token the coordinator uses. The new token is printed once.
@@ -16,12 +17,20 @@
 #   reap        apply box-reap.policy.hcl to the periodic job reap-boxes
 #               (deploy/reap-boxes.nomad.hcl), which then covers every child it
 #               dispatches. Register the job with deploy/reap.sh.
+#   clock       apply box-clock.policy.hcl, the stopped-box clock of every box.
+#               With --token ACCESSOR also add it to that token's policies,
+#               keeping the ones the token already has. It is for a CLI token
+#               that is not given the whole box-operator policy.
 #   check       run the permission probes with a token: one PASS or FAIL per
 #               probe, exit 1 if one fails. Without --token it uses NOMAD_TOKEN.
+#               --clock-probe expects a token with box-clock instead of
+#               box-operator: the clock probes must pass and the
+#               executor-credential probes must be refused. --write-probe adds
+#               the writes (in --clock-probe mode, the clock write and delete).
 #
-# Environment: NOMAD_ADDR (and NOMAD_TOKEN for operator and workloads: both need
-# a management token), NOMAD (the nomad binary, default `nomad`), NS (default
-# namespace, default `default`).
+# Environment: NOMAD_ADDR, NOMAD_TOKEN (a management token for operator,
+# workloads, reap and clock), NOMAD (the nomad binary, default `nomad`), NS
+# (default namespace, default `default`).
 #
 # Nothing here prints a secret except the token of `operator`, once, on stdout.
 
@@ -34,7 +43,7 @@ die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 2; }
 log() { printf '%s: %s\n' "$PROG" "$*" >&2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
 
-usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; }
 
 NS=${NS:-default}
 token_name=box-operator
@@ -42,14 +51,16 @@ with_token=true
 all_boxes=false
 box_ids=()
 token=${NOMAD_TOKEN:-}
+token_accessor=
 write_probe=false
+clock_probe=false
 
 command=${1:-}
 shift || true
 case $command in
   "" | -h | --help | help) usage; exit 0 ;;
-  operator | workloads | reap | check) ;;
-  *) die "unknown subcommand '$command' (want operator, workloads, reap or check; --help shows the usage)" ;;
+  operator | workloads | reap | clock | check) ;;
+  *) die "unknown subcommand '$command' (want operator, workloads, reap, clock or check; --help shows the usage)" ;;
 esac
 
 while (($# > 0)); do
@@ -58,8 +69,9 @@ while (($# > 0)); do
     --no-token) with_token=false; shift ;;
     --namespace) (($# >= 2)) || die "--namespace needs a namespace"; NS=$2; shift 2 ;;
     --all) all_boxes=true; shift ;;
-    --token) (($# >= 2)) || die "--token needs the secret"; token=$2; shift 2 ;;
+    --token) (($# >= 2)) || die "--token needs a value"; token=$2; token_accessor=$2; shift 2 ;;
     --write-probe) write_probe=true; shift ;;
+    --clock-probe) clock_probe=true; shift ;;
     -h | --help) usage; exit 0 ;;
     -*) die "unknown option '$1' (--help shows the usage)" ;;
     *) box_ids+=("$1"); shift ;;
@@ -193,6 +205,72 @@ cmd_reap() {
   log "  nomad acl policy info box-reap"
 }
 
+# --- clock -------------------------------------------------------------------
+# The clock is the one rule a CLI token needs when it cannot carry all of
+# box-operator: the stopped-box variable of every box. A token that already has
+# policies keeps them -- `nomad acl token update -policy` replaces the whole
+# list, so the list is read and every existing name is passed back.
+cmd_clock() {
+  need "$NOMAD"
+  local policy
+  policy=$(policy_for_namespace "$DIR/box-clock.policy.hcl")
+  [[ $policy == "$DIR/box-clock.policy.hcl" ]] || cleanup_files+=("$policy")
+
+  log "applying the box-clock policy to namespace $NS"
+  "$NOMAD" acl policy apply -description "box: the stopped-box clock of every box" box-clock "$policy"
+
+  # Only an explicit --token is an accessor: NOMAD_TOKEN is the management token
+  # this command authenticates with, never the token to change.
+  if [[ -z $token_accessor ]]; then
+    log "no token given (--token ACCESSOR); add the policy to one with:"
+    log "  nomad acl token update -policy <its other policies> -policy box-clock <accessor>"
+    return 0
+  fi
+
+  need python3
+  local token_info token_type policies=() name have_clock=false key value
+  # `nomad acl token info` has no -json output to rely on: read its stable
+  # key = value lines. The Secret ID line holds <none>, never the secret.
+  token_info=$("$NOMAD" acl token info "$token_accessor")
+  while IFS='=' read -r key value; do
+    case $key in
+      type) token_type=$value ;;
+      policy) policies+=("$value") ;;
+    esac
+  done < <(printf '%s\n' "$token_info" | python3 -c '
+import re, sys
+
+doc = sys.stdin.read()
+match = re.search(r"^Type\s*=\s*(\S+)", doc, re.M)
+print("type=" + (match.group(1) if match else ""))
+policies = re.search(r"^Policies\s*=\s*\[(.*?)\]", doc, re.M)
+if policies:
+    for name in policies.group(1).split():
+        print("policy=" + name)
+')
+  if [[ $token_type == management ]]; then
+    log "the token $token_accessor is a management token; it needs no policy, so nothing was changed"
+    return 0
+  fi
+  for name in "${policies[@]}"; do
+    [[ $name == box-clock ]] && have_clock=true
+  done
+  if $have_clock; then
+    log "the token $token_accessor already carries box-clock; its other policies are unchanged"
+    return 0
+  fi
+
+  log "adding box-clock to the token $token_accessor and keeping its other policies (${#policies[@]})"
+  local args=(acl token update)
+  for name in "${policies[@]}"; do args+=(-policy "$name"); done
+  args+=(-policy box-clock "$token_accessor")
+  # The update prints the whole token, and stdout is reserved for the operator
+  # token this script may print.
+  "$NOMAD" "${args[@]}" >/dev/null
+  log "the token $token_accessor now carries box-clock; check it with:"
+  log "  $0 check --token <the token's secret> --clock-probe --write-probe"
+}
+
 # --- check -------------------------------------------------------------------
 fails=0
 pass() { printf 'PASS %s\n' "$*"; }
@@ -216,11 +294,52 @@ expect() {
   esac
 }
 
+# check_summary ends a check run: 1 if a probe failed, 0 if every probe passed.
+check_summary() {
+  if ((fails > 0)); then
+    printf '\n%d probe(s) failed\n' "$fails"
+    return 1
+  fi
+  printf '\nall probes passed\n'
+}
+
+# check_clock probes a token that carries box-clock instead of box-operator: the
+# clock must work, and the executor credentials must stay out of reach. The probe
+# id has an underscore, which no box id may have, so it never names a real box.
+check_clock() {
+  local probe_box="nomad/jobs/box-_acl-probe"
+  printf 'checking the box-clock permissions at %s, namespace %s\n' "$NOMAD_ADDR" "$NS"
+
+  expect "box ls, box status, box reap --dry-run: read the clock of a box" GET \
+    "/v1/var/$probe_box/stopped?namespace=$NS" "200 404"
+
+  if $write_probe; then
+    expect "a reap pass: set the clock of a box" PUT "/v1/var/$probe_box/stopped?namespace=$NS" 200 \
+      '{"Items":{"stopped_at":"2026-01-01T00:00:00Z","state":"stopped"}}'
+    expect "box ls, box status: read the clock that was written" GET \
+      "/v1/var/$probe_box/stopped?namespace=$NS" 200
+    expect "box create, box start, box rm: delete the clock of a box" DELETE \
+      "/v1/var/$probe_box/stopped?namespace=$NS" "200 204"
+  fi
+
+  # The policy is the clock and nothing else: the executor credentials belong to
+  # box-operator, and box-clock must not hand them to a narrower token.
+  expect "denied: read the executor credentials" GET "/v1/var/nomad/jobs/box-executors?namespace=$NS" 403
+  expect "denied: write the executor credentials" PUT "/v1/var/nomad/jobs/box-executors?namespace=$NS" 403 \
+    '{"Items":{"k":"v"}}'
+}
+
 cmd_check() {
   need curl
   [[ -n ${NOMAD_ADDR:-} ]] || die "NOMAD_ADDR is not set"
   [[ -n $token ]] || die "check needs a token: --token SECRET or NOMAD_TOKEN"
   local node variable_body
+
+  if $clock_probe; then
+    check_clock
+    check_summary
+    return
+  fi
 
   printf 'checking the box-operator permissions at %s, namespace %s\n' "$NOMAD_ADDR" "$NS"
 
@@ -320,16 +439,13 @@ PY
     esac
   fi
 
-  if ((fails > 0)); then
-    printf '\n%d probe(s) failed\n' "$fails"
-    return 1
-  fi
-  printf '\nall probes passed\n'
+  check_summary
 }
 
 case $command in
   operator) cmd_operator ;;
   workloads) cmd_workloads ;;
   reap) cmd_reap ;;
+  clock) cmd_clock ;;
   check) cmd_check ;;
 esac

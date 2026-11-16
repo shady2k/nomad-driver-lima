@@ -164,6 +164,37 @@ func TestBoxReapPolicyGrantsWhatThePassNeeds(t *testing.T) {
 	require.False(t, reap.AllowVariableOperation("default", "somestore/secret", acl.VariablesCapabilityRead, nil))
 }
 
+// TestBoxClockPolicyGrantsOnlyTheClock: a CLI token that cannot carry all of
+// box-operator still needs the stopped-box clock. The policy is one variable
+// rule: read for ls/status/dry-run, write for the pass that sets the clock, and
+// destroy for create/start/rm. It must not widen into a description, the
+// executor credentials, the term, or a job/node capability.
+func TestBoxClockPolicyGrantsOnlyTheClock(t *testing.T) {
+	clock := aclOf(t, readACLPolicy(t, "box-clock.policy.hcl"))
+	path := BoxStoppedVariable("dev1")
+
+	for _, op := range []string{acl.VariablesCapabilityRead, acl.VariablesCapabilityWrite, acl.VariablesCapabilityDestroy} {
+		require.True(t, clock.AllowVariableOperation("default", path, op, nil),
+			"box-clock must be able to %s %s", op, path)
+	}
+	require.False(t, clock.AllowVariableOperation("default", BoxSpecVariable("dev1"), acl.VariablesCapabilityRead, nil),
+		"the description of a box is the operator's, not the clock's")
+	require.False(t, clock.AllowVariableOperation("default", boxExecutorsVariable, acl.VariablesCapabilityRead, nil),
+		"the executor credentials are not the clock's business")
+	require.False(t, clock.AllowVariableOperation("default", boxReapVariable, acl.VariablesCapabilityRead, nil))
+	require.False(t, clock.AllowVariableOperation("default", "nomad/jobs/other-job/stopped", acl.VariablesCapabilityRead, nil),
+		"only a box clock")
+	require.False(t, clock.AllowVariableOperation("agent-workers", path, acl.VariablesCapabilityRead, nil),
+		"only the namespace a box is created in")
+
+	require.False(t, clock.AllowNsOp("default", acl.NamespaceCapabilityListJobs),
+		"box-clock adds no job capability: the token's other policy has those")
+	require.False(t, clock.AllowNsOp("default", acl.NamespaceCapabilitySubmitJob))
+	require.False(t, clock.AllowNodeRead())
+	require.False(t, clock.AllowAgentRead())
+	require.False(t, clock.AllowOperatorRead())
+}
+
 func TestBoxStorePolicyIsForAPublishOnly(t *testing.T) {
 	store := aclOf(t, readACLPolicy(t, "box-store.policy.hcl"))
 	job := BoxPublishJobName("project-1")

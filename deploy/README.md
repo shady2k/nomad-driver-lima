@@ -505,6 +505,16 @@ Anything bigger is a Nomad installation of its own (three servers,
   reads each policy first, so a second run reports `changed=0`. The capabilities
   each policy grants, and why a box needs a job-attached policy at all, are in
   `deploy/acl/README.md`.
+- **A CLI token that cannot carry all of `box-operator` can carry the clock
+  alone.** `box-clock` is one rule on `nomad/jobs/box-<id>/stopped`: read for
+  `box ls`, `box status` and `box reap --dry-run`, write for the pass that sets
+  the clock, destroy for `box create`, `box start` and `box rm`. Apply it with
+  `deploy/acl/apply.sh clock [--token <accessor>]`; `--token` adds it to that
+  token and keeps the policies it already has. Use the full `box-operator` when
+  the token runs the CLI's job and volume commands; use `box-clock` when another
+  narrow policy already gives the token its job reads and it must not gain
+  `alloc-exec`, `host-volume-write`, the executor credentials or the rest of
+  `box-operator`. `deploy/acl/README.md` has the full comparison.
 - **A coordinator token needs a host volume rule, not only namespace
   capabilities.** Nomad checks every host volume of a job by name when it is
   registered: without `host_volume "box-*" { capabilities = ["mount-readwrite"] }`
