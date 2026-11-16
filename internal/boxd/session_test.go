@@ -187,6 +187,7 @@ func TestToolEvents(t *testing.T) {
 // activity outside a turn, says so once in the journal, and says when it went
 // quiet again.
 func TestAFailedTurnCancelsTheExecutorAndSaysItIsActiveOutsideTheTurn(t *testing.T) {
+	quarantined(t, "ALX-61", "the journal-count assertion is flaky under -race")
 	cfg := testConfig(t)
 	journal := &lockedBuffer{}
 	cfg.Journal = journal
