@@ -16,9 +16,9 @@ before.
 
 | Test | Task | Why it is parked |
 | --- | --- | --- |
-| `TestBoxLifecycle/10 the credentials are on the guest tmpfs, and a rotation reaches a running box` | ALX-44-3 | Red in Integration since 2026-11-07: the assertion at `integration_test.go:931` finds that the guest secrets directory is not a tmpfs. |
-| `TestCLI/10 sessions through a fake boxctl in the guest` | ALX-44-3 | Red in Integration since 2026-11-07: boxctl in the guest fails with `/usr/local/bin/boxctl: not found` (exit 127), so `boxctl info` never answers. |
-| `TestCLI/11 the real boxd runs a session` | ALX-44-3 | The real boxd installs boxctl in the guest; it fails the same way, exit 127. |
+| `TestBoxLifecycle/10 the credentials are on the guest tmpfs, and a rotation reaches a running box` | ALX-76 | Red in Integration since 2026-11-07: the assertion at `integration_test.go:931` finds that the guest secrets directory is not a tmpfs. |
+| `TestCLI/10 sessions through a fake boxctl in the guest` | ALX-76 | Red in Integration since 2026-11-07: boxctl in the guest fails with `/usr/local/bin/boxctl: not found` (exit 127), so `boxctl info` never answers. |
+| `TestCLI/11 the real boxd runs a session` | ALX-76 | The real boxd installs boxctl in the guest; it fails the same way, exit 127. |
 | `TestAFailedTurnCancelsTheExecutorAndSaysItIsActiveOutsideTheTurn` (`internal/boxd`) | ALX-61 | Flaky under `-race`: the journal-count assertion races the executor's late updates. |
 
 Only these tests are skipped. In `TestBoxLifecycle` the next subtest (7) uses
