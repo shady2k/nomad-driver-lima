@@ -172,7 +172,11 @@ func (a *App) RunReap(ctx context.Context, dryRun bool) error {
 	// A box that failed is a failure of the command, and of the task: the pass
 	// went over the other boxes first.
 	if res.Failed > 0 {
-		return errorf("%d box(es) could not be deleted; the lines above say why, and the next pass tries again", res.Failed)
+		// Not every failure is a disk that stayed: a clock that could not be
+		// written or read is a failed box too, and without it the term never
+		// starts. The sentence covers both cases and still tells the job's log
+		// that the pass as a whole did not succeed.
+		return errorf("%d box(es) failed; the lines above say why, and the next pass tries again", res.Failed)
 	}
 	return nil
 }
@@ -187,12 +191,18 @@ func (a *App) printReap(res reapResult) {
 		case reapDue:
 			a.note("box %s: %s, stopped %s ago: this pass would delete it", box.ID, reapSize(box), reapStoppedFor(box))
 		case reapStarted:
+			if box.RemovesAt == "" {
+				// A dry run: the pass says it would start a term, and does not
+				// report a time the box does not have yet.
+				a.note("box %s: %s, not running; %s", box.ID, reapSize(box), box.Note)
+				continue
+			}
 			a.note("box %s: %s, not running; this pass starts its term, and its disk goes at %s",
 				box.ID, reapSize(box), box.RemovesAt)
 		case reapWaiting:
 			a.note("box %s: %s, stopped %s ago: its disk goes at %s", box.ID, reapSize(box), reapStoppedFor(box), box.RemovesAt)
 		case reapFailed:
-			a.note("box %s: its disk could not be deleted: %s", box.ID, box.Note)
+			a.note("box %s: the pass could not finish it: %s", box.ID, box.Note)
 		case reapKept:
 			a.note("box %s: kept: %s", box.ID, box.Note)
 		}

@@ -280,6 +280,70 @@ sys.exit(0 if acl.get("JobID") == "reap-boxes" and not acl.get("Group") and not 
   "$NOMAD" acl token delete -accessor "$reap_accessor" >/dev/null 2>&1 || true
   expect "operator: delete the stopped-box term" DELETE "/v1/var/nomad/jobs/box-reap?namespace=$NS" "200 204"
 
+  # The clock policy is for a CLI token that cannot carry all of box-operator.
+  # It is one variable rule, so `apply.sh clock` must apply it, and the token
+  # must gain it without losing the policies it already has.
+  log "applying the box-clock policy"
+  if "$ROOT/deploy/acl/apply.sh" clock >"$WORK/clock.log" 2>&1; then
+    pass "apply.sh clock applied the policy"
+  else
+    tail -5 "$WORK/clock.log" >&2
+    fail "apply.sh clock failed"
+  fi
+  if "$NOMAD" acl policy info box-clock >/dev/null 2>&1; then
+    pass "box-clock policy is on the cluster"
+  else
+    fail "box-clock policy is missing"
+  fi
+
+  log "attaching box-clock to a token that already has box-reap"
+  local clock_json clock_accessor clock_token clock_info
+  clock_json=$("$NOMAD" acl token create -name box-clock-probe -policy box-reap -json)
+  clock_accessor=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["AccessorID"])' <<<"$clock_json")
+  clock_token=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["SecretID"])' <<<"$clock_json")
+  if "$ROOT/deploy/acl/apply.sh" clock --token "$clock_accessor" >"$WORK/clock-token.log" 2>&1; then
+    pass "apply.sh clock --token attached the policy"
+  else
+    tail -5 "$WORK/clock-token.log" >&2
+    fail "apply.sh clock --token failed"
+  fi
+  clock_info=$(curl -sS --max-time 30 -H "X-Nomad-Token: $mgmt" "$ADDR/v1/acl/token/$clock_accessor")
+  if python3 -c '
+import json, sys
+policies = sorted(json.loads(sys.argv[1]).get("Policies") or [])
+sys.exit(0 if policies == ["box-clock", "box-reap"] else 1)
+' "$clock_info"; then
+    pass "the token kept box-reap and gained box-clock"
+  else
+    fail "the token's policies are not box-clock and box-reap: $clock_info"
+  fi
+
+  # A second run must not duplicate the policy: updating a token replaces its
+  # policy list, so the mode has to read the list it already has.
+  if "$ROOT/deploy/acl/apply.sh" clock --token "$clock_accessor" >"$WORK/clock-token2.log" 2>&1; then
+    clock_info=$(curl -sS --max-time 30 -H "X-Nomad-Token: $mgmt" "$ADDR/v1/acl/token/$clock_accessor")
+    if python3 -c '
+import json, sys
+policies = sorted(json.loads(sys.argv[1]).get("Policies") or [])
+sys.exit(0 if policies == ["box-clock", "box-reap"] else 1)
+' "$clock_info"; then
+      pass "a second apply.sh clock changed nothing on the token"
+    else
+      fail "a second apply.sh clock changed the token's policies: $clock_info"
+    fi
+  else
+    tail -5 "$WORK/clock-token2.log" >&2
+    fail "the second apply.sh clock --token failed"
+  fi
+
+  log "probing a token with the box-clock policy"
+  if "$ROOT/deploy/acl/apply.sh" check --token "$clock_token" --clock-probe --write-probe; then
+    pass "the box-clock probes behaved as specified"
+  else
+    fail "a box-clock probe behaved differently than specified"
+  fi
+  "$NOMAD" acl token delete "$clock_accessor" >/dev/null 2>&1 || true
+
   if ((fails > 0)); then
     printf '\n%d check(s) failed\n' "$fails"
     return 1

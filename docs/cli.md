@@ -60,11 +60,13 @@ Each box's disk line also says which project the box belongs to
 `project`: the nodes are shared, so whose box holds a disk is part of the picture.
 
 A disk whose box is not running says when it is deleted: "its disk is deleted in
-22h", "on the next reap pass" when its term has run out, or that no pass has seen
-the box stopped yet. A stopped box is deleted after its term, 24 hours by default
-(`box reap term` shows it, `box reap term set 48h` sets another), and so is an
-`orphan` disk with a Nomad volume. A term that cannot be read says so: the time is
-unknown, not the default.
+22h", "on the next reap pass" when its term has run out, or that the stopped-box
+term has not started because no `reap-boxes` pass has written its clock yet. A
+stopped box is deleted after its term, 24 hours by default (`box reap term` shows
+it, `box reap term set 48h` sets another), and so is an `orphan` disk with a
+Nomad volume. A clock or term that cannot be read says so, including the variable
+rule and `deploy/acl/box-operator.policy.hcl` when the token was refused: the
+time is unknown, not the default.
 
 A VM with no task is an orphan to the driver after ten minutes, and that is what
 every stopped box looks like to it. So this command answers as `box ls` does: a box
@@ -477,11 +479,17 @@ description - a box made before boxes kept one - is shown as `orphan`: `box rm
 The `DISK UNTIL` column says when the disk of a box that is not running is
 deleted: how long is left, `due` when the term has run out and the next pass
 deletes it, `-` for a box that runs (a running box is never touched, however long
-it idles), `not seen` for a box no pass has seen not running yet, and `unknown`
-when the cluster's term cannot be read. The same two times are `stopped_at` and
-`removes_at` under `--json`, and a box with no pass yet has neither field: the
-command says so instead of inventing a time. `removes_at` is computed from the
-term the cluster has now, so a box already stopped follows a change to it.
+it idles), `not started` for a box no pass has written a clock for, and `unknown`
+when that clock or the cluster's term cannot be read. `not started` means the
+stopped-box term does not run for the box: it begins when the `reap-boxes` pass
+(or `box reap`) first sees the box stopped and writes
+`nomad/jobs/box-<id>/stopped`, and only then does its disk get a deletion time.
+A clock the token cannot read says why, including the variable capability the
+token lacks and `deploy/acl/box-operator.policy.hcl`, which grants it. The same
+two times are `stopped_at` and `removes_at` under `--json`, and a box with no
+clock has neither field (its reason is `clock_unknown`): the command says so
+instead of inventing a time. `removes_at` is computed from the term the cluster
+has now, so a box already stopped follows a change to it.
 
 ### `box status <id> [--events N]`
 
@@ -489,11 +497,13 @@ One box in detail: state, task events (default 10), the platform bundle it
 mounts, the guest and its executors, the sessions, the disk. A box that is not
 running also has a `disk` line: when its disk is deleted ("deleted at
 2026-11-03T11:00:00Z, 24 hours after it stopped (in 23h)" on a cluster at the
-default term; it names the real term otherwise), or that no pass has seen it
-stopped yet. A term that cannot be read says so and the command still prints the
-rest of the box: it does not fail and does not invent a time. Under `--json` it is
-`disk_term` with `stopped_at`, `removes_at` and the sentence. A box that runs has
-none: it is never on a term.
+default term; it names the real term otherwise), or that its stopped-box term has
+not started because no pass has written its clock yet. A term or clock that cannot
+be read says so, including the variable rule and `deploy/acl/box-operator.policy.hcl`
+when the token was refused, and the command still prints the rest of the box: it
+does not fail and does not invent a time. Under `--json` it is `disk_term` with
+`stopped_at`, `removes_at` and the sentence. A box that runs has none: it is never
+on a term.
 
 A session whose turn ended in an error while the executor went on working shows
 as `idle (active outside a turn)`, with `executor_active` (the seconds since its
@@ -573,7 +583,10 @@ Its name is outside `box-<id>` on purpose: a job named `box-reap` would be a box
 the id `reap` and could be taken for one.
 `box reap` runs the same pass by hand, from the coordinator; `box reap --dry-run`
 lists what the next pass would delete and when, and changes nothing -- not even
-the clock of a box no pass has seen yet.
+the clock of a box no pass has seen yet. For such a box the dry run does not
+report `stopped_at` or `removes_at`: it says in its note that there is no clock
+yet, that the real pass will start the term, and that the dry run writes nothing.
+Two dry runs in a row therefore give the same answer, not two invented times.
 
 At the first pass that sees a box not running it writes the time into the Nomad
 variable `nomad/jobs/box-<id>/stopped`. Every way a box can stop is covered
@@ -588,9 +601,17 @@ One deletion prints one line, with the box, the size of its disk and how long it
 had been stopped; the task log of the periodic job is the record. The pass does
 not delete, and tries again on the next one, when it cannot read the state of the
 box, when the box has a live allocation, when a bake or publish on its disk is
-alive, or when its node is down or unreachable. A box that fails to delete does
-not stop the pass over the others, and the command exits `1` so the job's log says
-so.
+alive, or when its node is down or unreachable.
+
+A clock that cannot be read or written is different: it is a failed box, counted
+in `failed`, and the command exits `1`. Without the clock the term never starts,
+so the disk is never deleted, and a cluster whose token lacks the variable rule
+would otherwise report a clean pass forever while no stopped disk is ever
+reclaimed. The note carries the error and, for a refused 403, the capability the
+token needs and `deploy/acl/box-operator.policy.hcl`, which grants it; the end of
+the pass says how many boxes failed, not only how many disks stayed. A box that
+fails to delete, or whose clock cannot be read or written, does not stop the pass
+over the others.
 
 ### `box reap term [show]` / `box reap term set <duration>` / `box reap term unset`
 

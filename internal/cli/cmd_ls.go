@@ -31,18 +31,19 @@ func stateCell(box BoxRecord) string {
 }
 
 // untilCell says when the disk of a box that is not running is deleted: how long
-// is left, "due" for one the pass has not deleted yet, and "not seen" for a box
-// no pass has seen not running -- which is a fact, not a time invented for it.
+// is left, "due" for one the pass has not deleted yet, and "not started" for a
+// box no pass has written a clock for -- which is a fact, not a time invented for
+// it.
 func untilCell(box BoxRecord, now time.Time) string {
 	switch box.State {
 	case "running", "starting", "unknown", "deleted", "gone":
 		return "-"
 	}
 	if box.RemovesAt == "" {
-		if box.TermUnknown != "" {
+		if box.ClockUnknown != "" || box.TermUnknown != "" {
 			return "unknown"
 		}
-		return "not seen"
+		return "not started"
 	}
 	at, err := time.Parse(time.RFC3339, box.RemovesAt)
 	if err != nil {
@@ -177,12 +178,17 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 	a.printTable([]string{"ID", "PROJECT", "NODE", "ARCH", "STATE", "CPU", "MEM", "DISK", "DISK UNTIL", "VOLUME",
 		"USED", "ALLOC", "UPTIME", "IDLE"}, rows)
 	// A box that is not running has a term, and the column says how much of it is
-	// left. A box no pass has seen not running has no term yet: say which they
-	// are, and do not give them a time.
-	var unseen, unknownTerm []string
+	// left. A box no pass has written a clock for has no term at all yet: say so,
+	// and do not give it a time.
+	var notStarted, unknownTerm []string
+	var unknownClock []BoxRecord
 	for _, box := range boxes {
 		switch box.State {
 		case "running", "starting", "unknown", "deleted", "gone":
+			continue
+		}
+		if box.ClockUnknown != "" {
+			unknownClock = append(unknownClock, box)
 			continue
 		}
 		if box.TermUnknown != "" {
@@ -190,19 +196,23 @@ func (a *App) cmdList(ctx context.Context, args []string) error {
 			continue
 		}
 		if box.RemovesAt == "" {
-			unseen = append(unseen, box.ID)
+			notStarted = append(notStarted, box.ID)
 		}
 	}
-	if len(unseen) > 0 {
+	if len(notStarted) > 0 {
 		if term.known() {
-			a.note("no reap pass has seen %s not running yet: a pass runs every 15 minutes (`box reap`), and a disk "+
-				"is deleted %s after the first pass that sees its box stopped", strings.Join(unseen, ", "),
-				termWords(term.term))
+			a.note("the stopped-box term has not started for %s: no `reap-boxes` pass has written its clock yet, "+
+				"and the term does not run until one does; a disk is deleted %s after the first pass that sees "+
+				"its box stopped", strings.Join(notStarted, ", "), termWords(term.term))
 		} else {
-			a.note("no reap pass has seen %s not running yet: a pass runs every 15 minutes (`box reap`), and a disk "+
-				"is deleted after the cluster's stopped-box term, which cannot be read now: %s",
-				strings.Join(unseen, ", "), term.why)
+			a.note("the stopped-box term has not started for %s: no `reap-boxes` pass has written its clock yet, "+
+				"and the term does not run until one does; a disk is deleted after the cluster's stopped-box "+
+				"term, which cannot be read now: %s", strings.Join(notStarted, ", "), term.why)
 		}
+	}
+	for _, box := range unknownClock {
+		a.note("%s: the clock of this box cannot be read, so its stopped-box term has not started and no pass "+
+			"will delete its disk: %s", box.ID, box.ClockUnknown)
 	}
 	if len(unknownTerm) > 0 {
 		a.note("the cluster's stopped-box term cannot be read, so DISK UNTIL is unknown for %s: %s",

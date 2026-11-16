@@ -104,6 +104,10 @@ type fakeCluster struct {
 	variableReadErrPath map[string]error
 	// variableCreateErr makes every VariableCreateChecked fail.
 	variableCreateErr error
+	// variableCreateErrPath makes the create of one variable path fail, which is
+	// how a token without the variables capability on a box's clock looks while
+	// other variables are still writable.
+	variableCreateErrPath map[string]error
 	// onVariableDeleteChecked runs before a checked delete is decided; a test
 	// uses it to be the `box start` that cleared a box's clock first. It runs
 	// with the cluster's lock held, so it must not take it.
@@ -514,6 +518,9 @@ func (c *fakeCluster) VariableCreateChecked(ctx context.Context, v *api.Variable
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.record("VariableCreateChecked " + v.Path)
+	if err := c.variableCreateErrPath[v.Path]; err != nil {
+		return nil, err
+	}
 	if c.variableCreateErr != nil {
 		return nil, c.variableCreateErr
 	}

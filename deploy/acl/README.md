@@ -1,11 +1,12 @@
 # box ACL policies
 
-Four Nomad ACL policies, the commands that apply them, and a test that proves
+Five Nomad ACL policies, the commands that apply them, and a test that proves
 them against a real Nomad agent.
 
 | file | for whom |
 | --- | --- |
 | `box-operator.policy.hcl` | the `box` CLI on the coordinator: jobs, host volumes, `alloc exec`, and the executors variable |
+| `box-clock.policy.hcl` | a CLI token that is not given the whole `box-operator`: the stopped-box clock of every box |
 | `box-workload.policy.hcl` | one box job's own workloads: read `nomad/jobs/box-executors` |
 | `box-store.policy.hcl` | one publish job (`box-publish-<version>`): read `nomad/jobs/box-store` |
 | `box-reap.policy.hcl` | the periodic job `reap-boxes`: delete the disk of a box whose term ran out |
@@ -66,6 +67,54 @@ not its job: Nomad deletes a dead job with its history after
 stopped yesterday could not be started today even with its disk intact. The
 variable holds no secret: the job names the files and the Vault paths an
 executor reads, and never a value.
+
+## The stopped-box clock, and when a token needs only it
+
+The clock of a box is the variable `nomad/jobs/box-<id>/stopped`
+(`internal/cli/stopped.go`). It records when a pass first saw the box not
+running, and it is what the cluster's stopped-box term is measured against.
+`box-clock.policy.hcl` is **one rule** for that path:
+
+| capability | for |
+| --- | --- |
+| `read` | the clock read by `box ls`, `box status` and `box reap --dry-run` |
+| `write` | the pass that sets the clock when it first sees a box not running |
+| `destroy` | `box create`, `box start` and `box rm` delete the clock |
+
+Use **`box-operator`** when the token runs the `box` CLI itself: `box create`,
+`start`, `stop`, `rm`, `resize`, `run`, `logs`, `store`, `executors`, `reap
+term`. Those commands need job and volume capabilities that `box-clock` does not
+grant.
+
+Use **`box-clock`** when a token already has the job reads it needs from another
+narrow policy, or when a token is deliberately limited to watching and ageing
+stopped boxes, and it must not gain `alloc-exec`, `host-volume-write`, the
+executor credentials or the rest of `box-operator`. The policy covers the clock
+variable only: a token that carries nothing else can still be refused
+`list-jobs` or `read-job`, so `box ls` may fail for a reason that has nothing to
+do with the clock.
+
+```bash
+# apply the policy (a management token)
+deploy/acl/apply.sh clock
+
+# apply it, and add it to an existing token without dropping its policies
+deploy/acl/apply.sh clock --token <accessor id>
+
+# prove the narrow token: the clock passes, the executor credentials are refused
+deploy/acl/apply.sh check --token <the token's secret> --clock-probe --write-probe
+```
+
+`nomad acl token update -policy` replaces the whole policy list, so `apply.sh
+clock --token` reads the token's current policies and passes every one of them
+back with `box-clock`; a second run adds nothing. Without `--token` the mode
+only applies the policy. `check --clock-probe` changes the probe set for that
+token and leaves the operator checks out; without it `check` behaves exactly as
+before.
+
+Nothing else is in the policy: no `nomad/jobs/box-<id>/spec`, no
+`nomad/jobs/box-executors`, no `nomad/jobs/box-reap` and no job, node or volume
+capability. `internal/cli/aclpolicy_test.go` pins those refusals.
 
 ## The box workloads
 
@@ -173,7 +222,10 @@ another namespace and writing a node are all denied. It also checks that each
 job-attached policy lands on its job (`JobACL` of `box-workload-test` and of
 `reap-boxes`) and that a token with the reap policy can read the clock of a box
 and the cluster's stopped-box term, and cannot write either the executors
-variable or the term.
+variable or the term. It applies `box-clock`, adds it to a token that already
+carries `box-reap` and checks that both names are still there, then runs
+`check --clock-probe --write-probe` with that token: the clock is read, written
+and deleted, and the executor credentials are refused.
 
 ## When ACLs are off
 

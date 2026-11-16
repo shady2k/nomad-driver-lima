@@ -68,6 +68,10 @@ type BoxRecord struct {
 	// it could not. A display command then says the time is unknown for that
 	// reason, instead of inventing the default.
 	TermUnknown string `json:"term_unknown,omitempty"`
+	// ClockUnknown is why the clock of a box that is not running could not be
+	// read, when it could not. Its stopped-box term has not started, so no pass
+	// can delete its disk until the clock can be read again.
+	ClockUnknown string `json:"clock_unknown,omitempty"`
 	// VMState is what qemu says about the box's VM when it is not running
 	// normally: "io-error" for a VM qemu stopped because it could not write its
 	// disk, "paused" for one an operator paused. State stays what Nomad reports --
@@ -479,7 +483,14 @@ func (a *App) fillStoppedClock(ctx context.Context, box *BoxRecord, term boxTerm
 		return
 	}
 	clock, seen, err := a.readBoxClock(ctx, box.ID)
-	if err != nil || !seen {
+	if err != nil {
+		// A clock nobody can read is not "no pass has seen it": the term cannot
+		// run until the read works, and a display command has to say so. The
+		// error already names the variable rule a 403 is missing.
+		box.ClockUnknown = oneLine(err.Error(), 600)
+		return
+	}
+	if !seen {
 		return
 	}
 	box.StoppedAt = clock.at.UTC().Format(time.RFC3339)

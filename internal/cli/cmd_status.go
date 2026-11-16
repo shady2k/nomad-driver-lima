@@ -395,19 +395,21 @@ func (a *App) diskTerm(ctx context.Context, box BoxRecord, now time.Time) *statu
 	}
 	clock, seen, err := a.readBoxClock(ctx, box.ID)
 	if err != nil {
-		return &statusDiskTerm{Note: "the clock of this box cannot be read, so no pass will delete its disk: " +
-			oneLine(err.Error(), 200)}
+		return &statusDiskTerm{Note: "the clock of this box cannot be read, so its stopped-box term has not " +
+			"started and no pass will delete its disk: " + oneLine(err.Error(), 600)}
 	}
 	// The term is a cluster setting: when it cannot be read, this command says the
 	// time is unknown and why, and still shows everything else about the box.
 	term := a.readBoxTerm(ctx)
 	if !seen {
 		if !term.known() {
-			return &statusDiskTerm{Note: "no reap pass has seen this box stopped yet; its disk is deleted after the " +
-				"cluster's stopped-box term, which cannot be read now: " + term.why}
+			return &statusDiskTerm{Note: "its stopped-box term has not started: no `reap-boxes` pass has written " +
+				"its clock yet, and the term does not run until one does. Its disk is deleted after the cluster's " +
+				"stopped-box term, which cannot be read now: " + term.why}
 		}
-		return &statusDiskTerm{Note: "no reap pass has seen this box stopped yet; its disk is deleted " +
-			termWords(term.term) + " after the first pass that sees it (`box reap` runs every 15 minutes)"}
+		return &statusDiskTerm{Note: "its stopped-box term has not started: no `reap-boxes` pass has written its " +
+			"clock yet, and the term does not run until one does; its disk is deleted " + termWords(term.term) +
+			" after that"}
 	}
 	if !term.known() {
 		return &statusDiskTerm{StoppedAt: clock.at.UTC().Format(time.RFC3339),

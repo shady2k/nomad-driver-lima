@@ -80,8 +80,9 @@ func TestAClockThatCannotBeReadIsNotAMissingOne(t *testing.T) {
 	ta.cluster.variableReadErrPath = map[string]error{BoxStoppedVariable("dev1"): errors.New(failedSayingNotFound)}
 	ta.cluster.mu.Unlock()
 
-	require.Equal(t, ExitOK, ta.run(t, "reap"), ta.errOut.String())
+	require.Equal(t, ExitError, ta.run(t, "reap"), ta.errOut.String())
 	require.Contains(t, ta.errOut.String(), "cannot read")
+	require.Contains(t, ta.errOut.String(), "1 box(es) failed")
 	require.Empty(t, ta.callsWith("VariableCreateChecked"), "a clock that cannot be read is not started again")
 	ta.requireDiskKept(t, "dev1")
 }
