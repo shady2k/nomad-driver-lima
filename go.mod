@@ -7,8 +7,8 @@ require (
 	github.com/hashicorp/nomad v1.11.0-rc.1.0.20260917172403-9dcbdc5e64ec
 	github.com/hashicorp/nomad/api v0.0.0-20260814142628-f3fe893c53d2
 	github.com/stretchr/testify v1.12.1
-	go.yaml.in/yaml/v3 v3.0.5
-	golang.org/x/term v0.46.0
+	go.yaml.in/yaml/v3 v3.0.6
+	golang.org/x/term v0.48.0
 )
 
 require (
@@ -119,7 +119,7 @@ require (
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	golang.org/x/tools v0.50.0 // indirect
