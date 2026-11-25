@@ -132,9 +132,14 @@ probe_store_denied() {
   while :; do
     alloc=$(alloc_of_job "$name")
     if [[ -n $alloc ]]; then
+      if [[ $(alloc_client_status "$alloc") == complete ]]; then
+        # A task that ends complete rendered the template, so it read the store:
+        # the answer is in, and the template's message cannot say otherwise.
+        # Waiting for that message would wait out the whole timeout.
+        return 1
+      fi
       message=$(alloc_template_message "$alloc")
       if [[ $message == *nomad/jobs/box-store* ]]; then
-        [[ $(alloc_client_status "$alloc") != complete ]] || return 1
         log=$("$NOMAD" alloc logs "$alloc" 2>/dev/null || true)
         [[ $log != *https://store.example.com* ]]
         return
@@ -488,7 +493,9 @@ sys.exit(0 if policies == ["box-clock", "box-reap"] else 1)
   # These probes are real tasks of this agent, and the task's own template is what
   # decides: it renders the store's url into its secrets, and the task prints it.
   log "probing the publish job's identity against the image store variable"
-  token=$mgmt
+  # The operator writes the store the publish reads: that is its own grant, not
+  # the management token's. $NOMAD and apply.sh keep NOMAD_TOKEN=$mgmt.
+  token=$operator_token
   expect "operator: write the image store the publish job reads" PUT "/v1/var/nomad/jobs/box-store?namespace=$NS" 200 \
     '{"Items":{"url":"https://store.example.com"}}'
 
@@ -502,6 +509,27 @@ sys.exit(0 if policies == ["box-clock", "box-reap"] else 1)
     tail -20 "$WORK/agent.log" >&2 || true
     die "the job box-store cannot read nomad/jobs/box-store without a policy: the publish design does not hold on this Nomad; see $WORK/agent.log"
   fi
+
+  # The publish job's id starts with box-, so `workloads --all` must tell it from
+  # a box by meta.box or it would attach the executor credentials to an upload.
+  # A real box job is registered beside it, so the run has one box to apply and
+  # still creates no policy for the store.
+  log "checking apply.sh workloads --all beside the publish job box-store"
+  if "$NOMAD" job run -detach "$WORK/box-test.nomad.hcl" >"$WORK/box-test-store.log" 2>&1 \
+    && "$ROOT/deploy/acl/apply.sh" workloads --all >"$WORK/workloads-box-store.log" 2>&1; then
+    pass "apply.sh workloads --all ran beside the publish job box-store"
+  else
+    tail -5 "$WORK/box-test-store.log" >&2 || true
+    tail -5 "$WORK/workloads-box-store.log" >&2 || true
+    fail "apply.sh workloads --all failed beside the publish job box-store"
+  fi
+  if [[ $(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -H "X-Nomad-Token: $mgmt" \
+    "$ADDR/v1/acl/policy/box-workload-store") == 404 ]]; then
+    pass "box-workload-store is not created for the publish job box-store"
+  else
+    fail "box-workload-store was created for the publish job box-store"
+  fi
+  "$NOMAD" job stop -purge box-test >/dev/null 2>&1 || true
 
   probe_job box-dev1
   if probe_store_denied box-dev1; then
@@ -529,6 +557,7 @@ sys.exit(0 if policies == ["box-clock", "box-reap"] else 1)
   # The probe tasks hold their secrets mount until the client unmounts it, and
   # $WORK holds the agent's data dir: a moment here keeps the last rm quiet.
   sleep 2
+  token=$operator_token
   expect "operator: delete the image store" DELETE "/v1/var/nomad/jobs/box-store?namespace=$NS" "200 204"
 
   if ((fails > 0)); then

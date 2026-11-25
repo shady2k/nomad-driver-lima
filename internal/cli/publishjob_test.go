@@ -141,6 +141,81 @@ func TestPublishReadsItsOwnAllocation(t *testing.T) {
 		"a newer allocation of the same job is not this run's result")
 }
 
+// TestEarliestAllocationPicksTheOldestWhateverItsState: the client status does
+// not decide which allocation is a run's own; the create index does. A run's
+// allocation can be complete while a neighbour's newer one still runs.
+func TestEarliestAllocationPicksTheOldestWhateverItsState(t *testing.T) {
+	oldest := &api.AllocationListStub{ID: "alloc-oldest", ClientStatus: "complete", CreateIndex: 1}
+	newer := &api.AllocationListStub{ID: "alloc-newer", ClientStatus: "running", CreateIndex: 2}
+	newest := &api.AllocationListStub{ID: "alloc-newest", ClientStatus: "failed", CreateIndex: 3}
+
+	require.Equal(t, oldest, earliestAllocation([]*api.AllocationListStub{newer, oldest, newest}))
+	require.Equal(t, oldest, earliestAllocation([]*api.AllocationListStub{newest, newer, oldest}))
+	require.Nil(t, earliestAllocation(nil))
+	require.Nil(t, earliestAllocation([]*api.AllocationListStub{nil, nil}))
+}
+
+// TestPublishReadsItsOwnAllocationWhenItIsComplete: this run's allocation ended
+// complete, while a neighbour that registered after it still runs -- or failed.
+// The oldest allocation is this run's whatever state it reached: the neighbour's
+// is not this run's to wait for, to report or to fail on.
+func TestPublishReadsItsOwnAllocationWhenItIsComplete(t *testing.T) {
+	for _, status := range []string{"running", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			ta := publishApp(t)
+			ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) {
+				if derefStr(job.ID, "") != boxPublishJobID {
+					return
+				}
+				mine, theirs := uint64(c.allocSeq+1), uint64(c.allocSeq+2)
+				c.allocSeq = int(theirs)
+				c.allocs["alloc-mine"] = publishAllocation("alloc-mine", job, mine,
+					"https://store.example.com/box-base/index.json")
+				other := publishAllocation("alloc-theirs", job, theirs,
+					"https://store.example.com/box-base/another.json")
+				other.ClientStatus = status
+				if status == "failed" {
+					other.TaskStates[boxTaskName].Failed = true
+					other.TaskStates[boxTaskName].Events = []*api.TaskEvent{{
+						Type: "Driver", Time: 1, Details: map[string]string{"kind": "exit"},
+						DisplayMessage: "the neighbour failed",
+					}}
+				}
+				c.allocs["alloc-theirs"] = other
+			}
+
+			require.Equal(t, ExitOK, ta.run(t, "images", "publish", "project-2", "--yes"), ta.errOut.String())
+			require.Contains(t, ta.errOut.String(), "published project-2 (amd64)")
+			require.Contains(t, ta.errOut.String(), "index   https://store.example.com/box-base/index.json")
+			require.NotContains(t, ta.errOut.String(), "another.json")
+			require.NotContains(t, ta.errOut.String(), "the neighbour failed")
+		})
+	}
+}
+
+// TestPublishReportsOnlyItsOwnAllocation: this run's allocation ended complete
+// without a publish event, and a neighbour's newer allocation carries one. The
+// neighbour's event is not this run's result: the command fails saying its own
+// job never said where the image went.
+func TestPublishReportsOnlyItsOwnAllocation(t *testing.T) {
+	ta := publishApp(t)
+	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) {
+		if derefStr(job.ID, "") != boxPublishJobID {
+			return
+		}
+		mine, theirs := uint64(c.allocSeq+1), uint64(c.allocSeq+2)
+		c.allocSeq = int(theirs)
+		c.allocs["alloc-mine"] = publishAllocation("alloc-mine", job, mine, "")
+		c.allocs["alloc-theirs"] = publishAllocation("alloc-theirs", job, theirs,
+			"https://store.example.com/box-base/another.json")
+	}
+
+	require.Equal(t, ExitError, ta.run(t, "images", "publish", "project-2", "--yes"))
+	require.Contains(t, ta.errOut.String(), "ended without saying where the image went")
+	require.NotContains(t, ta.errOut.String(), "published project-2")
+	require.NotContains(t, ta.errOut.String(), "another.json")
+}
+
 // TestPublishPurgesOnlyItsOwnJob: the job under the name is this run's only while
 // its modify index is the one this run's registration returned. Another run's job
 // is not this run's to purge.

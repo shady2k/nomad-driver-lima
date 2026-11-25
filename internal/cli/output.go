@@ -366,35 +366,27 @@ func jobStopped(job *api.Job) bool {
 	return job != nil && job.Stop != nil && *job.Stop
 }
 
-// earliestAllocation returns the oldest allocation of a list that is not
-// complete, and the oldest one at all when every one of them is done: a
-// publish's own allocation is the first its registration made.
+// earliestAllocation returns the allocation with the oldest CreateIndex among
+// the ones a registration made: a publish's own allocation is the first its
+// registration made, whatever state it reached.
+//
+// The client status is not a filter. A publish's allocation is complete as soon
+// as it uploaded, while a neighbour's newer one can still run; skipping the
+// complete one would wait for an upload this command did not start and then
+// report the neighbour's result or its failure.
 func earliestAllocation(allocs []*api.AllocationListStub) *api.AllocationListStub {
 	var best *api.AllocationListStub
-	older := func(alloc *api.AllocationListStub) bool {
-		if best == nil {
-			return true
+	for _, alloc := range allocs {
+		if alloc == nil {
+			continue
 		}
-		if alloc.CreateIndex != best.CreateIndex {
-			return alloc.CreateIndex < best.CreateIndex
+		if best == nil || alloc.CreateIndex < best.CreateIndex {
+			best = alloc
+			continue
 		}
 		// Two allocations of one index cannot exist on a real cluster; the id
 		// keeps the answer the same when they do.
-		return alloc.ID < best.ID
-	}
-	for _, alloc := range allocs {
-		if alloc == nil || alloc.ClientStatus == "complete" {
-			continue
-		}
-		if older(alloc) {
-			best = alloc
-		}
-	}
-	if best != nil {
-		return best
-	}
-	for _, alloc := range allocs {
-		if alloc != nil && older(alloc) {
+		if alloc.CreateIndex == best.CreateIndex && alloc.ID < best.ID {
 			best = alloc
 		}
 	}
