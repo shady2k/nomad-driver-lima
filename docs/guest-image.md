@@ -389,6 +389,16 @@ disk:
   histories; `~/.ssh` keys and `authorized_keys`; `.git-credentials`; `.netrc`;
   the token lines of `.npmrc`; and the `credential.helper` settings of a git
   configuration -- a helper is a way to find the credential the seal just deleted;
+- the login account Lima made on the box's first boot, with its home, its
+  `/home/<user>.linux` link and its linger file (`/var/lib/systemd/linger/<user>`),
+  and its rule in cloud-init's `/etc/sudoers.d/90-cloud-init-users` (the file
+  stays; the next first boot appends the box's own user's rule). The
+  account is the one that file names and the account table still has; without
+  the record it is the account with a Lima home (`/home/<user>.guest`), or else
+  the one with the first regular uid. An image that kept it would make cloud-init
+  fail to create the next node's user when that user has another name and the
+  same uid (`useradd: UID 1000 is not unique`). The accounts a recipe created are
+  not cloud-init's, so they and their homes and caches stay;
 - the contents of `/tmp` and `/var/tmp`, keeping the directories;
 - the journal (`journalctl --rotate`, then `--vacuum-time=1s`) and the contents of
   `/var/log`;
