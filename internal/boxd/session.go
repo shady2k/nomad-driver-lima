@@ -46,6 +46,9 @@ type DaemonConfig struct {
 	// "journalctl"); a test names its own, or a guest images without fstrim.
 	Fstrim     string
 	Journalctl string
+	// Userdel is the guest's own userdel (default "userdel"); a test names its
+	// own, so a seal never deletes an account of the machine the test runs on.
+	Userdel string
 	// ProcRoot is where the guest's process table is read (default /proc); a
 	// test points it at a tree of its own (stillrunning.go).
 	ProcRoot string
@@ -138,6 +141,14 @@ func (c DaemonConfig) journalctlBin() string {
 		return c.Journalctl
 	}
 	return "journalctl"
+}
+
+// userdelBin is the binary the seal removes the login account Lima made with.
+func (c DaemonConfig) userdelBin() string {
+	if c.Userdel != "" {
+		return c.Userdel
+	}
+	return "userdel"
 }
 
 // Defaults fills in every unset field.

@@ -119,6 +119,17 @@ type SealPaths struct {
 	// CloudInit are the paths that make the next boot the first boot of a new
 	// machine: cloud-init's state and the machine-id files.
 	CloudInit []string
+	// Sudoers is cloud-init's record of the accounts it made on the box's first
+	// boot (/etc/sudoers.d/90-cloud-init-users): every rule there names one, and
+	// the file is how a seal learns the login account Lima made.
+	Sudoers string
+	// Passwd is the guest's account table: it says which accounts the sudoers
+	// file still names and where their homes are.
+	Passwd string
+	// Linger is systemd's directory of lingering accounts
+	// (/var/lib/systemd/linger). Lima lingers the user it logs in as, and a
+	// leftover entry makes logind fail its user enumeration at every boot.
+	Linger string
 	// Journal is true when the guest's journal is rotated and vacuumed.
 	Journal bool
 	// ImageRecord and Recipe are the two files a seal writes: what the image is,
@@ -144,6 +155,9 @@ func (c DaemonConfig) sealPaths() SealPaths {
 		Logs:         []string{"/var/log"},
 		HostKeys:     "/etc/ssh",
 		CloudInit:    []string{"/var/lib/cloud/instances", "/var/lib/cloud/instance", "/var/lib/dbus/machine-id"},
+		Sudoers:      "/etc/sudoers.d/90-cloud-init-users",
+		Passwd:       "/etc/passwd",
+		Linger:       "/var/lib/systemd/linger",
 		Journal:      true,
 		Secrets:      c.secretsDirs(),
 		ImageRecord:  imageRecordPath,
@@ -177,6 +191,15 @@ func (c DaemonConfig) sealPaths() SealPaths {
 		}
 		if o.CloudInit != nil {
 			p.CloudInit = o.CloudInit
+		}
+		if o.Sudoers != "" {
+			p.Sudoers = o.Sudoers
+		}
+		if o.Passwd != "" {
+			p.Passwd = o.Passwd
+		}
+		if o.Linger != "" {
+			p.Linger = o.Linger
 		}
 		if o.ImageRecord != "" {
 			p.ImageRecord = o.ImageRecord
@@ -317,6 +340,7 @@ func (s *sealer) run(req SealRequest) (SealResult, error) {
 		{"the workspace and the preparation", s.removeWorkspace},
 		{"the sessions and their transcripts", s.removeSessions},
 		{"the executor homes and the user homes", s.removeHomeState},
+		{"the login account Lima made", s.removeLoginAccount},
 		{"the temporary directories", s.removeTemp},
 		{"the journal and the logs", s.removeLogs},
 		{"the mount points of the node", s.removeInstanceMounts},
@@ -791,6 +815,279 @@ func (s *sealer) cleanHome(home string, secretNames map[string]bool) error {
 	if removed > 0 {
 		s.line("the home %s: removed %d file(s) and directory state", home, removed)
 	}
+	return nil
+}
+
+// loginAccountUID is the uid a Linux node's user has, and so the uid Lima gives
+// the account it creates in a box: cloud-init takes the host user's uid, and the
+// image build leaves that range free. It is the last fallback that names the
+// login account, for a guest whose cloud-init left no record of it; the record
+// is trusted first, and a project account is not it when the record is there.
+const loginAccountUID = 1000
+
+// passwdEntry is the part of a guest's passwd line that a seal needs.
+type passwdEntry struct {
+	Name string
+	UID  int
+	Home string
+}
+
+// readPasswd reads the guest's account table.
+func readPasswd(path string) ([]passwdEntry, error) {
+	if path == "" {
+		return nil, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []passwdEntry
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) < 7 {
+			continue
+		}
+		uid, err := strconv.Atoi(fields[2])
+		if err != nil {
+			continue
+		}
+		out = append(out, passwdEntry{Name: fields[0], UID: uid, Home: fields[5]})
+	}
+	return out, nil
+}
+
+// cloudInitUserNames reads the accounts cloud-init's sudoers file names, and
+// reports whether cloud-init left the file at all.
+//
+// The file is in sudoers syntax: a rule line names its user first ("debian
+// ALL=(ALL) NOPASSWD:ALL"), and a comment before it says which user it is for.
+// cloud-init appends a rule and never removes one, so a name here may belong to
+// an account that is already gone -- the account table decides that. The file
+// itself stays when a seal removes its rules: it is the record that cloud-init
+// made the accounts of this boot, which is what tells a seal run again from a
+// guest that never had one.
+func cloudInitUserNames(path string) ([]string, bool, error) {
+	if path == "" {
+		return nil, false, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(string(b), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || !strings.Contains(trimmed, "ALL=") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 || strings.Contains(fields[0], "=") || strings.HasPrefix(fields[0], "%") {
+			continue
+		}
+		if !seen[fields[0]] {
+			seen[fields[0]] = true
+			out = append(out, fields[0])
+		}
+	}
+	return out, true, nil
+}
+
+// limaHome reports whether home is the home Lima gives the user it creates: the
+// home is named "<user>.guest" (Lima 2.1 and later) or "<user>.linux" (before).
+func limaHome(e passwdEntry) bool {
+	base := filepath.Base(e.Home)
+	return base == e.Name+".guest" || base == e.Name+".linux"
+}
+
+// loginAccounts names the accounts cloud-init made on the box's first boot: the
+// login account Lima made, which an image must not carry, because the image
+// boots on a node whose user has another name and often the same uid, and
+// cloud-init then fails with "UID <uid> is not unique".
+//
+// cloud-init's sudoers file is the record of those accounts, and it is trusted
+// first: only a name it gives that the account table still has is an account to
+// remove, and a record that is present decides the question even when every
+// account it names is already gone (that is a seal run again). Without a record
+// at all, the account is the one whose home is a Lima home, or -- when no home
+// looks like one -- the one with the first regular uid a Linux node's user has.
+// The accounts a recipe or the image's user created are neither, so they stay.
+//
+// The names are also returned, including the ones whose account is already gone,
+// so that the linger file and the sudoers rule of a login account are cleaned up
+// even after a seal that stopped between removing the account and its leftovers.
+func (s *sealer) loginAccounts() ([]passwdEntry, map[string]bool, error) {
+	passwd, err := readPasswd(s.paths.Passwd)
+	if err != nil {
+		return nil, nil, err
+	}
+	byName := make(map[string]passwdEntry, len(passwd))
+	for _, e := range passwd {
+		byName[e.Name] = e
+	}
+	cloud, record, err := cloudInitUserNames(s.paths.Sudoers)
+	if err != nil {
+		return nil, nil, err
+	}
+	names := make(map[string]bool, len(cloud))
+	seen := make(map[string]bool, len(cloud))
+	var accounts []passwdEntry
+	for _, name := range cloud {
+		names[name] = true
+		if e, ok := byName[name]; ok && !seen[name] {
+			seen[name] = true
+			accounts = append(accounts, e)
+		}
+	}
+	if record {
+		return accounts, names, nil
+	}
+
+	// No record: the account with a Lima home is the one Lima made. Only when
+	// nothing has that shape is the first regular uid the remaining signal.
+	for _, e := range passwd {
+		if !seen[e.Name] && limaHome(e) {
+			seen[e.Name] = true
+			accounts = append(accounts, e)
+			names[e.Name] = true
+		}
+	}
+	if len(accounts) == 0 {
+		for _, e := range passwd {
+			if !seen[e.Name] && e.UID == loginAccountUID {
+				seen[e.Name] = true
+				accounts = append(accounts, e)
+				names[e.Name] = true
+			}
+		}
+	}
+	return accounts, names, nil
+}
+
+// removeLoginAccount deletes the login account Lima made, its home and its
+// linger file, and removes the sudoers file that recorded it.
+//
+// userdel -f is what removes an account whose own session is running the
+// command, and -r removes the home and the mail spool with it. The home and the
+// other name Lima links it under are removed again when they survived (a busy
+// home, a mount); a missing account is not a failure, so a seal run again does
+// nothing. A userdel that fails is the seal's failure: an image that still has
+// the account cannot boot on the next node.
+func (s *sealer) removeLoginAccount() error {
+	accounts, names, err := s.loginAccounts()
+	if err != nil {
+		return err
+	}
+	for _, e := range accounts {
+		name := s.cfg.userdelBin()
+		out, err := exec.Command(name, "-f", "-r", e.Name).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("userdel -f -r %s: %w: %s", e.Name, err, oneLine(string(out), 300))
+		}
+		s.line("the login account %s (uid %d): removed it and its home", e.Name, e.UID)
+		for _, home := range loginHomes(e) {
+			if err := s.removeTree(home, "the login account's home"); err != nil {
+				return err
+			}
+		}
+	}
+	for name := range names {
+		if err := s.removeLinger(name); err != nil {
+			return err
+		}
+	}
+	// The rules go, the file stays: the next first boot appends the box's own
+	// user's rule, and a seal run again must still see that cloud-init wrote its
+	// record here (a guest without the file is the only one a uid may name).
+	if err := removeSudoersRules(s.paths.Sudoers, names); err != nil {
+		return err
+	}
+	return nil
+}
+
+// removeSudoersRules drops the rules a sudoers file has for the named accounts
+// and keeps everything else, including the file when no rule is left. cloud-init
+// writes one rule per account it creates and never removes one, so an image that
+// kept the login account's rule would keep the account's name; the next first
+// boot appends the new account's rule to what is left.
+func removeSudoersRules(path string, names map[string]bool) error {
+	if path == "" || len(names) == 0 {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var kept []string
+	for _, line := range strings.Split(string(b), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if name, ok := strings.CutPrefix(trimmed, "# User rules for "); ok && names[strings.TrimSpace(name)] {
+			continue
+		}
+		if fields := strings.Fields(trimmed); len(fields) > 0 && names[fields[0]] && strings.Contains(trimmed, "ALL=") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	out := strings.Join(kept, "\n")
+	if out == string(b) {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte(out), 0o440); err != nil {
+		return fmt.Errorf("cloud-init's sudoers file %s: %w", path, err)
+	}
+	return nil
+}
+
+// loginHomes is the home a login account has and the other name Lima links it
+// under: userdel -r removes the one the account table names, and the link (or a
+// home another mount kept) is what a seal removes itself.
+func loginHomes(e passwdEntry) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(path string) {
+		if path == "" || path == "/" || seen[path] {
+			return
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	add(e.Home)
+	if e.Home != "" && e.Home != "/" {
+		dir := filepath.Dir(e.Home)
+		add(filepath.Join(dir, e.Name+".guest"))
+		add(filepath.Join(dir, e.Name+".linux"))
+	}
+	return out
+}
+
+// removeLinger deletes the linger file of an account. A file that is not there
+// is not a failure: a seal runs again on a box it partly cleaned.
+func (s *sealer) removeLinger(name string) error {
+	if s.paths.Linger == "" || name == "" {
+		return nil
+	}
+	path := filepath.Join(s.paths.Linger, name)
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("the linger file %s: %w", path, err)
+	}
+	s.line("the linger file %s: deleted", path)
 	return nil
 }
 

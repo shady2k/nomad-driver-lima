@@ -164,6 +164,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
         timeout-minutes: 20
         run: |
+          set -o pipefail
           sudo mkdir -p /tmp/im && sudo chown "$(id -u):$(id -g)" /tmp/im
           case $SOURCE in
             release) export BOXD_RELEASE="$REF" ;;
@@ -175,6 +176,7 @@ jobs:
           # here, so the executors come from the public upstreams images/pins.sh
           # pins.
           images/boxd-source.sh "$ARCH" /tmp/im/boxd
+          mkdir -p /tmp/im/out
           images/platform.sh --version "$VERSION" --arch "$ARCH" \
             --boxd /tmp/im/boxd/boxd --out /tmp/im/out | tee /tmp/im/out/platform.json
           ls -l /tmp/im/out

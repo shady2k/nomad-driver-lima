@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -97,6 +98,9 @@ func newSealGuest(t *testing.T) *sealGuest {
 		Logf:        func(string, ...any) {},
 		Fstrim:      "true",
 		Journalctl:  "false",
+		// A seal removes an account with userdel; the test's own script records
+		// the call, so no account of the machine the test runs on is touched.
+		Userdel: filepath.Join(root, "bin/userdel"),
 	}
 	g := &sealGuest{root: root, cfg: cfg}
 	g.cfg.Seal = &SealPaths{
@@ -104,6 +108,8 @@ func newSealGuest(t *testing.T) *sealGuest {
 		Homes: []string{
 			filepath.Join(root, "var/lib/boxd/homes/prime"),
 			filepath.Join(root, "home/user"),
+			filepath.Join(root, "home/debian.guest"),
+			filepath.Join(root, "home/madarch"),
 		},
 		Temp:     []string{filepath.Join(root, "tmp"), filepath.Join(root, "var/tmp")},
 		Logs:     []string{filepath.Join(root, "var/log")},
@@ -120,6 +126,9 @@ func newSealGuest(t *testing.T) *sealGuest {
 		MountInfo:    filepath.Join(root, "proc/self/mountinfo"),
 		SystemdUnits: filepath.Join(root, "etc/systemd/system"),
 		Fstab:        filepath.Join(root, "etc/fstab"),
+		Sudoers:      filepath.Join(root, "etc/sudoers.d/90-cloud-init-users"),
+		Passwd:       filepath.Join(root, "etc/passwd"),
+		Linger:       filepath.Join(root, "var/lib/systemd/linger"),
 	}
 	return g
 }
@@ -231,6 +240,51 @@ func (g *sealGuest) fill(t *testing.T) {
 	// guest/no-secrets.sh from it and never writes into it.
 	g.mkdir(t, "opt/box/bin")
 	g.writeNoSecrets(t, 0)
+	// The login account Lima made on the box's first boot (uid 1000): its
+	// account, its home, the other name Lima links that home under, its linger
+	// entry, and cloud-init's record of it. cloud-init also left the rule of the
+	// build account the image no longer has: a name the account table does not
+	// have is not an account.
+	g.write(t, "etc/passwd", "root:x:0:0:root:/root:/bin/bash\n"+
+		"systemd-network:x:998:998:Systemd Network:/:/usr/sbin/nologin\n"+
+		"debian:x:1000:1000:Debian:"+filepath.Join(g.root, "home/debian.guest")+":/bin/bash\n"+
+		"madarch:x:1001:1001:Project:"+filepath.Join(g.root, "home/madarch")+":/bin/bash\n")
+	g.write(t, "etc/sudoers.d/90-cloud-init-users",
+		"# Created by cloud-init\n\n# User rules for builder\nbuilder ALL=(ALL) NOPASSWD:ALL\n\n"+
+			"# User rules for debian\ndebian ALL=(ALL) NOPASSWD:ALL\n")
+	g.write(t, "var/lib/systemd/linger/debian", "")
+	g.write(t, "var/lib/systemd/linger/madarch", "")
+	g.write(t, "home/debian.guest/.bash_history", "sudo apt-get install ripgrep\n")
+	g.write(t, "home/debian.guest/.cache/tool/blob", "cache\n")
+	// Lima links the account's home under the name it used before 2.1.
+	if err := os.Symlink("debian.guest", filepath.Join(g.root, "home/debian.linux")); err != nil {
+		t.Fatal(err)
+	}
+	// The project account a recipe created (uid 1001) and its toolchain cache:
+	// the image keeps both.
+	g.write(t, "home/madarch/go/pkg/mod/cache/download/x.zip", "module")
+	g.write(t, "home/madarch/.config/tool/settings.ini", "jobs = 4\n")
+	g.writeUserdel(t, 0)
+}
+
+// writeUserdel puts the test's userdel in the guest. It records the call and,
+// on success, removes the account from the fake passwd table the way userdel
+// does; code is the exit status the call reports.
+func (g *sealGuest) writeUserdel(t *testing.T, code int) {
+	t.Helper()
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"" + filepath.Join(g.root, "userdel.log") + "\"\n"
+	if code == 0 {
+		script += "sed -i \"/^$3:/d\" \"" + filepath.Join(g.root, "etc/passwd") + "\"\n"
+	}
+	script += fmt.Sprintf("exit %d\n", code)
+	path := filepath.Join(g.root, "bin/userdel")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // writeNoSecrets puts a guest/no-secrets.sh into the fake bundle; the exit code
@@ -657,5 +711,192 @@ func TestSealRefusesAGuestWithCredentials(t *testing.T) {
 	}
 	if _, err := seal(t, m, sealRequest()); err != nil {
 		t.Fatalf("the seal refused a guest whose secrets directory is empty: %v", err)
+	}
+}
+
+// TestSealRemovesTheLoginAccountAndKeepsTheProjectAccount: the account Lima made
+// on the box's first boot must not travel in an image -- the next node's user
+// has another name and often the same uid, and cloud-init then fails with "UID
+// 1000 is not unique" -- while the accounts a recipe created stay with their
+// homes and caches.
+func TestSealRemovesTheLoginAccountAndKeepsTheProjectAccount(t *testing.T) {
+	g := newSealGuest(t)
+	g.fill(t)
+	m := g.manager(t)
+
+	if _, err := seal(t, m, sealRequest()); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+
+	calls, err := os.ReadFile(filepath.Join(g.root, "userdel.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(calls), "-f -r debian"); got != 1 {
+		t.Errorf("the seal called userdel %d time(s) for the login account, want 1: %q", got, calls)
+	}
+	if strings.Contains(string(calls), "madarch") {
+		t.Errorf("the seal removed the project account: %q", calls)
+	}
+
+	passwd, err := os.ReadFile(filepath.Join(g.root, "etc/passwd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(passwd), "debian:") {
+		t.Errorf("the login account is still in the account table: %q", passwd)
+	}
+	if !strings.Contains(string(passwd), "madarch:") {
+		t.Errorf("the project account is gone from the account table: %q", passwd)
+	}
+
+	for _, gone := range []string{
+		"var/lib/systemd/linger/debian",
+		"home/debian.guest",
+		"home/debian.linux",
+	} {
+		if g.exists(gone) {
+			t.Errorf("%s is still in the image", gone)
+		}
+	}
+	for _, kept := range []string{
+		"var/lib/systemd/linger/madarch",
+		"home/madarch/go/pkg/mod/cache/download/x.zip",
+		"home/madarch/.config/tool/settings.ini",
+	} {
+		if !g.exists(kept) {
+			t.Errorf("%s was deleted; an image keeps it", kept)
+		}
+	}
+	// cloud-init's rule for the login account goes with it; the next first boot
+	// writes the box's own user's rule again.
+	sudoers := filepath.Join(g.root, "etc/sudoers.d/90-cloud-init-users")
+	if data, err := os.ReadFile(sudoers); err == nil {
+		if strings.Contains(string(data), "debian") || strings.Contains(string(data), "builder") {
+			t.Errorf("cloud-init's sudoers file still names a login account: %q", data)
+		}
+	} else if !os.IsNotExist(err) {
+		t.Error(err)
+	}
+}
+
+// TestSealRemovesTheLoginAccountOnlyOnce: a seal runs again on a box it partly
+// cleaned, so an account that is already gone is not a failure and does not run
+// userdel again.
+func TestSealRemovesTheLoginAccountOnlyOnce(t *testing.T) {
+	g := newSealGuest(t)
+	g.fill(t)
+	m := g.manager(t)
+
+	if _, err := seal(t, m, sealRequest()); err != nil {
+		t.Fatalf("first Seal: %v", err)
+	}
+	first, err := os.ReadFile(filepath.Join(g.root, "userdel.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seal(t, m, sealRequest()); err != nil {
+		t.Fatalf("second Seal: %v", err)
+	}
+	second, err := os.ReadFile(filepath.Join(g.root, "userdel.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(second) != string(first) {
+		t.Errorf("the second seal called userdel again: %q became %q", first, second)
+	}
+}
+
+// TestSealFindsTheLoginAccountWithoutCloudInitRecord: cloud-init's sudoers file
+// is the record a seal trusts first, but an image may arrive without one. The
+// account then keeps the first regular uid a Linux node's user has.
+func TestSealFindsTheLoginAccountWithoutCloudInitRecord(t *testing.T) {
+	g := newSealGuest(t)
+	g.fill(t)
+	// A plain home: only the uid says this account is the login account.
+	g.write(t, "etc/passwd", "root:x:0:0:root:/root:/bin/bash\n"+
+		"debian:x:1000:1000:Debian:"+filepath.Join(g.root, "home/debian")+":/bin/bash\n"+
+		"madarch:x:1001:1001:Project:"+filepath.Join(g.root, "home/madarch")+":/bin/bash\n")
+	if err := os.Remove(filepath.Join(g.root, "etc/sudoers.d/90-cloud-init-users")); err != nil {
+		t.Fatal(err)
+	}
+	m := g.manager(t)
+
+	if _, err := seal(t, m, sealRequest()); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	calls, err := os.ReadFile(filepath.Join(g.root, "userdel.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(calls), "-f -r debian") {
+		t.Errorf("the seal did not remove the uid 1000 account: %q", calls)
+	}
+	if strings.Contains(string(calls), "madarch") {
+		t.Errorf("the seal removed the uid 1001 project account: %q", calls)
+	}
+	if !g.exists("home/madarch/.config/tool/settings.ini") {
+		t.Error("the project account's home was deleted")
+	}
+}
+
+// TestSealFailsWhenUserdelFails: an image that still has the login account
+// cannot boot on the next node, so a userdel that fails stops the seal instead
+// of leaving the account in place.
+func TestSealFailsWhenUserdelFails(t *testing.T) {
+	g := newSealGuest(t)
+	g.fill(t)
+	g.writeUserdel(t, 1)
+	m := g.manager(t)
+
+	_, err := seal(t, m, sealRequest())
+	if err == nil {
+		t.Fatal("the seal finished although userdel failed")
+	}
+	if !strings.Contains(err.Error(), "userdel -f -r debian") {
+		t.Errorf("the error does not name the account and the command: %s", err)
+	}
+	if !strings.Contains(err.Error(), "the seal stopped at removing the login account Lima made") {
+		t.Errorf("the error does not say which step failed: %s", err)
+	}
+}
+
+// TestSealKeepsAProjectAccountWithTheLoginUID: a node whose user has another uid
+// (a macOS user is 501) leaves uid 1000 free for the first account a recipe
+// creates. A seal run again owns no cloud-init rule for that account and must
+// not fall back to the uid and remove it.
+func TestSealKeepsAProjectAccountWithTheLoginUID(t *testing.T) {
+	g := newSealGuest(t)
+	g.fill(t)
+	g.write(t, "etc/passwd", "root:x:0:0:root:/root:/bin/bash\n"+
+		"alice:x:501:501:Alice:"+filepath.Join(g.root, "home/alice.guest")+":/bin/bash\n"+
+		"madarch:x:1000:1000:Project:"+filepath.Join(g.root, "home/madarch")+":/bin/bash\n")
+	g.write(t, "etc/sudoers.d/90-cloud-init-users",
+		"# Created by cloud-init\n\n# User rules for alice\nalice ALL=(ALL) NOPASSWD:ALL\n")
+	g.write(t, "var/lib/systemd/linger/alice", "")
+	g.write(t, "home/alice.guest/.bashrc", "# alice\n")
+	m := g.manager(t)
+
+	for run := 1; run <= 2; run++ {
+		if _, err := seal(t, m, sealRequest()); err != nil {
+			t.Fatalf("seal %d: %v", run, err)
+		}
+	}
+	calls, err := os.ReadFile(filepath.Join(g.root, "userdel.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(calls), "madarch") {
+		t.Errorf("the seal removed the project account with uid 1000: %q", calls)
+	}
+	passwd, err := os.ReadFile(filepath.Join(g.root, "etc/passwd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(passwd), "madarch:") {
+		t.Errorf("the project account with uid 1000 is gone: %q", passwd)
+	}
+	if !g.exists("home/madarch/.config/tool/settings.ini") {
+		t.Error("the project account's home was deleted")
 	}
 }
