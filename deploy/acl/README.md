@@ -1,6 +1,6 @@
 # box ACL policies
 
-Five Nomad ACL policies, the commands that apply them, and a test that proves
+Four Nomad ACL policies, the commands that apply them, and a test that proves
 them against a real Nomad agent.
 
 | file | for whom |
@@ -8,10 +8,17 @@ them against a real Nomad agent.
 | `box-operator.policy.hcl` | the `box` CLI on the coordinator: jobs, host volumes, `alloc exec`, and the executors variable |
 | `box-clock.policy.hcl` | a CLI token that is not given the whole `box-operator`: the stopped-box clock of every box |
 | `box-workload.policy.hcl` | one box job's own workloads: read `nomad/jobs/box-executors` |
-| `box-store.policy.hcl` | one publish job (`box-publish-<version>`): read `nomad/jobs/box-store` |
 | `box-reap.policy.hcl` | the periodic job `reap-boxes`: delete the disk of a box whose term ran out |
 | `apply.sh` | applies them, creates the operator token, and probes a cluster |
 | `test.sh` | starts a throwaway agent with ACLs and checks the policies |
+
+An image publish needs no policy at all: every publish is the job `box-store`, the
+name of the variable `nomad/jobs/box-store` it reads its store from, and Nomad
+gives a job's workload identity `read` and `list` on `nomad/jobs/<its own job id>`
+(`acl.matchingVariablesCapabilitySet`). One name for every version therefore means
+no policy per version, and nothing to attach when a job comes and goes. A box is
+called `box-<id>`, so no box reads that variable. `internal/cli/aclpolicy_test.go`
+pins both, and `test.sh` proves it with a real task on a real agent.
 
 Nomad's own ACL engine reads these files; `internal/cli/aclpolicy_test.go` parses
 them with `github.com/hashicorp/nomad/acl` and asserts every capability the
@@ -226,6 +233,14 @@ variable or the term. It applies `box-clock`, adds it to a token that already
 carries `box-reap` and checks that both names are still there, then runs
 `check --clock-probe --write-probe` with that token: the clock is read, written
 and deleted, and the executor credentials are refused.
+
+Last, it runs two real batch tasks of its own agent against the image store
+variable: the job `box-store` renders `nomad/jobs/box-store` with its own workload
+identity and prints it, with no policy attached, while `box-dev1` fails to render
+the same file — with and without the `box-workload` policy. The first one is the
+assumption the whole publish design rests on; if it does not hold, the script
+stops with the agent log rather than reporting a publish that would render an
+empty store.
 
 ## When ACLs are off
 

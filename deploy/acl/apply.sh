@@ -137,9 +137,12 @@ PY
 # --- workloads ---------------------------------------------------------------
 box_jobs() {
   # The HTTP API, not `nomad job status -json`: that prints one status document
-  # per job and carries no ID, while /v1/jobs is the job list.
+  # per job and carries no ID, while /v1/jobs is the job list. meta=true asks for
+  # the meta block: without it a job whose meta says it is not a box (the publish
+  # job box-store, which runs while a publish is going on) would be taken for a
+  # box by its prefix and handed the executor credentials.
   curl -sS --max-time 30 -H "X-Nomad-Token: ${NOMAD_TOKEN:-}" \
-    "$NOMAD_ADDR/v1/jobs?namespace=$NS" | python3 -c '
+    "$NOMAD_ADDR/v1/jobs?namespace=$NS&meta=true" | python3 -c '
 import json, sys
 
 jobs = json.load(sys.stdin) or []
@@ -147,11 +150,10 @@ for job in jobs:
     job_id = job.get("ID") or job.get("id") or ""
     if not job_id.startswith("box-"):
         continue
-    # The job list does not always carry the meta block, so the prefix is the
-    # filter (box-<id> is what `box create` writes) and the marker is checked
-    # when it is there.
+    # meta=true carries the meta block, so the marker is what decides: a box is
+    # meta.box = "true", and a bake or a publish is not a box.
     meta = job.get("Meta") or job.get("meta") or {}
-    if meta and str(meta.get("box")).lower() != "true":
+    if str(meta.get("box")).lower() != "true":
         continue
     print(job_id)
 '

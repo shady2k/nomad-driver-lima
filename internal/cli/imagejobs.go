@@ -193,6 +193,12 @@ type PublishJobSpec struct {
 
 // RenderPublishJob builds the batch job that publishes one image.
 //
+// Every publish is the job box-store, whatever the version: the job id is the
+// name of the store variable, so the task's own workload identity reads it
+// (Nomad grants a job read and list on nomad/jobs/<its own id>) and no policy has
+// to be attached to a job that comes and goes. The version is the job's name,
+// which is what a person sees in the job list.
+//
 // The store's url and token reach the task as templated files, never as task
 // config: a job spec is readable by anyone with read-job.
 func RenderPublishJob(spec PublishJobSpec) (*api.Job, error) {
@@ -213,7 +219,7 @@ func RenderPublishJob(spec PublishJobSpec) (*api.Job, error) {
 	if strings.TrimSpace(spec.NodeID) == "" {
 		return nil, usagef("publishing %s needs the node that holds the draft", spec.Version)
 	}
-	jobID := BoxPublishJobName(spec.Version)
+	jobID := boxPublishJobID
 	task := &api.Task{
 		Name:   boxTaskName,
 		Driver: boxDriverName,
@@ -231,7 +237,7 @@ func RenderPublishJob(spec PublishJobSpec) (*api.Job, error) {
 	}
 	return &api.Job{
 		ID:          strPtr(jobID),
-		Name:        strPtr(jobID),
+		Name:        strPtr(BoxPublishJobName(spec.Version)),
 		Type:        strPtr("batch"),
 		Datacenters: []string{"*"},
 		// The image is in the cache of the node that baked it: nowhere else.
@@ -251,6 +257,13 @@ func RenderPublishJob(spec PublishJobSpec) (*api.Job, error) {
 			RestartPolicy: &api.RestartPolicy{
 				Attempts: intPtr(0),
 				Mode:     strPtr("fail"),
+			},
+			// A publish that fails must fail: every publish is the job
+			// box-store, and one Nomad rescheduled would hold that name while
+			// the operator sees an upload that is not happening.
+			ReschedulePolicy: &api.ReschedulePolicy{
+				Attempts:  intPtr(0),
+				Unlimited: boolPtr(false),
 			},
 			Tasks: []*api.Task{task},
 		}},

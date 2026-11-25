@@ -688,6 +688,24 @@ func allocsSince(allocs []*api.AllocationListStub, since uint64) []*api.Allocati
 // waitForJobDone waits until a batch job has no live allocation, and returns its
 // newest allocation with the task events that say how it ended.
 func (a *App) waitForJobDone(ctx context.Context, jobID, evalID string, since uint64, timeout time.Duration) (*api.Allocation, error) {
+	return a.waitForWorkDone(ctx, jobID, evalID, since, timeout, latestAllocation)
+}
+
+// waitForPublishDone waits for a publish like waitForJobDone, and returns the
+// allocation this run made: the earliest one after the registration.
+//
+// Every publish is the job box-store, and the wait polls every two seconds, so a
+// neighbour can register between two polls and leave a newer allocation beside
+// this run's. The newer one is not this run's answer; taking it would report an
+// upload this command did not wait for.
+func (a *App) waitForPublishDone(ctx context.Context, jobID, evalID string, since uint64, timeout time.Duration) (*api.Allocation, error) {
+	return a.waitForWorkDone(ctx, jobID, evalID, since, timeout, earliestAllocation)
+}
+
+// waitForWorkDone waits until a batch job has no live allocation, and returns the
+// allocation pick chooses out of the ones this run made.
+func (a *App) waitForWorkDone(ctx context.Context, jobID, evalID string, since uint64, timeout time.Duration,
+	pick func([]*api.AllocationListStub) *api.AllocationListStub) (*api.Allocation, error) {
 	deadline := a.now().Add(timeout)
 	last := "Nomad has not placed it yet"
 	for {
@@ -695,20 +713,20 @@ func (a *App) waitForJobDone(ctx context.Context, jobID, evalID string, since ui
 		if err != nil {
 			return nil, wrapf(err, "cannot list the allocations of %s", jobID)
 		}
-		newest := latestAllocation(allocsSince(byJob[jobID], since))
+		target := pick(allocsSince(byJob[jobID], since))
 		switch {
-		case newest == nil:
+		case target == nil:
 			if blocker := a.evalBlocker(ctx, evalID); blocker != "" {
 				last = blocker
 			}
-		case isTerminalAlloc(newest.ClientStatus):
-			alloc, err := a.Nomad.Allocation(ctx, newest.ID)
+		case isTerminalAlloc(target.ClientStatus):
+			alloc, err := a.Nomad.Allocation(ctx, target.ID)
 			if err != nil {
-				return nil, wrapf(err, "cannot read the allocation %s of %s", newest.ID, jobID)
+				return nil, wrapf(err, "cannot read the allocation %s of %s", target.ID, jobID)
 			}
 			return alloc, nil
 		default:
-			last = fmt.Sprintf("the allocation %s is %s", shortID(newest.ID), newest.ClientStatus)
+			last = fmt.Sprintf("the allocation %s is %s", shortID(target.ID), target.ClientStatus)
 		}
 		if !a.now().Before(deadline) {
 			return nil, timeoutf("the job %s did not finish within %s (%s); `nomad job status %s` shows where it is, "+

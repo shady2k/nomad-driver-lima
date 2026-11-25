@@ -8,6 +8,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/nomad/acl"
@@ -67,7 +68,7 @@ func TestBoxOperatorPolicyGrantsWhatTheCommandNeeds(t *testing.T) {
 			"the operator must be able to %s %s", op, boxExecutorsVariable)
 	}
 	// The image store: the operator writes and reads it, and a publish job reads it
-	// with a policy of its own.
+	// through its own workload identity (its job id is the variable's name).
 	for _, op := range []string{acl.VariablesCapabilityRead, acl.VariablesCapabilityWrite, acl.VariablesCapabilityDestroy} {
 		require.True(t, operator.AllowVariableOperation("default", boxStoreVariable, op, nil),
 			"the operator must be able to %s %s", op, boxStoreVariable)
@@ -107,8 +108,6 @@ func TestBoxOperatorPolicyGrantsWhatTheCommandNeeds(t *testing.T) {
 	require.False(t, operator.AllowNamespaceOperation("default", acl.NamespaceCapabilityCSIMountVolume))
 }
 
-// TestBoxStorePolicyIsForAPublishOnly: the store's url and token reach a publish
-// job through its own policy, and a box never reads them.
 // TestBoxReapPolicyGrantsWhatThePassNeeds: the periodic reap task authenticates
 // with its own workload identity, so this policy is what lets it look at every
 // box on the cluster and delete the disk of one that served its term -- and it
@@ -195,26 +194,52 @@ func TestBoxClockPolicyGrantsOnlyTheClock(t *testing.T) {
 	require.False(t, clock.AllowOperatorRead())
 }
 
-func TestBoxStorePolicyIsForAPublishOnly(t *testing.T) {
-	store := aclOf(t, readACLPolicy(t, "box-store.policy.hcl"))
-	job := BoxPublishJobName("project-1")
-	require.True(t, store.AllowVariableOperation("default", boxStoreVariable, acl.VariablesCapabilityRead, jobContext(job)),
-		"a publish job reads %s", boxStoreVariable)
-	require.False(t, store.AllowVariableOperation("default", boxStoreVariable, acl.VariablesCapabilityWrite, jobContext(job)),
-		"a publish job reads the store, it never writes its own credential")
-	require.False(t, store.AllowVariableOperation("default", boxExecutorsVariable, acl.VariablesCapabilityRead, jobContext(job)),
+func TestAWorkloadIdentityReadsTheStoreVariableWithNoPolicy(t *testing.T) {
+	// Every publish is the job box-store, which is the name the store variable
+	// carries, so Nomad's own workload scoping is what gives the task the read:
+	// acl.matchingVariablesCapabilitySet hands a job read and list on
+	// nomad/jobs/<its own id>, and there is no box-store policy at all.
+	require.Equal(t, "nomad/jobs/"+boxPublishJobID, boxStoreVariable,
+		"the store variable is named after the publish job")
+	defaults := aclOf(t)
+	claim := &acl.ACLClaim{Namespace: "default", Job: boxPublishJobID, Group: "publish", Task: boxTaskName}
+	for _, op := range []string{acl.VariablesCapabilityRead, acl.VariablesCapabilityList} {
+		require.True(t, defaults.AllowVariableOperation("default", boxStoreVariable, op, claim),
+			"the publish job %s must be able to %s %s with no policy", boxPublishJobID, op, boxStoreVariable)
+	}
+	require.False(t, defaults.AllowVariableOperation("default", boxStoreVariable, acl.VariablesCapabilityWrite, claim),
+		"a publish reads the store, it never writes its own credential")
+	require.False(t, defaults.AllowVariableOperation("default", boxExecutorsVariable, acl.VariablesCapabilityRead, claim),
 		"a publish job has no business with the executor credentials")
 
-	// The default scoping of a publish job's own identity does not cover the path:
-	// that is why the policy exists at all.
-	require.False(t, aclOf(t, readACLPolicy(t, "box-store.policy.hcl")).AllowVariableOperation("default",
-		"nomad/jobs/other-job", acl.VariablesCapabilityRead, jobContext(job)))
+	// The store stays out of every box's reach: a box's identity is box-<id>,
+	// whatever policy is attached to that job, and an older CLI's publish job is
+	// not named after the variable either.
+	workload := aclOf(t, readACLPolicy(t, "box-workload.policy.hcl"))
+	for _, obj := range []*acl.ACL{defaults, workload} {
+		require.False(t, obj.AllowVariableOperation("default", boxStoreVariable, acl.VariablesCapabilityRead, jobContext("box-dev1")),
+			"a box must not read the store's write token")
+	}
+	require.False(t, workload.AllowVariableOperation("default", boxStoreVariable, acl.VariablesCapabilityRead,
+		jobContext(BoxPublishJobName("project-1"))),
+		"a publish job an older CLI registered under box-publish-<version> has no read of the store")
+}
 
-	// The workload policy of the boxes grants the executor credentials and nothing
-	// of the store.
-	workloads := aclOf(t, readACLPolicy(t, "box-workload.policy.hcl"))
-	require.False(t, workloads.AllowVariableOperation("default", boxStoreVariable, acl.VariablesCapabilityRead, jobContext("box-dev1")),
-		"a box must not read the store's write token")
+func TestNoPolicyGrantsTheStoreVariable(t *testing.T) {
+	// The path is granted by Nomad's workload scoping and by the operator's own
+	// rule: no other policy of the repository may name it, and a file that did
+	// would be a policy attached to a job that comes and goes.
+	entries, err := os.ReadDir(aclPolicyDir(t))
+	require.NoError(t, err)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".hcl") || entry.Name() == "box-operator.policy.hcl" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(aclPolicyDir(t), entry.Name()))
+		require.NoError(t, err)
+		require.NotContains(t, string(data), boxStoreVariable,
+			"%s must not grant the image store: the publish job's own identity reads it", entry.Name())
+	}
 }
 
 // jobContext is the claim context Nomad passes for a job's workload identity.

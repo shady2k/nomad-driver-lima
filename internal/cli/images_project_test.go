@@ -164,7 +164,7 @@ func TestImagesPublishRefusesWithoutYes(t *testing.T) {
 	rc := ta.run(t, "images", "publish", "project-2")
 	require.Equal(t, ExitError, rc)
 	require.Contains(t, ta.errOut.String(), "Ask its owner before publishing")
-	require.Zero(t, callCount(ta, "RegisterJob box-publish"))
+	require.Zero(t, callCount(ta, "RegisterNewJob"))
 }
 
 // TestImagesPublishRegistersTheJob: the publish job is pinned to the draft's node
@@ -182,6 +182,8 @@ func TestImagesPublishRegistersTheJob(t *testing.T) {
 	require.Equal(t, ExitOK, ta.run(t, "images", "publish", "project-2", "--yes"), ta.errOut.String())
 	job := ta.workJob
 	require.NotNil(t, job)
+	require.Equal(t, boxPublishJobID, derefStr(job.ID, ""), "every publish is the job box-store")
+	require.Equal(t, BoxPublishJobName("project-2"), derefStr(job.Name, ""), "the name in the UI says which image it is")
 	require.Equal(t, "publish", job.Meta[boxWorkMarker])
 	require.Equal(t, "project-2", job.Meta["image"])
 	// Pinned to the node that holds the draft.
@@ -208,11 +210,18 @@ func TestImagesPublishRegistersTheJob(t *testing.T) {
 		"the token is a template that reads Vault, not the token itself")
 	require.NotNil(t, job.TaskGroups[0].Tasks[0].Vault, "a token template needs a Vault block")
 
+	// A failed publish is reported, not rescheduled: the name box-store is shared by
+	// every publish, and a retry would hold it while nothing is uploaded.
+	reschedule := job.TaskGroups[0].ReschedulePolicy
+	require.NotNil(t, reschedule)
+	require.Equal(t, 0, derefInt(reschedule.Attempts, -1))
+	require.False(t, *reschedule.Unlimited)
+
 	out := ta.errOut.String()
 	require.Contains(t, out, "published project-2 (amd64) to https://store.example.com")
 	require.Contains(t, out, "https://store.example.com/box-base/project-2/amd64/box-base-project-2-amd64.qcow2")
 	require.Contains(t, out, "every node can create a box from it now")
-	require.True(t, callCount(ta, "StopJob box-publish-project-2 purge=true") > 0)
+	require.True(t, callCount(ta, "StopJob box-store purge=true") > 0)
 }
 
 // TestImagesPublishRendersTheTokenPlace: the header the token goes in and the
@@ -258,7 +267,7 @@ func TestImagesPublishTwoDraftsSequentially(t *testing.T) {
 	seen := []string{}
 	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) {
 		id := derefStr(job.ID, "")
-		if !strings.HasPrefix(id, boxPublishJobPrefix) {
+		if id != boxPublishJobID {
 			return
 		}
 		task, err := boxTask(job)
@@ -318,7 +327,7 @@ func TestImagesPublishSkipsAlreadyPublishedAMD64(t *testing.T) {
 	seen := []string{}
 	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) {
 		id := derefStr(job.ID, "")
-		if !strings.HasPrefix(id, boxPublishJobPrefix) {
+		if id != boxPublishJobID {
 			return
 		}
 		task, err := boxTask(job)
@@ -348,7 +357,7 @@ func TestImagesPublishSecondArchitectureFailureReportsStatus(t *testing.T) {
 	registered := 0
 	ta.cluster.onRegister = func(c *fakeCluster, job *api.Job) {
 		id := derefStr(job.ID, "")
-		if !strings.HasPrefix(id, boxPublishJobPrefix) {
+		if id != boxPublishJobID {
 			return
 		}
 		registered++

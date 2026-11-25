@@ -61,6 +61,139 @@ find_nomad() {
   die "nomad not found: set BOX_TEST_NOMAD"
 }
 
+# probe_job NAME writes the job file of a batch task whose template renders the
+# image store's url into its secrets, and which prints that file. The job's own id
+# is what decides whether Nomad grants the read, so the same job body probes a
+# publish (box-store) and a box (box-dev1).
+probe_job() {
+  local name=$1
+  cat >"$WORK/probe-$name.nomad.hcl" <<EOF
+job "$name" {
+  type = "batch"
+
+  group "publish" {
+    task "box" {
+      driver = "raw_exec"
+
+      # One attempt: a task that cannot render the variable says so at once
+      # instead of restarting into the same refusal.
+      restart {
+        attempts = 0
+      }
+
+      config {
+        command = "/bin/sh"
+        args    = ["-c", "cat \${NOMAD_SECRETS_DIR}/store"]
+      }
+
+      template {
+        destination = "secrets/store"
+        data        = <<EOT
+{{- with nomadVar "nomad/jobs/box-store" -}}{{- (index . "url").Value -}}{{- end -}}
+EOT
+      }
+    }
+  }
+}
+EOF
+}
+
+# probe_store_reads runs the probe job NAME, and reports whether its task read the
+# store: the task ends complete and prints the url its template rendered.
+probe_store_reads() {
+  local name=$1 alloc deadline log
+  probe_start "$name" || return 1
+  deadline=$((SECONDS + 120))
+  while :; do
+    alloc=$(alloc_of_job "$name")
+    if [[ -n $alloc ]] && [[ $(alloc_client_status "$alloc") == complete ]]; then
+      log=$("$NOMAD" alloc logs "$alloc" 2>/dev/null || true)
+      [[ $log == *https://store.example.com* ]]
+      return
+    fi
+    if ((SECONDS >= deadline)); then
+      printf 'the probe job %s did not read the store in 120s\n' "$name" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# probe_store_denied runs the probe job NAME, and reports whether its identity was
+# refused the store. Nomad does not fail such a task at once: the template that
+# cannot read the variable blocks it with an event that names the variable as
+# missing, and retries. A variable that exists (the publish probe just read it)
+# can only be "missing" for an identity that was refused it, and the task prints
+# nothing.
+probe_store_denied() {
+  local name=$1 alloc deadline message log
+  probe_start "$name" || return 1
+  deadline=$((SECONDS + 120))
+  while :; do
+    alloc=$(alloc_of_job "$name")
+    if [[ -n $alloc ]]; then
+      message=$(alloc_template_message "$alloc")
+      if [[ $message == *nomad/jobs/box-store* ]]; then
+        [[ $(alloc_client_status "$alloc") != complete ]] || return 1
+        log=$("$NOMAD" alloc logs "$alloc" 2>/dev/null || true)
+        [[ $log != *https://store.example.com* ]]
+        return
+      fi
+    fi
+    if ((SECONDS >= deadline)); then
+      printf 'the probe job %s did not report the store in 120s\n' "$name" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# probe_start registers the probe job NAME; false when Nomad refuses the job.
+probe_start() {
+  local name=$1
+  if "$NOMAD" job run -detach "$WORK/probe-$name.nomad.hcl" >"$WORK/probe-$name.log" 2>&1; then
+    return 0
+  fi
+  tail -5 "$WORK/probe-$name.log" >&2
+  return 1
+}
+
+# alloc_of_job JOB prints the id of the job's newest allocation, once there is one.
+alloc_of_job() {
+  curl -sS --max-time 30 -H "X-Nomad-Token: $mgmt" "$ADDR/v1/job/$1/allocations" | python3 -c '
+import json, sys
+
+newest = None
+for alloc in json.load(sys.stdin) or []:
+    if newest is None or (alloc.get("CreateIndex") or 0) >= (newest.get("CreateIndex") or 0):
+        newest = alloc
+if newest:
+    print(newest["ID"])
+'
+}
+
+# alloc_client_status ALLOC prints the client status of an allocation.
+alloc_client_status() {
+  curl -sS --max-time 30 -H "X-Nomad-Token: $mgmt" "$ADDR/v1/allocation/$1" | python3 -c '
+import json, sys
+print(json.load(sys.stdin).get("ClientStatus", ""))
+'
+}
+
+# alloc_template_message ALLOC prints the message of the task's last template event.
+alloc_template_message() {
+  curl -sS --max-time 30 -H "X-Nomad-Token: $mgmt" "$ADDR/v1/allocation/$1" | python3 -c '
+import json, sys
+
+doc = json.load(sys.stdin)
+for state in (doc.get("TaskStates") or {}).values():
+    for event in reversed(state.get("Events") or []):
+        if event.get("Type") == "Template":
+            print(event.get("DisplayMessage") or "")
+            raise SystemExit
+'
+}
+
 cleanup() {
   local status=$?
   set +e
@@ -343,6 +476,60 @@ sys.exit(0 if policies == ["box-clock", "box-reap"] else 1)
     fail "a box-clock probe behaved differently than specified"
   fi
   "$NOMAD" acl token delete "$clock_accessor" >/dev/null 2>&1 || true
+
+  # --- the publish job's own identity -----------------------------------------
+  # Every publish is the job box-store, which is the name of the variable the task
+  # reads its store from. Nomad gives a workload identity read and list on
+  # nomad/jobs/<its own job id> (acl.matchingVariablesCapabilitySet), so the
+  # publish job reads that variable with no ACL policy at all -- that is the whole
+  # reason the job has one name for every version. A box (box-<id>) is not named
+  # after the variable and cannot read it, whichever policy is attached to it.
+  #
+  # These probes are real tasks of this agent, and the task's own template is what
+  # decides: it renders the store's url into its secrets, and the task prints it.
+  log "probing the publish job's identity against the image store variable"
+  token=$mgmt
+  expect "operator: write the image store the publish job reads" PUT "/v1/var/nomad/jobs/box-store?namespace=$NS" 200 \
+    '{"Items":{"url":"https://store.example.com"}}'
+
+  probe_job box-store
+  if probe_store_reads box-store; then
+    pass "the publish job box-store reads nomad/jobs/box-store with no ACL policy"
+  else
+    # The design rests on this one fact and the code has no fallback: a cluster
+    # that does not grant it needs the plan's alternative (the job box-publish
+    # with one policy of its own), not a publish that renders an empty store.
+    tail -20 "$WORK/agent.log" >&2 || true
+    die "the job box-store cannot read nomad/jobs/box-store without a policy: the publish design does not hold on this Nomad; see $WORK/agent.log"
+  fi
+
+  probe_job box-dev1
+  if probe_store_denied box-dev1; then
+    pass "a box job (box-dev1) cannot read nomad/jobs/box-store"
+  else
+    fail "the box job box-dev1 read the image store"
+  fi
+
+  log "attaching the box-workload policy to box-dev1"
+  if "$ROOT/deploy/acl/apply.sh" workloads box-dev1 >"$WORK/probe-workload.log" 2>&1; then
+    pass "apply.sh workloads attached the policy to box-dev1"
+  else
+    tail -5 "$WORK/probe-workload.log" >&2
+    fail "apply.sh workloads box-dev1 failed"
+  fi
+  "$NOMAD" job stop -purge box-dev1 >/dev/null 2>&1 || true
+  if probe_store_denied box-dev1; then
+    pass "the box-workload policy does not hand the image store to a box"
+  else
+    fail "a box with the box-workload policy read the image store"
+  fi
+
+  "$NOMAD" job stop -purge box-store >/dev/null 2>&1 || true
+  "$NOMAD" job stop -purge box-dev1 >/dev/null 2>&1 || true
+  # The probe tasks hold their secrets mount until the client unmounts it, and
+  # $WORK holds the agent's data dir: a moment here keeps the last rm quiet.
+  sleep 2
+  expect "operator: delete the image store" DELETE "/v1/var/nomad/jobs/box-store?namespace=$NS" "200 204"
 
   if ((fails > 0)); then
     printf '\n%d check(s) failed\n' "$fails"

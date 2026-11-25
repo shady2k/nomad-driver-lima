@@ -28,6 +28,11 @@ const (
 	// are not boxes, and their names are not box ids.
 	boxBakeJobPrefix    = "box-bake-"
 	boxPublishJobPrefix = "box-publish-"
+	// boxPublishJobID is the job id of every publish, whatever the version it
+	// puts in the store: one name for all of them, and it is the name the store
+	// variable is called after, so the task's workload identity reads it with no
+	// policy at all (Nomad grants a job read and list on nomad/jobs/<its own id>).
+	boxPublishJobID = "box-store"
 	// boxWorkMarker is the meta key that marks a job as a step of an image's
 	// life (a bake or a publish) instead of a box: `box ls` and the capacity
 	// count skip it.
@@ -154,7 +159,9 @@ func jobDisplayName(spec BoxSpec, jobID string) string {
 // BoxBakeJobName returns the Nomad job name of a box's bake.
 func BoxBakeJobName(id string) string { return boxBakeJobPrefix + id }
 
-// BoxPublishJobName returns the Nomad job name of a version's publish.
+// BoxPublishJobName returns the name a version's publish is shown under: its job
+// id is box-store for every version (boxPublishJobID), and this is the name in
+// the UI, so a person reading the job list sees which image is being published.
 func BoxPublishJobName(version string) string { return boxPublishJobPrefix + version }
 
 // BoxIDFromJobName strips the job prefix from a job name.
@@ -162,7 +169,10 @@ func BoxPublishJobName(version string) string { return boxPublishJobPrefix + ver
 // The batch jobs that make an image are not boxes: box-bake-<id> and
 // box-publish-<version> take a box id and a version as their suffix, and a
 // reader that took them for boxes would list an image as a box and count it
-// against the node.
+// against the node. The jobs the shared variables are named after are not boxes
+// either: a job called box-executors, box-reap or box-store reads the credential
+// of the whole cluster through its workload identity, so no box may take one of
+// those names.
 func BoxIDFromJobName(name string) (string, bool) {
 	if strings.HasPrefix(name, boxBakeJobPrefix) || strings.HasPrefix(name, boxPublishJobPrefix) {
 		return "", false
@@ -170,8 +180,31 @@ func BoxIDFromJobName(name string) (string, bool) {
 	if !strings.HasPrefix(name, boxJobPrefix) {
 		return "", false
 	}
+	if sharedJobName(name) {
+		return "", false
+	}
 	return strings.TrimPrefix(name, boxJobPrefix), true
 }
+
+// sharedJobName reports whether a job is named after one of the variables the
+// platform shares between jobs: nomad/jobs/box-executors (the executor
+// credentials), nomad/jobs/box-reap (the stopped-box term) and
+// nomad/jobs/box-store (the image store).
+//
+// Nomad hands a job's workload identity read and list on the variable path that
+// is its own job name, so a box called box-store would hold the store's write
+// token, a box called box-executors every executor key: the names are taken.
+func sharedJobName(name string) bool {
+	for _, path := range []string{boxExecutorsVariable, boxReapVariable, boxStoreVariable} {
+		if jobVariablePath(name) == path {
+			return true
+		}
+	}
+	return false
+}
+
+// jobVariablePath is the variable path Nomad names after a job.
+func jobVariablePath(jobID string) string { return "nomad/jobs/" + jobID }
 
 // ValidateBoxID reports whether id is a usable box id.
 func ValidateBoxID(id string) error {
@@ -181,6 +214,13 @@ func ValidateBoxID(id string) error {
 	if !boxIDPattern.MatchString(id) || len(id) > 40 {
 		return usagef("box id %q is not usable: use 1 to 40 characters from a-z, 0-9 and -,"+
 			" starting and ending with a letter or a digit", id)
+	}
+	// A box whose job name is the name of a shared variable, or the start of a
+	// bake or publish job, is not a box: one rule covers the whole class.
+	if _, box := BoxIDFromJobName(BoxJobName(id)); !box {
+		return usagef("box id %q is reserved: box-%s is the job of an image's life or of a variable the "+
+			"whole cluster reads (store, executors, reap, publish-<version>, bake-<id>), so it cannot name a box",
+			id, id)
 	}
 	return nil
 }
@@ -260,7 +300,16 @@ func LimaArch(arch string) string {
 func strPtr(s string) *string               { return &s }
 func intPtr(i int) *int                     { return &i }
 func boolPtr(b bool) *bool                  { return &b }
+func uint64Ptr(u uint64) *uint64            { return &u }
 func durPtr(d time.Duration) *time.Duration { return &d }
+
+// derefUint64 reads a uint64 pointer, or the fallback when it is nil.
+func derefUint64(p *uint64, fallback uint64) uint64 {
+	if p == nil {
+		return fallback
+	}
+	return *p
+}
 
 // RenderJob builds the Nomad job of a box.
 //

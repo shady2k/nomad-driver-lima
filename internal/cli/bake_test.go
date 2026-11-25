@@ -68,7 +68,7 @@ func (ta *testApp) finishWorkJobs(t *testing.T, details map[string]string, failu
 			c.runBox(job)
 			return
 		}
-		if !strings.HasPrefix(id, boxBakeJobPrefix) && !strings.HasPrefix(id, boxPublishJobPrefix) {
+		if !strings.HasPrefix(id, boxBakeJobPrefix) && id != boxPublishJobID {
 			return
 		}
 		ta.workJob = job

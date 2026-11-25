@@ -277,11 +277,38 @@ func TestBoxNames(t *testing.T) {
 }
 
 func TestValidateBoxID(t *testing.T) {
-	for _, id := range []string{"a", "dev1", "dev-1", "a1b2c3"} {
+	for _, id := range []string{"a", "dev1", "dev-1", "a1b2c3", "publisher", "store2"} {
 		require.NoError(t, ValidateBoxID(id), id)
 	}
 	for _, id := range []string{"", "-dev", "dev-", "Dev", "dev_1", "dev 1", "../../etc"} {
 		require.Error(t, ValidateBoxID(id), id)
+	}
+}
+
+// TestValidateBoxIDRefusesTheReservedNames: the jobs the shared variables are
+// named after, and the batch jobs of an image's life, are not box ids -- one rule
+// covers the whole class, so a box can never take a name whose workload identity
+// reads a credential of the cluster.
+func TestValidateBoxIDRefusesTheReservedNames(t *testing.T) {
+	for _, id := range []string{"store", "executors", "reap", "publish-x", "bake-x"} {
+		err := ValidateBoxID(id)
+		require.Error(t, err, id)
+		require.Equal(t, ExitUsage, ExitCode(err), id)
+		require.Contains(t, err.Error(), "is reserved", id)
+		_, box := BoxIDFromJobName(BoxJobName(id))
+		require.False(t, box, "box-%s is not a box", id)
+	}
+	// The names that only start with a reserved word are ordinary box ids.
+	for _, id := range []string{"publisher", "store2", "bakes", "reaper"} {
+		require.NoError(t, ValidateBoxID(id), id)
+		parsed, box := BoxIDFromJobName(BoxJobName(id))
+		require.True(t, box, id)
+		require.Equal(t, id, parsed)
+	}
+	// The shared names themselves are not box ids, and neither are the batch jobs.
+	for _, name := range []string{"box-store", "box-executors", "box-reap", "box-bake-dev1", "box-publish-1.0.0"} {
+		_, box := BoxIDFromJobName(name)
+		require.False(t, box, name)
 	}
 }
 

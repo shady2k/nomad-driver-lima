@@ -155,9 +155,14 @@ changes, so the command refuses without `--yes`; the skill an agent follows says
 it asks its owner first.
 
 It reads the drafts of the nodes and refuses a version no node holds, naming the
-drafts there are. Then it registers a batch job `box-publish-<version>` of the
-driver, pinned to the node that baked the draft -- the image is in that node's
-cache and nowhere else -- and waits for it. The task does what
+drafts there are. Then it registers a batch job of the driver, pinned to the node
+that baked the draft -- the image is in that node's cache and nowhere else -- and
+waits for it. The job's id is `box-store` for every version, which is the name of
+the variable the task reads the store from (`nomad/jobs/box-store`): Nomad gives a
+job's workload identity `read` and `list` on the variable named after its own job
+id, so a publish needs no ACL policy and no per-version setup. The version is the
+job's name (`box-publish-<version>`), which is what the job list shows. The task
+does what
 `images/publish.sh` does, in the same order and with the same lock:
 
 1. takes the store's lock, the object `box-base/.lock`: a record that says who
@@ -183,16 +188,24 @@ The store's url, its token, the header that token goes in and the scheme in fron
 of it reach the task as templated files, out of the variable `box store set`
 writes (below); the token is never in the job spec, in a task event or in a log.
 
-The job reads that variable through `deploy/acl/box-store.policy.hcl` attached
-to that job, never through a box's policy, and the job is purged when it ends.
+The job reads that variable through its own workload identity and no policy at all
+(`deploy/acl/README.md`), and it is purged when it ends.
+
+One name for every publish means one publish at a time: a second
+`box images publish` while one runs is refused with the image that holds the name
+-- `another publish is running: <image> (<arch>), job box-store; run this again
+when it ends, or "nomad job stop -purge box-store" if it is stuck` -- and it never
+stops the running one. That includes a publish that ran past its `--timeout` (exit
+`4`): the upload goes on, and the repeat is refused until it ends.
 
 It prints the version, the architecture, the sha256, the store, the image's url
 and the index's url, and the `box create` line for the image. `--json` gives
 `version`, `arch`, `sha256`, `size`, `store`, `url`, `index_url` and `node`.
 
-Exit codes are the page's: `0` published, `1` the job failed or no store is
-configured, `2` usage, `3` no node holds that draft, `4` the job did not finish
-within `--timeout` (default 30m).
+Exit codes are the page's: `0` published, `1` the job failed, no store is
+configured, or another publish holds the name, `2` usage, `3` no node holds that
+draft, `4` the job did not finish within `--timeout` (default 30m; it keeps
+running, and the name stays taken until it ends).
 
 ### `box bake <id> --name NAME [--version NAME-N] [--recipe FILE | --no-recipe] [--timeout D]`
 
@@ -358,9 +371,9 @@ names. `--json` gives `url`, `token` (`variable`, `template`, or empty for a sto
 written without authentication), `header`, `scheme`, `items` and `configured`; the
 token is never a value here either.
 
-A publish job reads that variable with a workload policy of its own
-(`deploy/acl/box-store.policy.hcl`); `deploy/acl/README.md` shows how it is
-attached to the job.
+A publish job reads that variable with its own workload identity and no policy
+(`deploy/acl/README.md`); the operator's own token reads and writes it, which is
+what `box store set` and `box store show` need.
 
 ### `box create <id> [flags]`
 
@@ -412,6 +425,14 @@ published images and the drafts.
 
 A box id is `[a-z0-9-]{1,40}`. A failed create removes the half-made box, so a
 failure leaves no disk behind.
+
+Some ids are reserved, because `box-<id>` is the job name: `store`, `executors`
+and `reap` are the jobs of the variables the whole cluster reads
+(`nomad/jobs/box-store`, `nomad/jobs/box-executors`, `nomad/jobs/box-reap`), and a
+job with one of those names reads the credential through its workload identity;
+`publish-*` and `bake-*` start the batch jobs of an image's life. `publisher` and
+`store2` are ordinary box ids: only the exact names and those two prefixes are
+reserved.
 
 **The node is shared, and free resources are there to be used.** A box is
 created whatever its size, as long as the node has the room: nothing here refuses

@@ -366,6 +366,41 @@ func jobStopped(job *api.Job) bool {
 	return job != nil && job.Stop != nil && *job.Stop
 }
 
+// earliestAllocation returns the oldest allocation of a list that is not
+// complete, and the oldest one at all when every one of them is done: a
+// publish's own allocation is the first its registration made.
+func earliestAllocation(allocs []*api.AllocationListStub) *api.AllocationListStub {
+	var best *api.AllocationListStub
+	older := func(alloc *api.AllocationListStub) bool {
+		if best == nil {
+			return true
+		}
+		if alloc.CreateIndex != best.CreateIndex {
+			return alloc.CreateIndex < best.CreateIndex
+		}
+		// Two allocations of one index cannot exist on a real cluster; the id
+		// keeps the answer the same when they do.
+		return alloc.ID < best.ID
+	}
+	for _, alloc := range allocs {
+		if alloc == nil || alloc.ClientStatus == "complete" {
+			continue
+		}
+		if older(alloc) {
+			best = alloc
+		}
+	}
+	if best != nil {
+		return best
+	}
+	for _, alloc := range allocs {
+		if alloc != nil && older(alloc) {
+			best = alloc
+		}
+	}
+	return best
+}
+
 // latestAllocation returns the newest allocation that is not complete.
 func latestAllocation(allocs []*api.AllocationListStub) *api.AllocationListStub {
 	var best *api.AllocationListStub
