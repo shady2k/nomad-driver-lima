@@ -340,8 +340,23 @@ func TestReapKeepsTheDiskDuringABake(t *testing.T) {
 }
 
 // TestReapKeepsTheDiskDuringAPublishOnItsNode: a publish reads an image from the
-// node the disk is on.
+// node the disk is on. Every publish is the job box-store, and the job list carries
+// no meta, so the allocation's job id is what says it is a publish.
 func TestReapKeepsTheDiskDuringAPublishOnItsNode(t *testing.T) {
+	ta := newReapApp(t)
+	ta.addBox(t, "dev1")
+	ta.stopForReap(t, "dev1")
+	ta.setReapClock(t, "dev1", reapNow.Add(-40*time.Hour))
+	ta.addWorkJob(t, boxPublishJobID, nil)
+
+	require.Equal(t, ExitOK, ta.run(t, "reap"), ta.errOut.String())
+	require.Contains(t, ta.errOut.String(), "a publish on its node is running")
+	ta.requireDiskKept(t, "dev1")
+}
+
+// TestReapKeepsTheDiskDuringAPublishOfAnOlderCLI: a publish an older CLI
+// registered under box-publish-<version> is still a publish on the disk's node.
+func TestReapKeepsTheDiskDuringAPublishOfAnOlderCLI(t *testing.T) {
 	ta := newReapApp(t)
 	ta.addBox(t, "dev1")
 	ta.stopForReap(t, "dev1")

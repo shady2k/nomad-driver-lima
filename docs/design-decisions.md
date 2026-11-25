@@ -525,6 +525,17 @@ from what the box looked like from outside.
 
 ## Images
 
+- **Every publish is the same Nomad job, `box-store`, with the version as its
+  name.** A publish reads its store from the variable `nomad/jobs/box-store`, and
+  Nomad gives a job's workload identity `read` and `list` on `nomad/jobs/<its own
+  job id>`; naming the job after the variable is therefore the whole permission
+  model -- no ACL policy, no management token per version, no secret to copy. One
+  name also means one publish at a time: a second run is refused, naming the image
+  that holds it, instead of purging an upload that still has a name to lose. A
+  `parameterized` job with `dispatch` was rejected because a publish has to be
+  pinned to the node that holds the draft, and a constraint on a dispatched child
+  cannot see the node meta the dispatcher would pass. A box cannot take the name:
+  `box create store` is refused (`internal/cli/jobspec.go`).
 - **Base images are pinned by sha256 through an index, not by a tag.** The index
   lists versions and architectures with `url`, `sha256` and `size`. The driver
   downloads, verifies and caches the image and refuses a corrupt cache entry.

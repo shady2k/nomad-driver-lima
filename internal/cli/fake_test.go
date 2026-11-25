@@ -70,10 +70,14 @@ type fakeCluster struct {
 	deletedVolumes map[string]*api.HostVolume
 	variables      map[string]*api.Variable
 	evals          map[string]*api.Evaluation
-	allocSeq       int
-	volumeSeq      int
-	variableSeq    uint64
-	registerNo     int
+	// allocSeq is the cluster's one increasing index: it numbers the allocations
+	// (CreateIndex) and the registrations (JobModifyIndex), which a real cluster
+	// also hands out from one sequence -- the allocation of a registration always
+	// comes after it.
+	allocSeq    int
+	volumeSeq   int
+	variableSeq uint64
+	registerNo  int
 
 	// registerErr makes RegisterJob fail.
 	registerErr error
@@ -120,6 +124,11 @@ type fakeCluster struct {
 	// of that job; a test uses it to be a `box start` that registers the job
 	// again between two reads. It runs with the cluster's lock held.
 	onJobRead func(c *fakeCluster, id string, call int)
+	// onRegisterNewJob runs at the start of every RegisterNewJob, before the
+	// cluster decides whether the id is taken; a test uses it to be a neighbour
+	// that registers between the caller's read and its own registration. It runs
+	// with the cluster's lock held.
+	onRegisterNewJob func(c *fakeCluster, job *api.Job)
 	// onDeleteHostVolume runs at the start of every DeleteHostVolume call and, when
 	// it returns an error, that is what the call answers. It runs with the
 	// cluster's lock held.
@@ -287,20 +296,56 @@ func (c *fakeCluster) RegisterJob(ctx context.Context, job *api.Job) (*api.JobRe
 		}
 		return nil, c.registerErr
 	}
+	resp := c.registerLocked(job)
+	if c.registerLostErr != nil {
+		// The server took the job; the answer never reached the caller.
+		return nil, c.registerLostErr
+	}
+	return resp, nil
+}
+
+// RegisterNewJob is EnforceRegister with index 0: it takes the job only when the
+// cluster holds none under its id, and answers the conflict Nomad answers.
+func (c *fakeCluster) RegisterNewJob(ctx context.Context, job *api.Job) (*api.JobRegisterResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	id := derefStr(job.ID, "")
+	c.record("RegisterNewJob " + id)
+	if c.registerErr != nil {
+		if c.registerErrAfter {
+			c.jobErr = c.registerErr
+		}
+		return nil, c.registerErr
+	}
+	if c.onRegisterNewJob != nil {
+		c.onRegisterNewJob(c, job)
+	}
+	if existing, ok := c.jobs[id]; ok {
+		return nil, fmt.Errorf("%s: job %q is at index %d, not 0", api.RegisterEnforceIndexErrPrefix, id, derefUint64(existing.JobModifyIndex, 0))
+	}
+	resp := c.registerLocked(job)
+	if c.registerLostErr != nil {
+		return nil, c.registerLostErr
+	}
+	return resp, nil
+}
+
+// registerLocked stores a job the way Nomad does: it exists from now on, at the
+// modify index of this registration. The cluster's lock is held.
+func (c *fakeCluster) registerLocked(job *api.Job) *api.JobRegisterResponse {
+	id := derefStr(job.ID, "")
 	c.registerNo++
+	c.allocSeq++
 	evalID := fmt.Sprintf("eval-%d", c.registerNo)
 	job.Status = strPtr("running")
 	job.Stop = boolPtr(false)
+	job.JobModifyIndex = uint64Ptr(uint64(c.allocSeq))
 	c.jobs[id] = job
 	c.evals[evalID] = &api.Evaluation{ID: evalID, JobID: id, Status: "complete"}
 	if c.onRegister != nil {
 		c.onRegister(c, job)
 	}
-	if c.registerLostErr != nil {
-		// The server took the job; the answer never reached the caller.
-		return nil, c.registerLostErr
-	}
-	return &api.JobRegisterResponse{EvalID: evalID}, nil
+	return &api.JobRegisterResponse{EvalID: evalID, JobModifyIndex: derefUint64(job.JobModifyIndex, 0)}
 }
 
 func (c *fakeCluster) StopJob(ctx context.Context, id string, purge bool) error {

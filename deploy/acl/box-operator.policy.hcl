@@ -71,8 +71,9 @@ namespace "default" {
       capabilities = ["read", "write", "destroy"]
     }
     # The operator's image store: `box store set` writes it, `box store show`
-    # reads it. A publish job reads it with a workload policy of its own
-    # (box-store.policy.hcl), never through this one.
+    # reads it. A publish job reads it through its own workload identity -- its
+    # job id is box-store, the variable's own name -- so no policy grants that
+    # read, here or anywhere else.
     path "nomad/jobs/box-store" {
       capabilities = ["read", "write", "destroy"]
     }

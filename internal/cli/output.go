@@ -366,6 +366,33 @@ func jobStopped(job *api.Job) bool {
 	return job != nil && job.Stop != nil && *job.Stop
 }
 
+// earliestAllocation returns the allocation with the oldest CreateIndex among
+// the ones a registration made: a publish's own allocation is the first its
+// registration made, whatever state it reached.
+//
+// The client status is not a filter. A publish's allocation is complete as soon
+// as it uploaded, while a neighbour's newer one can still run; skipping the
+// complete one would wait for an upload this command did not start and then
+// report the neighbour's result or its failure.
+func earliestAllocation(allocs []*api.AllocationListStub) *api.AllocationListStub {
+	var best *api.AllocationListStub
+	for _, alloc := range allocs {
+		if alloc == nil {
+			continue
+		}
+		if best == nil || alloc.CreateIndex < best.CreateIndex {
+			best = alloc
+			continue
+		}
+		// Two allocations of one index cannot exist on a real cluster; the id
+		// keeps the answer the same when they do.
+		if alloc.CreateIndex == best.CreateIndex && alloc.ID < best.ID {
+			best = alloc
+		}
+	}
+	return best
+}
+
 // latestAllocation returns the newest allocation that is not complete.
 func latestAllocation(allocs []*api.AllocationListStub) *api.AllocationListStub {
 	var best *api.AllocationListStub

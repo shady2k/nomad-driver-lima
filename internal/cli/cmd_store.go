@@ -14,15 +14,16 @@ import (
 // where it is, and the token that may write to it.
 //
 // It is its own variable, not part of the executor credentials, for two reasons: a
-// box never needs it (a box downloads an image, it never publishes one), and a
-// publish job is a sibling of it, so only a publish job's workload policy grants
-// the read (deploy/acl/box-store.policy.hcl).
+// box never needs it (a box downloads an image, it never publishes one), and its
+// path is the publish job's own id -- box-store -- so the publish task reads it
+// with the workload identity Nomad gives every job for free, and no ACL policy
+// grants it to anyone else.
 //
 // The URL and the token are rendered into the publish task's secrets by templates,
 // so the job spec holds the item names and nothing else. The token may also be a
 // template that reads it from Vault at render time, which is the form to prefer:
 // then even the Variable holds a path.
-const boxStoreVariable = "nomad/jobs/box-store"
+const boxStoreVariable = "nomad/jobs/" + boxPublishJobID
 
 // storeOutput is the JSON document of `box store show` and `box store set`.
 type storeOutput struct {

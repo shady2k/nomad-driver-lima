@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/hashicorp/nomad/api"
 )
@@ -30,6 +31,10 @@ type Nomad interface {
 	JobAllocations(ctx context.Context, jobID string) ([]*api.AllocationListStub, error)
 	// RegisterJob submits a job and returns the evaluation it created.
 	RegisterJob(ctx context.Context, job *api.Job) (*api.JobRegisterResponse, error)
+	// RegisterNewJob submits a job only when the cluster holds none under its id:
+	// another registration that got there first answers a conflict, and so does
+	// one that lands between the caller's read and this call.
+	RegisterNewJob(ctx context.Context, job *api.Job) (*api.JobRegisterResponse, error)
 	// StopJob stops a job; purge also removes it and its history.
 	StopJob(ctx context.Context, id string, purge bool) error
 
@@ -137,6 +142,20 @@ func (n *nomadAPI) JobAllocations(ctx context.Context, jobID string) ([]*api.All
 func (n *nomadAPI) RegisterJob(ctx context.Context, job *api.Job) (*api.JobRegisterResponse, error) {
 	resp, _, err := n.c.Jobs().Register(job, nil)
 	return resp, err
+}
+
+func (n *nomadAPI) RegisterNewJob(ctx context.Context, job *api.Job) (*api.JobRegisterResponse, error) {
+	// The index is zero: "register only if this job exists at index 0", which is
+	// to say if it does not exist at all. Nomad decides that in one transaction.
+	resp, _, err := n.c.Jobs().EnforceRegister(job, 0, nil)
+	return resp, err
+}
+
+// isRegisterIndexErr reports whether Nomad refused a registration because the
+// job is not at the index the caller enforced: with RegisterNewJob that means the
+// job exists.
+func isRegisterIndexErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), api.RegisterEnforceIndexErrPrefix)
 }
 
 func (n *nomadAPI) StopJob(ctx context.Context, id string, purge bool) error {

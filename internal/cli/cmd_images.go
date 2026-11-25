@@ -3,8 +3,11 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/hashicorp/nomad/api"
 )
 
 // imagesOutput is the JSON document of `box images`.
@@ -336,18 +339,15 @@ func (a *App) cmdImagesPublish(ctx context.Context, args []string) error {
 		a.note("publishing %s (%s, sha256 %s) from node %s", draft.Version, draft.Arch,
 			shortSHA(draft.SHA256), dash(draft.NodeName))
 	}
-	evalID, since, err := a.registerWorkJob(ctx, job)
-	if err != nil {
-		return wrapf(err, "Nomad rejected the publish job %s", jobID)
-	}
-	alloc, err := a.waitForJobDone(ctx, jobID, evalID, since, *timeout)
+	evalID, since, err := a.registerPublishJob(ctx, job)
 	if err != nil {
 		return err
 	}
-	if purgeErr := a.Nomad.StopJob(ctx, jobID, true); purgeErr != nil && !isNotFoundErr(purgeErr) {
-		a.note("note: the publish job %s could not be purged (%s); `nomad job stop -purge %s` removes it",
-			jobID, oneLine(purgeErr.Error(), 120), jobID)
+	alloc, err := a.waitForPublishDone(ctx, jobID, evalID, since, *timeout)
+	if err != nil {
+		return err
 	}
+	a.purgePublishJob(ctx, since)
 	if failed := allocFailureText(alloc); failed != "" && !allocSucceeded(alloc) {
 		return errorf("publishing %s failed: %s (`nomad alloc logs` of %s has the rest)", draft.Version, failed, shortID(alloc.ID))
 	}
@@ -376,6 +376,86 @@ func (a *App) cmdImagesPublish(ctx context.Context, args []string) error {
 	a.note("")
 	a.note("every node can create a box from it now: box create <id> --image %s --arch %s", out.Version, out.Arch)
 	return nil
+}
+
+// registerPublishJob starts a publish under the one job id every publish uses.
+//
+// The id is box-store, which is also the name of the variable the publish task
+// reads its store from, so two publishes can never run at once: a second one is
+// refused with the run that holds the name, and never purges it -- the first one
+// is uploading an image. The registration itself is atomic (Jobs().EnforceRegister
+// with index 0: "only if this job does not exist"), so a publish that slipped in
+// between the read and the register wins and this run is refused the same way.
+//
+// A dead job under the name is the leftover of a publish that ended: it is
+// purged, or Nomad would answer the registration with the old run.
+func (a *App) registerPublishJob(ctx context.Context, job *api.Job) (string, uint64, error) {
+	jobID := derefStr(job.ID, "")
+	current, err := a.Nomad.Job(ctx, jobID)
+	switch {
+	case err != nil && !isNotFoundErr(err):
+		return "", 0, wrapf(err, "cannot read the publish job %s", jobID)
+	case current != nil && derefStr(current.Status, "") != "dead":
+		return "", 0, errorf("%s", publishRunningNote(current))
+	case current != nil:
+		if err := a.Nomad.StopJob(ctx, jobID, true); err != nil && !isNotFoundErr(err) {
+			return "", 0, wrapf(err, "the publish job %s of the last run could not be purged", jobID)
+		}
+	}
+	resp, err := a.Nomad.RegisterNewJob(ctx, job)
+	if err != nil {
+		if !isRegisterIndexErr(err) {
+			return "", 0, wrapf(err, "Nomad rejected the publish job %s", jobID)
+		}
+		// Lost the race: another publish took the name between the read and the
+		// register. It is read back for the sentence that names it; a job that
+		// cannot be read still gets the refusal.
+		other, _ := a.Nomad.Job(ctx, jobID)
+		return "", 0, errorf("%s", publishRunningNote(other))
+	}
+	if resp == nil {
+		return "", 0, nil
+	}
+	return resp.EvalID, resp.JobModifyIndex, nil
+}
+
+// publishRunningNote is what a second publish is told: which one holds the name.
+func publishRunningNote(current *api.Job) string {
+	meta := map[string]string{}
+	if current != nil && current.Meta != nil {
+		meta = current.Meta
+	}
+	image, arch := meta["image"], meta["arch"]
+	if image == "" {
+		image = "another image"
+	}
+	if arch == "" {
+		arch = "unknown arch"
+	}
+	return fmt.Sprintf("another publish is running: %s (%s), job %s; run this again when it ends, "+
+		"or \"nomad job stop -purge %s\" if it is stuck", image, arch, boxPublishJobID, boxPublishJobID)
+}
+
+// purgePublishJob removes the publish job this run registered, and never another
+// run's: every publish is the job box-store, so the job that is there now is this
+// run's only if its modify index is the one this run's registration returned.
+func (a *App) purgePublishJob(ctx context.Context, since uint64) {
+	current, err := a.Nomad.Job(ctx, boxPublishJobID)
+	if err != nil {
+		if isNotFoundErr(err) {
+			return
+		}
+		a.note("note: the publish job %s could not be read to purge it (%s); `nomad job stop -purge %s` removes it",
+			boxPublishJobID, oneLine(err.Error(), 120), boxPublishJobID)
+		return
+	}
+	if current == nil || derefUint64(current.JobModifyIndex, 0) != since {
+		return
+	}
+	if err := a.Nomad.StopJob(ctx, boxPublishJobID, true); err != nil && !isNotFoundErr(err) {
+		a.note("note: the publish job %s could not be purged (%s); `nomad job stop -purge %s` removes it",
+			boxPublishJobID, oneLine(err.Error(), 120), boxPublishJobID)
+	}
 }
 
 // printPlatforms writes the published platform bundles, or one line that says

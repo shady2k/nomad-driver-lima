@@ -453,7 +453,15 @@ func workOnBox(id, nodeID string, jobs []*api.JobListStub, allocs []*api.Allocat
 		if alloc == nil || isTerminalAlloc(alloc.ClientStatus) || alloc.NodeID != nodeID {
 			continue
 		}
+		// A publish is the job box-store for every version, and the job list
+		// carries no meta (Jobs().List does not return it), so the allocation's job
+		// id is what says it is a publish. The meta marker is kept for a publish
+		// an older CLI registered under box-publish-<version>.
+		publish := alloc.JobID == boxPublishJobID
 		if stub := byID[alloc.JobID]; stub != nil && stub.Meta[boxWorkMarker] == "publish" {
+			publish = true
+		}
+		if publish {
 			return fmt.Sprintf("a publish on its node is running (job %s)", alloc.JobID)
 		}
 	}

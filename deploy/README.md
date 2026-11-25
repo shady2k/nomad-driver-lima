@@ -505,6 +505,16 @@ Anything bigger is a Nomad installation of its own (three servers,
   reads each policy first, so a second run reports `changed=0`. The capabilities
   each policy grants, and why a box needs a job-attached policy at all, are in
   `deploy/acl/README.md`.
+- **An image publish needs no ACL policy.** Every publish is the job `box-store`,
+  which is the name of the variable `nomad/jobs/box-store` the task reads the store
+  from: Nomad gives a job's workload identity `read` and `list` on
+  `nomad/jobs/<its own job id>`, so the read needs nothing attached and there is
+  no per-version setup. Older releases registered `box-publish-<version>` and
+  needed a policy per version (`box-store-publish-<version>`); the CLI `0.1.36`
+  registers `box-store` instead, so those policies are no longer used from
+  `0.1.36` on. A CLI older than `0.1.36` (such as `0.1.35`) still needs them:
+  remove them (`nomad acl policy list`) only after every CLI on the cluster is
+  upgraded, and only with the cluster owner's consent.
 - **A CLI token that cannot carry all of `box-operator` can carry the clock
   alone.** `box-clock` is one rule on `nomad/jobs/box-<id>/stopped`: read for
   `box ls`, `box status` and `box reap --dry-run`, write for the pass that sets
